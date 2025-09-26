@@ -1,0 +1,52 @@
+name: tp-distribuidos-grupo13
+services:
+  server:
+    container_name: server
+    image: server:latest
+    entrypoint: python3 /main.py
+    environment:
+      - PYTHONUNBUFFERED=1
+      - CLI_CLIENTS=5
+    networks:
+      - testing_net
+    volumes:
+      - ./server/config.ini:/config.ini
+
+  # Ejemplos de clientes (pueden ser generados por el script)
+  client1:
+    container_name: client1
+    image: client:latest
+    entrypoint: /client
+    environment:
+      - CLI_ID=1
+      - DATA_MODE=tree     # opcional, por si tu cliente usa modo árbol
+    networks:
+      - testing_net
+    depends_on:
+      - server
+    volumes:
+      # Mapa un árbol completo de datos para el cliente 1
+      - ./.data/client-1/:/data:ro
+      - ./client/config.yaml:/config.yaml
+
+  client2:
+    container_name: client2
+    image: client:latest
+    entrypoint: /client
+    environment:
+      - CLI_ID=2
+      - DATA_MODE=tree
+    networks:
+      - testing_net
+    depends_on:
+      - server
+    volumes:
+      - ./.data/client-2/:/data:ro
+      - ./client/config.yaml:/config.yaml
+
+networks:
+  testing_net:
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.25.125.0/24
