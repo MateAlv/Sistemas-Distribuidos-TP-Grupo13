@@ -95,6 +95,7 @@ class Sender:
             CLI_ID: <id>\n
             FILENAME: <rel_path>\n
             SIZE: <size>\n
+            IS_FINAL: 0\n
             \n
         """
         self._ensure_socket()
