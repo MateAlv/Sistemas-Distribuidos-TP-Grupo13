@@ -4,17 +4,9 @@ import socket
 import logging
 from typing import Dict, Iterable, List, Optional, Tuple
 
-from common.batch_reader import BatchReader  # implementar luego
+from common.batch_reader import BatchReader
 
 class Client:
-    """
-    Cliente que:
-      - Abre 1 conexión TCP (por defecto) o 1 por archivo (configurable)
-      - Handshake simple (opcional)
-      - Recorre un directorio y envía todos los archivos que cumplan el filtro
-      - Por cada archivo, envía un header (CLI_ID, FILENAME, SIZE) y luego el contenido por batches
-      - Espera 'OK\\n' del servidor después de cada archivo
-    """
 
     def __init__(self, config: Dict, default_data_dir: str = "/data") -> None:
         self.id: str = str(config.get("id", ""))
