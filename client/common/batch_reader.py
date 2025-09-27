@@ -160,7 +160,6 @@ class DirectoryBatchReader:
             self.total_bytes += size
 
             if size == 0:
-                # Archivo vacío: igual emitimos un chunk "vacío"
                 self.total_chunks += 1
                 yield FileChunk(rel_path=rel_path, file_size=0, data=b"", first=True, last=True)
                 continue

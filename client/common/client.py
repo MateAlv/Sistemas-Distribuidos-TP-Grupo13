@@ -15,7 +15,7 @@ class Client:
         Repetir por archivo:
           F:\n CLI_ID:.. FILENAME:.. SIZE:..\n\n + cuerpo (SIZE bytes) → I:O
         I:F\n → I:O (opcional)
-    - Modo 'per_file': 1 conexión por archivo (útil si el server aún no soporta multiarchivo).
+
     """
 
     def __init__(self, config: Dict, default_data_dir: str = "/data") -> None:
