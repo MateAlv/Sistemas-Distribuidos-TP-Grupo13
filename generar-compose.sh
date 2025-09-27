@@ -64,4 +64,4 @@ networks:
         - subnet: 172.25.125.0/24
 YAML
 
-echo "✓ Compose generado en: ${OUTPUT_FILE}"
+echo "Compose generado en: ${OUTPUT_FILE}"
