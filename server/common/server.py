@@ -1,226 +1,269 @@
+# server/common/server.py
+from __future__ import annotations
+
 import os
 import socket
-import logging
 import threading
-from .utils import (deserialize_batch, store_bets, load_winning_bets, BATCH_SEPARATOR)
+import logging
+from typing import Dict, Tuple, Optional
 
-# File lock for thread-safe file operations
-_FILE_LOCK = threading.Lock()
+_MESSAGE_DELIM = b"\n"
+_HEADER_BLANKLINE = b"\n\n"
 
-# Message protocol constants (two-line messages everywhere)
-MESSAGE_DELIMITER = b"\n"
+DEFAULT_BIND_IP = os.getenv("SERVER_IP", "0.0.0.0")
+DEFAULT_CONNECT_TIMEOUT = float(os.getenv("SERVER_CONNECT_TIMEOUT", "10"))
+DEFAULT_IO_TIMEOUT = float(os.getenv("SERVER_IO_TIMEOUT", "120"))
+SAVE_DIR = os.getenv("SERVER_SAVE_DIR", "").strip()  # si vacío => no guarda a disco
 
-BATCH_PREFIX    = "S:"   # header: S:<count>
-FINISHED_PREFIX = "F:"   # header: F:1          | body: FINISHED
-WINNERS_PREFIX  = "W:"   # header: W:<count>    | body: dni1~dni2 or 'N'
-RESP_PREFIX     = "R:"   # header: R:1          | body: OK/FAIL
-
-OK_BODY         = "OK"
-FAIL_BODY       = "FAIL"
-FINISHED_BODY   = "FINISHED"
 
 class Server:
-    def __init__(self, port, listen_backlog):
-        self.port = port
-        self.listen_backlog = listen_backlog
-        
-        # Socket setup
-        self._server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self._server_socket.bind(('', port))
-        self._server_socket.listen(listen_backlog)
-        logging.debug(
-            f"action: fd_open | result: success | kind: listen_socket | fd:{self._server_socket.fileno()} | port:{port}"
-        )
-        
-        # Server state
+    """
+    Server TCP que soporta:
+      - Handshake opcional: 'HELLO <id>\\n' -> 'OK\\n'
+      - Múltiples archivos por conexión:
+          Header (CLI_ID/FILENAME/SIZE + blank line) y luego SIZE bytes
+          Responde 'OK\\n' por cada archivo
+      - Mensaje final opcional: 'F:FINISHED\\n'
+    """
+
+    def __init__(self, port: int, listen_backlog: int) -> None:
+        self.port = int(port)
+        self.listen_backlog = int(listen_backlog)
+        self.host = DEFAULT_BIND_IP
+
         self._running = True
-        
-        # Thread management
-        self.client_threads = []
-        
-        # Get expected agencies from environment
-        expected_agencies = int(os.getenv('CLI_CLIENTS', '5'))
+        self._server_socket: Optional[socket.socket] = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._server_socket.bind((self.host, self.port))
+        self._server_socket.listen(self.listen_backlog)
+        logging.debug(
+            "action: fd_open | result: success | kind: listen_socket | fd:%s | ip:%s | port:%s",
+            self._server_socket.fileno(), self.host, self.port
+        )
 
-        # Barrier and Locks for lottery synchronization
-        self.lottery_barrier = threading.Barrier(expected_agencies)
-        
-        logging.info(f"action: server_init | result: success | expected_agencies: {expected_agencies}")
-        
+        self._threads = []
 
-    def run(self):
-        """Server loop - accept connections and spawn threads"""
-        logging.info("action: accept_connections | result: in_progress")
-        
+        if SAVE_DIR:
+            try:
+                os.makedirs(SAVE_DIR, exist_ok=True)
+                logging.info("action: save_dir_ready | dir: %s", SAVE_DIR)
+            except Exception as e:
+                logging.warning("action: save_dir_create_fail | dir: %s | error: %r", SAVE_DIR, e)
+
+    # ---------------------------------------------------------------------
+
+    def run(self) -> None:
+        logging.info("action: accept_loop | result: start | ip:%s | port:%s | backlog:%s",
+                     self.host, self.port, self.listen_backlog)
         try:
             while self._running:
                 try:
                     client_sock, addr = self._server_socket.accept()
-                    if not client_sock:
-                        logging.error("action: accept_connection | result: fail | reason: null_socket")
-                        continue
-                    logging.debug(
-                        f"action: fd_open | result: success | kind: client_socket | fd:{client_sock.fileno()} | peer:{addr[0]}:{addr[1]}"
-                    )
-                    logging.debug(f"action: accept_connection | result: success | ip: {addr[0]}")
-                    
-                    # Create thread to handle client
-                    client_thread = threading.Thread(
-                        target=self.__handle_client_connection,
-                        args=(client_sock,)
-                    )
-                    client_thread.daemon = False  # Must finish properly
-                    client_thread.start()
-                    
-                    # Track active threads
-                    self.client_threads.append(client_thread)
-                    
-                    # Cleanup finished threads
-                    self.__cleanup_finished_threads()
-                    
-                except OSError:
-                    # Socket closed during shutdown
+                except OSError as e:
                     if self._running:
-                        logging.error("action: accept_connection | result: fail")
+                        logging.error("action: accept_fail | error: %r", e)
                     break
-                    
-        except Exception as e:
-            logging.error(f"action: server_loop | result: fail | error: {e}")
+
+                if not client_sock:
+                    logging.error("action: accept_null_socket")
+                    continue
+
+                logging.debug("action: fd_open | result: success | kind: client_socket | fd:%s | peer:%s:%s",
+                              client_sock.fileno(), addr[0], addr[1])
+
+                t = threading.Thread(target=self._handle_client, args=(client_sock, addr), daemon=True)
+                t.start()
+                self._threads.append(t)
+                self._threads = [th for th in self._threads if th.is_alive()]
         finally:
             self.__graceful_shutdown()
 
-    def __cleanup_finished_threads(self):
-        """Remove finished threads from tracking list"""
-        self.client_threads = [t for t in self.client_threads if t.is_alive()]
-        
-    def __handle_client_connection(self, client_sock):
-        """Handle communication with a connected client"""
-        client_agency = None
-        
-        try:
-            while True:
-                # Receive a complete message (header + body)         
-                header, body = self.__receive_two_lines(client_sock)
-                if header.startswith(BATCH_PREFIX):
-                    # header = "S:<n>", body = "bet1~...~betN"
-                    bets = deserialize_batch(f"{header}\n{body}")
-                    if bets:
-                        client_agency = bets[0].agency
-                        with _FILE_LOCK:
-                            store_bets(bets)
-                        logging.info(f"action: apuesta_recibida | result: success | cantidad: {len(bets)}")
-                    self.__send_message(client_sock, f"{RESP_PREFIX}1", OK_BODY)
+    # ---------------------------------------------------------------------
 
-                elif header.startswith(FINISHED_PREFIX) and body == FINISHED_BODY:
-                    # header = "F:1", body = "FINISHED"
-                    self.__handle_finished_and_return_winners(client_sock, client_agency)
+    def _handle_client(self, sock: socket.socket, addr: Tuple[str, int]) -> None:
+        peer = f"{addr[0]}:{addr[1]}"
+        try:
+            sock.settimeout(DEFAULT_IO_TIMEOUT)
+            logging.info("action: client_connected | peer:%s", peer)
+
+            # -------- Handshake opcional --------
+            self._maybe_handshake(sock)
+
+            # -------- Loop de recepción de archivos --------
+            while True:
+                headers = self._recv_headers(sock)
+                if headers is None:
+                    # EOF limpio del cliente
+                    logging.info("action: client_eof | peer:%s", peer)
                     break
 
+                # Soporte de FIN opcional
+                if len(headers) == 1 and headers.get("F", "") == "FINISHED":
+                    logging.info("action: client_finished | peer:%s", peer)
+                    self._send_line(sock, b"OK")
+                    continue
+
+                cli_id = headers.get("CLI_ID", "?")
+                fname = headers.get("FILENAME", "unknown")
+                size_s = headers.get("SIZE", "0")
+                try:
+                    size = int(size_s)
+                except Exception:
+                    size = 0
+
+                logging.info("action: recv_file_start | peer:%s | cli_id:%s | file:%s | size:%s",
+                             peer, cli_id, fname, size)
+
+                # Recibir exactamente 'size' bytes
+                received = 0
+                if SAVE_DIR:
+                    # Guardar en disco preservando subdirectorios
+                    safe_path = os.path.normpath(fname).lstrip("/\\")
+                    out_path = os.path.join(SAVE_DIR, safe_path)
+                    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+                    with open(out_path, "wb") as f:
+                        received = self._recv_exact(sock, size, sink=f.write)
                 else:
-                    logging.warning(f"action: unknown_message | header: {header} | body: {body}")
-                    self.__send_message(client_sock, f"{RESP_PREFIX}1", FAIL_BODY)
-                    
+                    received = self._recv_exact(sock, size)  # descarta
+
+                logging.info("action: recv_file_end | peer:%s | cli_id:%s | file:%s | bytes:%s",
+                             peer, cli_id, fname, received)
+
+                # ACK por archivo
+                self._send_line(sock, b"OK")
+
         except Exception as e:
-            logging.error(f"action: client_handler_error | error: {e}")
+            logging.error("action: client_handler_error | peer:%s | error:%r", peer, e)
         finally:
             try:
-                fd = client_sock.fileno()
+                fd = sock.fileno()
             except Exception:
                 fd = "unknown"
             try:
-                client_sock.close()
-                logging.debug(f"action: fd_close | result: success | kind: client_socket | fd:{fd}")
+                sock.close()
+                logging.debug("action: fd_close | result: success | kind: client_socket | fd:%s", fd)
             except Exception:
                 pass
 
-    def __handle_finished_and_return_winners(self, client_sock, client_agency):
-        """Handle FINISHED message - wait for lottery and return winners"""
-        winning_dnis = [] 
+    # ---------------------------------------------------------------------
+    # Lectura / Escritura de protocolo
+    # ---------------------------------------------------------------------
+
+    def _maybe_handshake(self, sock: socket.socket) -> None:
+        """
+        Si el cliente envía inmediatamente 'HELLO <id>\\n', respondemos 'OK\\n'.
+        Si llega otra cosa (o tiempo), seguimos normal (no obligatorio).
+        """
+        sock.settimeout(1.5)  # breve timeout para handshake
         try:
-            try:
-                # Wait for all agencies to reach this point
-                index = self.lottery_barrier.wait(timeout=120)
-                if index == 0:  # First past barrier logs lottery
-                    logging.info("action: sorteo | result: success")
-            except Exception as e:
-                logging.error(f"action: lottery_barrier_error | error: {e}")
+            line = self._recv_line(sock)
+        except socket.timeout:
+            # No hubo handshake; seguimos
+            sock.settimeout(DEFAULT_IO_TIMEOUT)
+            return
+        except Exception:
+            sock.settimeout(DEFAULT_IO_TIMEOUT)
+            return
 
-            # Lottery is complete - load and return winners for this agency - THREAD SAFETY FIRST
-            with _FILE_LOCK:
-                winning_dnis = load_winning_bets(client_agency)
+        sock.settimeout(DEFAULT_IO_TIMEOUT)
 
-            if winning_dnis:
-                header = f"{WINNERS_PREFIX}{len(winning_dnis)}"  # e.g., "W:3"
-                body   = BATCH_SEPARATOR.join(winning_dnis)      # "dni1~dni2~dni3"
-            else:
-                header = f"{WINNERS_PREFIX}0"                    # "W:0"
-                body   = "N"                                     # "N"
+        if not line:
+            return
 
-            self.__send_message(client_sock, header, body)
+        try:
+            text = line.decode("utf-8", errors="replace")
+        except Exception:
+            text = ""
 
-            logging.info(
-                f"action: winners_sent | result: success | agency: {client_agency} | cant_ganadores: {len(winning_dnis)}"
-            )
+        if text.startswith("HELLO"):
+            logging.debug("action: handshake_ok | line:%r", text)
+            self._send_line(sock, b"OK")
+        else:
+            # No era handshake: probablemente ya sea el comienzo de headers
+            # reinyectamos en un buffer local simulando que no lo consumimos.
+            # Para simplificar, si no es HELLO, asumimos que era ruido y seguimos.
+            logging.debug("action: handshake_skip | line:%r", text)
 
-        except Exception as e:
-            logging.error(f"action: client_handler_error | error: {e}")
-            try:
-                self.__send_message(client_sock, f"{RESP_PREFIX}1", FAIL_BODY)  # "R:1\nFAIL\n"
-            except:
-                pass
-
-    def __receive_line(self, client_sock, initial_buffer=b""):
+    def _recv_headers(self, sock: socket.socket) -> Optional[Dict[str, str]]:
         """
-        Read bytes from the socket until a newline ('\n') is found.
-        Returns (decoded_line, remaining_buffer).
+        Lee cabeceras tipo:
+            KEY: VALUE\\n
+            ...
+            \\n
+        Devuelve dict con keys en mayúsculas.
+        Si el cliente cerró la conexión en silencio, devuelve None.
         """
-        buffer = initial_buffer
-        while b"\n" not in buffer:
-            chunk = client_sock.recv(1024)
+        buf = bytearray()
+        while True:
+            chunk = sock.recv(1)
             if not chunk:
-                raise OSError("Connection closed before complete line was received")
-            buffer += chunk
+                # conexión cerrada; si no hay nada, es EOF limpio
+                if not buf:
+                    return None
+                break
+            buf += chunk
+            if buf.endswith(_HEADER_BLANKLINE):
+                break
 
-        newline_idx = buffer.find(b"\n")
-        line = buffer[:newline_idx].decode("utf-8").strip()
-        rest = buffer[newline_idx + 1:]
-        return line, rest
+        raw = buf.decode("utf-8", errors="replace")
+        headers: Dict[str, str] = {}
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            if ":" in line:
+                k, v = line.split(":", 1)
+                headers[k.strip().upper()] = v.strip()
+            elif line.startswith("F:"):
+                # Soporte de 'F:FINISHED'
+                headers["F"] = line[2:].strip()
+        return headers
 
-    def __receive_two_lines(self, client_sock):
+    def _recv_exact(self, sock: socket.socket, nbytes: int, *, sink=None) -> int:
         """
-        Receive exactly two lines (header + body) from the socket.
+        Lee exactamente nbytes del socket. Si 'sink' es una función (p. ej. f.write),
+        envía cada chunk allí; si no, descarta. Devuelve bytes recibidos.
         """
-        header, rest = self.__receive_line(client_sock)
-        body, _ = self.__receive_line(client_sock, initial_buffer=rest)
-        return header, body
+        remaining = nbytes
+        total = 0
+        CHUNK = 64 * 1024
+        while remaining > 0:
+            to_read = CHUNK if remaining > CHUNK else remaining
+            data = sock.recv(to_read)
+            if not data:
+                raise OSError(f"connection closed early; remaining={remaining}")
+            total += len(data)
+            remaining -= len(data)
+            if sink:
+                sink(data)
+        return total
 
-    def __send_message(self, client_sock, header: str, body: str):
-        """
-        Send two lines (header + body) ensuring all bytes are written.
-        Example:
-        "W:2\n12345678~87654321\n"
-        "W:0\nN\n"
-        """
-        full = f"{header}\n{body}\n".encode("utf-8")
-        total_sent = 0
-        while total_sent < len(full):
-            sent = client_sock.send(full[total_sent:])
+    def _recv_line(self, sock: socket.socket) -> bytes:
+        buf = bytearray()
+        while True:
+            b = sock.recv(1)
+            if not b:
+                break
+            buf += b
+            if buf.endswith(_MESSAGE_DELIM):
+                break
+        return bytes(buf).rstrip(b"\r\n")
+
+    def _send_line(self, sock: socket.socket, line: bytes) -> None:
+        """Envía `line + \\n` asegurando escritura completa."""
+        data = line + _MESSAGE_DELIM
+        view = memoryview(data)
+        while view:
+            sent = sock.send(view)
             if sent == 0:
-                raise OSError("Socket connection broken")
-            total_sent += sent
+                raise OSError("socket send returned 0")
+            view = view[sent:]
 
-    def _begin_shutdown(self, signum, frame):
-        """
-        Handle shutdown signal
+    # ---------------------------------------------------------------------
 
-        If the server receives a SIGTERM signal, this handler ensures it
-        starts the shutdown process.
-        """
+    def _begin_shutdown(self, signum, frame) -> None:
         logging.info("action: sigterm_received | result: success")
         self._running = False
-        try:
-            self.lottery_barrier.abort()
-        except Exception:
-            pass
         if self._server_socket:
             try:
                 fd = self._server_socket.fileno()
@@ -228,18 +271,13 @@ class Server:
                 fd = "unknown"
             try:
                 self._server_socket.close()
-                logging.debug(f"action: fd_close | result: success | kind: listen_socket | fd:{fd}")
+                logging.debug("action: fd_close | result: success | kind: listen_socket | fd:%s", fd)
             except Exception as e:
-                logging.warning(f"action: listen_close | result: fail | error:{e}")
+                logging.warning("action: listen_close_fail | error:%r", e)
 
-    def __graceful_shutdown(self):
-        """Wait for all client threads to finish"""
+    def __graceful_shutdown(self) -> None:
         logging.info("action: shutdown | result: in_progress")
-
-        # Stop accepting new connections
         self._running = False
-        
-        # Close server socket if not already closed
         try:
             if self._server_socket:
                 try:
@@ -247,18 +285,11 @@ class Server:
                 except Exception:
                     fd = "unknown"
                 self._server_socket.close()
-                logging.debug(f"action: fd_close | result: success | kind: listen_socket | fd:{fd}")
+                logging.debug("action: fd_close | result: success | kind: listen_socket | fd:%s", fd)
         except Exception:
             pass
-            
-        # Wait for all client threads to complete their work
-        active_threads = [t for t in self.client_threads if t.is_alive()]
-        if active_threads:
-            logging.info(f"action: waiting_for_threads | count: {len(active_threads)}")
-            
-            for thread in active_threads:
-                thread.join(timeout=30)  # Wait max 30 seconds per thread
-                if thread.is_alive():
-                    logging.warning("action: thread_timeout | result: warning")
 
+        alive = [t for t in self._threads if t.is_alive()]
+        for t in alive:
+            t.join(timeout=30)
         logging.info("action: server_shutdown | result: success")
