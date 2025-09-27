@@ -2,14 +2,24 @@
 import os
 import socket
 import logging
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from common.batch_reader import BatchReader
 
+
 class Client:
+    """
+    - Conexión persistente (default): 1 TCP para TODOS los archivos del directorio.
+    - Por cada archivo:
+        Header (CLI_ID/FILENAME/SIZE + blank line) + cuerpo en batches
+        Espera 'OK\\n' del server, SIN cerrar escritura.
+    - Al final:
+        Envía 'F:FINISHED\\n' y hace shutdown(SHUT_WR) una sola vez.
+    """
 
     def __init__(self, config: Dict, default_data_dir: str = "/data") -> None:
         self.id: str = str(config.get("id", ""))
+
         mp = config.get("message_protocol", {}) or {}
         self.batch_size: int = int(mp.get("batch_size", 100))
         self.success_resp: bytes = str(mp.get("success_response", "OK")).encode("utf-8")
@@ -17,36 +27,29 @@ class Client:
 
         self.finished_header: str = str(mp.get("finished_header", "F:"))
         self.finished_body: str = str(mp.get("finished_body", "FINISHED"))
-
         self.field_separator: str = str(mp.get("field_separator", ";"))
         self.batch_separator: str = str(mp.get("batch_separator", "~"))
+        self.handshake_hello: str = str(mp.get("hello", "HELLO"))
 
-        # Dirección del servidor "host:port"
         self.server_address_str: str = str(config.get("server_address", "server:5000"))
         self.server_host, self.server_port = self._parse_host_port(self.server_address_str)
 
-        # Directorio de datos
         self.data_dir: str = str(config.get("data_dir", default_data_dir))
 
-        # Modo de conexión: "single" (persistente) o "per_file"
+        # Opcionales
         conn_cfg = config.get("connection", {}) or {}
         self.connection_mode: str = str(conn_cfg.get("mode", "single")).lower().strip()
         if self.connection_mode not in {"single", "per_file"}:
             self.connection_mode = "single"
+        self.connect_timeout: float = float(conn_cfg.get("connect_timeout", 10))
+        self.io_timeout: float = float(conn_cfg.get("io_timeout", 30))
 
-        # Filtro extensiones (opcional): e.g., [".csv"] — si vacío, toma todos los archivos
         data_cfg = config.get("data", {}) or {}
         self.allowed_exts: List[str] = [e.lower() for e in data_cfg.get("extensions", [])]
 
-        # Timeouts opcionales (segundos)
-        self.connect_timeout: Optional[float] = float(conn_cfg.get("connect_timeout", 10)) if "connect_timeout" in conn_cfg else 10.0
-        self.io_timeout: Optional[float] = float(conn_cfg.get("io_timeout", 30)) if "io_timeout" in conn_cfg else 30.0
-
-        # Handshake opcional
+        # Handshake on/off (si no viene, asumimos habilitado)
         hs_cfg = config.get("handshake", {}) or {}
         self.handshake_enabled: bool = bool(hs_cfg.get("enabled", True))
-        self.handshake_hello: str = str(hs_cfg.get("hello", "HELLO"))
-        # Si handshake espera un OK, reusamos success_resp + message_delim
 
         logging.debug(
             "client_init | id=%s host=%s port=%s data_dir=%s mode=%s batch_size=%s",
@@ -63,20 +66,37 @@ class Client:
             return
 
         if self.connection_mode == "single":
-            logging.info("Usando conexión TCP persistente (single) para %d archivo(s)", len(files))
+            logging.info("Conexión TCP persistente (single) para %d archivo(s)", len(files))
             with self._open_socket() as sock:
                 self._maybe_handshake(sock)
+
                 for abs_path, rel_path in files:
                     self._send_one_file(sock, abs_path, rel_path)
-                # (Opcional) enviar un mensaje de FIN del lote/directorio
+
+                # FIN del lote (una sola vez)
                 self._send_finished(sock)
+                # Cierro escritura recién ahora
+                try:
+                    sock.shutdown(socket.SHUT_WR)
+                except Exception:
+                    pass
+
+                # (opcional) intento leer ACK del FIN
+                try:
+                    ack = self._recv_line(sock)
+                    if ack:
+                        logging.debug("ACK FIN recibido: %r", ack)
+                except Exception:
+                    pass
+
         else:
-            logging.info("Usando 1 conexión por archivo (per_file) para %d archivo(s)", len(files))
+            logging.info("Una conexión por archivo (per_file) para %d archivo(s)", len(files))
             for abs_path, rel_path in files:
                 with self._open_socket() as sock:
                     self._maybe_handshake(sock)
                     self._send_one_file(sock, abs_path, rel_path)
-                # socket se cierra al salir del with
+                    # para per_file, puede enviarse FIN por conexión si quisieras,
+                    # pero no es necesario si el server cierra post-ACK
 
         logging.info("Cliente %s: envío completado.", self.id)
 
@@ -87,7 +107,6 @@ class Client:
         size = os.path.getsize(abs_path)
         logging.info("Enviando archivo: rel=%s size=%d", rel_path, size)
 
-        # Header estilo texto (compatible con el server que propusimos antes)
         header = (
             f"CLI_ID: {self.id}\n"
             f"FILENAME: {rel_path}\n"
@@ -96,36 +115,27 @@ class Client:
         ).encode("utf-8")
         self._sendall(sock, header)
 
-        # Cuerpo en batches (sin cargar el archivo completo en memoria)
-        reader = BatchReader(abs_path, self.batch_size)
+        reader = BatchReader(abs_path, self.batch_size)  # por defecto, mode="bytes"
         total_sent = 0
         for chunk in reader:
-            # chunk debe ser bytes (si tu BatchReader devuelve str, encode acá)
             if not isinstance(chunk, (bytes, bytearray)):
                 chunk = str(chunk).encode("utf-8")
             self._sendall(sock, chunk)
             total_sent += len(chunk)
 
-        # Señalamos fin de escritura del archivo (manteniendo lectura para ACK)
-        try:
-            sock.shutdown(socket.SHUT_WR)
-        except Exception:
-            pass
-
-        # Esperamos ACK del servidor (OK\n)
+        # NO hacemos shutdown(SHUT_WR) acá: queremos seguir mandando más archivos
+        # Esperamos ACK del server (OK\n) por este archivo
         ack = self._recv_line(sock)
         logging.debug("ACK recibido para %s: %r", rel_path, ack)
         if not ack or not ack.startswith(self.success_resp):
             raise RuntimeError(f"ACK inválido para {rel_path}: {ack!r}")
 
-        logging.info("Archivo enviado OK: %s (%d bytes; último batch=%d bytes)",
-                     rel_path, total_sent, len(reader.last_batch or b""))
+        logging.info(
+            "Archivo enviado OK: %s (%d bytes; último batch=%d bytes)",
+            rel_path, total_sent, len(reader.last_batch or b"")
+        )
 
     def _send_finished(self, sock: socket.socket) -> None:
-        """
-        Mensaje opcional para indicar fin del lote/directorio.
-        Útil si el server soporta múltiples archivos por conexión.
-        """
         msg = (f"{self.finished_header}{self.finished_body}{self._delim_str()}").encode("utf-8")
         try:
             self._sendall(sock, msg)
@@ -137,8 +147,7 @@ class Client:
     # ---------------------------
     def _open_socket(self) -> socket.socket:
         sock = socket.create_connection((self.server_host, self.server_port), timeout=self.connect_timeout)
-        if self.io_timeout is not None:
-            sock.settimeout(self.io_timeout)
+        sock.settimeout(self.io_timeout)
         logging.debug("Conexión abierta a %s:%s", self.server_host, self.server_port)
         return sock
 
@@ -147,12 +156,11 @@ class Client:
             return
         hello = f"{self.handshake_hello} {self.id}{self._delim_str()}".encode("utf-8")
         self._sendall(sock, hello)
-        # Intentamos leer 1 línea; si no responde, seguimos (server puede no implementar handshake)
         try:
             line = self._recv_line(sock)
             logging.debug("Handshake respuesta: %r", line)
             if line and not line.startswith(self.success_resp):
-                logging.warning("Handshake no devolvió OK; continúo de todos modos: %r", line)
+                logging.warning("Handshake sin OK; continúo: %r", line)
         except Exception as e:
             logging.debug("Handshake sin respuesta (%r); continúo", e)
 
@@ -163,9 +171,6 @@ class Client:
             view = view[sent:]
 
     def _recv_line(self, sock: socket.socket) -> bytes:
-        """
-        Lee hasta el delimitador de mensaje (por defecto '\\n').
-        """
         buf = bytearray()
         delim = self.message_delim
         while True:
@@ -181,10 +186,6 @@ class Client:
     # Utilitarios de archivos
     # ---------------------------
     def _list_files(self, root: str) -> List[Tuple[str, str]]:
-        """
-        Devuelve lista de (abs_path, rel_path) ordenada alfabéticamente.
-        Filtra por extensiones si self.allowed_exts no está vacía.
-        """
         files: List[Tuple[str, str]] = []
         root_abs = os.path.abspath(root)
         for dirpath, _, filenames in os.walk(root_abs):
@@ -198,7 +199,7 @@ class Client:
                         continue
                 rel_path = os.path.relpath(abs_path, root_abs)
                 files.append((abs_path, rel_path))
-        files.sort(key=lambda t: t[1])  # orden por ruta relativa
+        files.sort(key=lambda t: t[1])
         return files
 
     # ---------------------------

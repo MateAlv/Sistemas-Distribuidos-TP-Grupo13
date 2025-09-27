@@ -6,8 +6,7 @@ import logging
 import signal
 from configparser import ConfigParser
 
-from common.client import Client
-
+from common import Client
 
 def initialize_config():
     """
