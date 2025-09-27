@@ -1,7 +1,9 @@
 # client/Dockerfile
 FROM python:3.12-slim
-WORKDIR /app
-COPY client/ /app/client/
-COPY common/ /app/common/
 
-RUN printf '#!/bin/sh\nexec python3 /app/client/main.py\n' > /client && chmod +x /client
+ENV PYTHONUNBUFFERED=1
+WORKDIR /
+COPY client/ /client/
+COPY common/ /common/
+
+ENTRYPOINT ["python3", "/client/main.py"]

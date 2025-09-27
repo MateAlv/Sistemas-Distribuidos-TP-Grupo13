@@ -1,126 +1,91 @@
 #!/usr/bin/env python3
-# client/main.py
+
 import os
 import sys
 import logging
-from typing import Any, Dict
+import signal
+from configparser import ConfigParser
 
-try:
-    from common.client import Client  # tu implementación después
-except Exception as e:
-    print(f"[client] ERROR importando Client: {e}", file=sys.stderr)
-    raise
+from common.client import Client
 
-DEFAULT_DATA_DIR = "/data"  # ahora el default es un directorio
 
-def _try_load_yaml(path: str) -> Dict[str, Any]:
+def initialize_config():
+    """
+    Lee parámetros desde ENV > config.ini.
+    Devuelve un dict listo para armar el Client.
+    """
+    config = ConfigParser(os.environ)
+    config.read("config.ini")
+
     try:
-        import yaml  # type: ignore
-    except Exception:
-        return {}
-    if not os.path.exists(path):
-        return {}
-    with open(path, "r", encoding="utf-8") as f:
-        data = yaml.safe_load(f) or {}
-        return data if isinstance(data, dict) else {}
+        params = {
+            "id": os.getenv("CLIENT_ID", config["DEFAULT"]["CLIENT_ID"]),
+            "server_address": os.getenv("SERVER_ADDRESS", config["DEFAULT"]["SERVER_ADDRESS"]),
+            "log_level": os.getenv("LOGGING_LEVEL", config["DEFAULT"]["LOGGING_LEVEL"]),
+            "data_dir": os.getenv("DATA_DIR", config["DEFAULT"]["DATA_DIR"]),
+            "batch_max": int(os.getenv("BATCH_MAX_AMOUNT", config["DEFAULT"]["BATCH_MAX_AMOUNT"])),
+            "protocol": {
+                "field_separator": os.getenv("FIELD_SEPARATOR", config["PROTOCOL"]["FIELD_SEPARATOR"]),
+                "batch_separator": os.getenv("BATCH_SEPARATOR", config["PROTOCOL"]["BATCH_SEPARATOR"]),
+                "message_delimiter": os.getenv("MESSAGE_DELIMITER", config["PROTOCOL"]["MESSAGE_DELIMITER"]),
+                "finished_header": os.getenv("FINISHED_HEADER", config["PROTOCOL"]["FINISHED_HEADER"]),
+                "success_body": os.getenv("SUCCESS_BODY", config["PROTOCOL"]["SUCCESS_BODY"]),
+                "failure_body": os.getenv("FAILURE_BODY", config["PROTOCOL"]["FAILURE_BODY"]),
+                "finished_body": os.getenv("FINISHED_BODY", config["PROTOCOL"]["FINISHED_BODY"]),
+                "hello": os.getenv("HELLO", config["PROTOCOL"]["HELLO"]),
+            },
+        }
+    except KeyError as e:
+        raise KeyError(f"Missing config key: {e}")
+    except ValueError as e:
+        raise ValueError(f"Invalid config value: {e}")
 
-def _get_env(name: str, default: str = "") -> str:
-    return os.getenv(name, default)
+    return params
 
-def init_config() -> Dict[str, Any]:
-    cfg_file = os.getenv("CLIENT_CONFIG_FILE", "/config.yaml")
-    file_cfg = _try_load_yaml(cfg_file)
 
-    def read_file(path: str, default: Any = None) -> Any:
-        cur = file_cfg
-        for part in path.split("."):
-            if not isinstance(cur, dict) or part not in cur:
-                return default
-            cur = cur[part]
-        return cur
-
-    cfg: Dict[str, Any] = {}
-
-    cfg["id"] = _get_env("CLI_ID") or read_file("id", "")
-    cfg["server"] = {"address": _get_env("CLI_SERVER_ADDRESS") or read_file("server.address", "server:5000")}
-    cfg["log"] = {"level": (_get_env("CLI_LOG_LEVEL") or read_file("log.level", "INFO")).upper()}
-    
-    data_dir_env = _get_env("CLI_DATA_DIR")
-    data_dir = data_dir_env if data_dir_env else read_file("data.dir", DEFAULT_DATA_DIR)
-    cfg["data"] = {"dir": data_dir}
-
-    env_batch = _get_env("CLI_BATCH_MAXAMOUNT")
-    batch_val = int(env_batch) if env_batch.isdigit() else int(read_file("batch.maxAmount", 100))
-    cfg["batch"] = {"maxAmount": batch_val}
-
-    proto_defaults = {
-        "fieldSeparator": ";",
-        "batchSeparator": "~",
-        "messageDelimiter": "\n",
-        "finishedHeader": "F:",
-        "successBody": "OK",
-        "failureBody": "FAIL",
-        "finishedBody": "FINISHED",
-    }
-    cfg["protocol"] = {}
-    for key, default in proto_defaults.items():
-        env_name = "CLI_PROTOCOL_" + key.upper()
-        cfg["protocol"][key] = _get_env(env_name) or read_file(f"protocol.{key}", default)
-
-    return cfg
-
-def init_logger(level_str: str) -> None:
+def initialize_log(level_str: str):
     level = getattr(logging, level_str.upper(), logging.INFO)
     logging.basicConfig(
+        format="%(asctime)s %(levelname)-8s %(message)s",
         level=level,
-        format="%(asctime)s %(levelname).5s     %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
-        stream=sys.stdout,
     )
 
-def print_config(cfg: Dict[str, Any]) -> None:
-    logging.info(
-        "action: config | result: success | client_id: %s | server_address: %s | data_dir: %s | log_level: %s",
-        cfg.get("id", ""),
-        cfg.get("server", {}).get("address", ""),
-        cfg.get("data", {}).get("dir", DEFAULT_DATA_DIR),
-        cfg.get("log", {}).get("level", "INFO"),
+
+def main():
+    cfg = initialize_config()
+    initialize_log(cfg["log_level"])
+
+    logging.debug(
+        "action: config | result: success | client_id:%s | server_address:%s | data_dir:%s | log_level:%s | batch_max:%s",
+        cfg["id"], cfg["server_address"], cfg["data_dir"], cfg["log_level"], cfg["batch_max"]
     )
 
-def build_client_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
-    return {
+    client_config = {
         "id": cfg["id"],
-        "server_address": cfg["server"]["address"],
-        "data_dir": cfg["data"]["dir"],  # <<<<<< ahora le pasamos un directorio
+        "server_address": cfg["server_address"],
+        "data_dir": cfg["data_dir"],
         "message_protocol": {
-            "batch_size": cfg["batch"]["maxAmount"],
-            "field_separator": cfg["protocol"]["fieldSeparator"],
-            "batch_separator": cfg["protocol"]["batchSeparator"],
-            "message_delimiter": cfg["protocol"]["messageDelimiter"],
-            "finished_header": cfg["protocol"]["finishedHeader"],
-            "success_response": cfg["protocol"]["successBody"],
-            "failure_response": cfg["protocol"]["failureBody"],
-            "finished_body": cfg["protocol"]["finishedBody"],
+            "batch_size": cfg["batch_max"],
+            **cfg["protocol"],
         },
     }
 
-def main() -> None:
-    cfg = init_config()
-    init_logger(cfg["log"]["level"])
-    print_config(cfg)
+    client = Client(client_config, cfg["data_dir"])
 
-    try:
-        client = Client(build_client_config(cfg), DEFAULT_DATA_DIR)
-        # Sugerencia: tu Client puede ignorar el segundo argumento y usar config["data_dir"]
-    except Exception as e:
-        logging.critical("Failed to create client: %s", e)
-        sys.exit(1)
+    # opcional: graceful shutdown
+    def shutdown_handler(signum, frame):
+        logging.info("SIGTERM recibido, cerrando cliente")
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, shutdown_handler)
 
     try:
         client.start_client_loop()
     except Exception as e:
-        logging.critical("Failed to start client loop: %s", e)
+        logging.critical("Client loop failed: %s", e)
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()
