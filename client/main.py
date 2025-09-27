@@ -41,20 +41,18 @@ def init_config() -> Dict[str, Any]:
 
     cfg: Dict[str, Any] = {}
 
+    cfg["id"] = _get_env("CLI_ID") or read_file("id", "")
     cfg["server"] = {"address": _get_env("CLI_SERVER_ADDRESS") or read_file("server.address", "server:5000")}
     cfg["log"] = {"level": (_get_env("CLI_LOG_LEVEL") or read_file("log.level", "INFO")).upper()}
-
-    # directorio de datos
+    
     data_dir_env = _get_env("CLI_DATA_DIR")
     data_dir = data_dir_env if data_dir_env else read_file("data.dir", DEFAULT_DATA_DIR)
     cfg["data"] = {"dir": data_dir}
 
-    # batch
     env_batch = _get_env("CLI_BATCH_MAXAMOUNT")
     batch_val = int(env_batch) if env_batch.isdigit() else int(read_file("batch.maxAmount", 100))
     cfg["batch"] = {"maxAmount": batch_val}
 
-    # protocolo (lo mantenemos configurable aunque el handshake lo veamos después)
     proto_defaults = {
         "fieldSeparator": ";",
         "batchSeparator": "~",
@@ -91,6 +89,7 @@ def print_config(cfg: Dict[str, Any]) -> None:
 
 def build_client_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     return {
+        "id": cfg["id"],
         "server_address": cfg["server"]["address"],
         "data_dir": cfg["data"]["dir"],  # <<<<<< ahora le pasamos un directorio
         "message_protocol": {

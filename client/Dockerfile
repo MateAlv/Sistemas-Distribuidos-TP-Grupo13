@@ -1,9 +1,7 @@
+# client/Dockerfile
 FROM python:3.12-slim
+WORKDIR /app
+COPY client/ /app/client/
+COPY common/ /app/common/
 
-WORKDIR /
-
-# Copiamos el script como ejecutable /client (entrypoint del compose)
-COPY client.py /client
-RUN chmod +x /client
-
-# Entrypoint lo define compose
+RUN printf '#!/bin/sh\nexec python3 /app/client/main.py\n' > /client && chmod +x /client
