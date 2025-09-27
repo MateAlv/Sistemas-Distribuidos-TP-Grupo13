@@ -43,6 +43,7 @@ for ((i=1; i<=CLIENT_NUMBER; i++)); do
     entrypoint: /client
     environment:
       - CLI_ID=${i}
+      - CLI_DATA_DIR=/data
       - DATA_MODE=tree
     networks:
       - testing_net

@@ -6,12 +6,12 @@ import logging
 from typing import Any, Dict
 
 try:
-    from common.client import Client
+    from common.client import Client  # tu implementación después
 except Exception as e:
     print(f"[client] ERROR importando Client: {e}", file=sys.stderr)
     raise
 
-DEFAULT_CSV_FILE_PATH = "/data/agency.csv"
+DEFAULT_DATA_DIR = "/data"  # ahora el default es un directorio
 
 def _try_load_yaml(path: str) -> Dict[str, Any]:
     try:
@@ -22,9 +22,7 @@ def _try_load_yaml(path: str) -> Dict[str, Any]:
         return {}
     with open(path, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
-        if not isinstance(data, dict):
-            return {}
-        return data
+        return data if isinstance(data, dict) else {}
 
 def _get_env(name: str, default: str = "") -> str:
     return os.getenv(name, default)
@@ -43,31 +41,20 @@ def init_config() -> Dict[str, Any]:
 
     cfg: Dict[str, Any] = {}
 
-    # id
-    cfg["id"] = _get_env("CLI_ID") or read_file("id", "")
+    cfg["server"] = {"address": _get_env("CLI_SERVER_ADDRESS") or read_file("server.address", "server:5000")}
+    cfg["log"] = {"level": (_get_env("CLI_LOG_LEVEL") or read_file("log.level", "INFO")).upper()}
 
-    # server.address
-    cfg["server"] = {
-        "address": _get_env("CLI_SERVER_ADDRESS") or read_file("server.address", "server:5000")
-    }
+    # directorio de datos
+    data_dir_env = _get_env("CLI_DATA_DIR")
+    data_dir = data_dir_env if data_dir_env else read_file("data.dir", DEFAULT_DATA_DIR)
+    cfg["data"] = {"dir": data_dir}
 
-    # log.level
-    cfg["log"] = {
-        "level": (_get_env("CLI_LOG_LEVEL") or read_file("log.level", "INFO")).upper()
-    }
-
-    # batch.maxAmount
+    # batch
     env_batch = _get_env("CLI_BATCH_MAXAMOUNT")
-    if env_batch:
-        try:
-            batch_val = int(env_batch)
-        except ValueError:
-            batch_val = 100
-    else:
-        batch_val = int(read_file("batch.maxAmount", 100))
+    batch_val = int(env_batch) if env_batch.isdigit() else int(read_file("batch.maxAmount", 100))
     cfg["batch"] = {"maxAmount": batch_val}
 
-    # protocol.*  (todo se puede overridear por env si querés)
+    # protocolo (lo mantenemos configurable aunque el handshake lo veamos después)
     proto_defaults = {
         "fieldSeparator": ";",
         "batchSeparator": "~",
@@ -95,17 +82,17 @@ def init_logger(level_str: str) -> None:
 
 def print_config(cfg: Dict[str, Any]) -> None:
     logging.info(
-        "action: config | result: success | client_id: %s | server_address: %s | csv_file: %s | log_level: %s",
+        "action: config | result: success | client_id: %s | server_address: %s | data_dir: %s | log_level: %s",
         cfg.get("id", ""),
         cfg.get("server", {}).get("address", ""),
-        DEFAULT_CSV_FILE_PATH,
+        cfg.get("data", {}).get("dir", DEFAULT_DATA_DIR),
         cfg.get("log", {}).get("level", "INFO"),
     )
 
 def build_client_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     return {
-        "id": cfg.get("id", ""),
         "server_address": cfg["server"]["address"],
+        "data_dir": cfg["data"]["dir"],  # <<<<<< ahora le pasamos un directorio
         "message_protocol": {
             "batch_size": cfg["batch"]["maxAmount"],
             "field_separator": cfg["protocol"]["fieldSeparator"],
@@ -123,10 +110,9 @@ def main() -> None:
     init_logger(cfg["log"]["level"])
     print_config(cfg)
 
-    client_config = build_client_config(cfg)
-
     try:
-        client = Client(client_config, DEFAULT_CSV_FILE_PATH)
+        client = Client(build_client_config(cfg), DEFAULT_DATA_DIR)
+        # Sugerencia: tu Client puede ignorar el segundo argumento y usar config["data_dir"]
     except Exception as e:
         logging.critical("Failed to create client: %s", e)
         sys.exit(1)

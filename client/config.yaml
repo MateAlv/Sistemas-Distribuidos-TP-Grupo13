@@ -4,6 +4,9 @@ server:
 log:
   level: INFO
 
+data:
+  dir: /data
+
 batch:
   maxAmount: 100
 
