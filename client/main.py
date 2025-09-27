@@ -1,74 +1,141 @@
 #!/usr/bin/env python3
+# client/main.py
 import os
-import socket
-import yaml
+import sys
+import logging
+from typing import Any, Dict
 
-CFG_PATH = os.getenv("CLIENT_CONFIG", "/config.yaml")
+try:
+    from common.client import Client
+except Exception as e:
+    print(f"[client] ERROR importando Client: {e}", file=sys.stderr)
+    raise
 
-def load_config():
-    with open(CFG_PATH, "r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f) or {}
-    host = cfg.get("server_host", "server")
-    port = int(cfg.get("server_port", 5000))
-    csv_path = cfg.get("csv_path", "/data/agency.csv")
-    chunk = int(cfg.get("chunk_size_bytes", 65536))
-    send_header = bool(cfg.get("send_header", True))
-    cli_id = os.getenv("CLI_ID", "0")
-    return host, port, csv_path, chunk, send_header, cli_id
+DEFAULT_CSV_FILE_PATH = "/data/agency.csv"
 
-def file_size(path):
+def _try_load_yaml(path: str) -> Dict[str, Any]:
     try:
-        return os.path.getsize(path)
-    except OSError:
-        return 0
+        import yaml  # type: ignore
+    except Exception:
+        return {}
+    if not os.path.exists(path):
+        return {}
+    with open(path, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+        if not isinstance(data, dict):
+            return {}
+        return data
 
-def send_file(sock, path, chunk_size):
-    sent = 0
-    with open(path, "rb") as f:
-        while True:
-            data = f.read(chunk_size)
-            if not data:
-                break
-            sock.sendall(data)
-            sent += len(data)
-    return sent
+def _get_env(name: str, default: str = "") -> str:
+    return os.getenv(name, default)
 
-def main():
-    host, port, csv_path, chunk_size, send_header, cli_id = load_config()
+def init_config() -> Dict[str, Any]:
+    cfg_file = os.getenv("CLIENT_CONFIG_FILE", "/config.yaml")
+    file_cfg = _try_load_yaml(cfg_file)
 
-    if not os.path.exists(csv_path):
-        raise FileNotFoundError(f"CSV no encontrado en {csv_path}")
+    def read_file(path: str, default: Any = None) -> Any:
+        cur = file_cfg
+        for part in path.split("."):
+            if not isinstance(cur, dict) or part not in cur:
+                return default
+            cur = cur[part]
+        return cur
 
-    size = file_size(csv_path)
-    fname = os.path.basename(csv_path)
+    cfg: Dict[str, Any] = {}
 
-    addr = (host, port)
-    print(f"[client {cli_id}] conectando a {addr}, enviando {fname} ({size} bytes) en chunks de {chunk_size}...")
+    # id
+    cfg["id"] = _get_env("CLI_ID") or read_file("id", "")
 
-    with socket.create_connection(addr) as sock:
-        # Enviamos un header simple estilo HTTP (texto) y luego el binario del CSV.
-        if send_header:
-            header = (
-                f"CLI_ID: {cli_id}\n"
-                f"FILENAME: {fname}\n"
-                f"SIZE: {size}\n"
-                f"\n"
-            ).encode("utf-8")
-            sock.sendall(header)
+    # server.address
+    cfg["server"] = {
+        "address": _get_env("CLI_SERVER_ADDRESS") or read_file("server.address", "server:5000")
+    }
 
-        total_sent = send_file(sock, csv_path, chunk_size)
-        # Importante para indicar fin de escritura sin cerrar la conexión de lectura
+    # log.level
+    cfg["log"] = {
+        "level": (_get_env("CLI_LOG_LEVEL") or read_file("log.level", "INFO")).upper()
+    }
+
+    # batch.maxAmount
+    env_batch = _get_env("CLI_BATCH_MAXAMOUNT")
+    if env_batch:
         try:
-            sock.shutdown(socket.SHUT_WR)
-        except Exception:
-            pass
+            batch_val = int(env_batch)
+        except ValueError:
+            batch_val = 100
+    else:
+        batch_val = int(read_file("batch.maxAmount", 100))
+    cfg["batch"] = {"maxAmount": batch_val}
 
-        print(f"[client {cli_id}] enviado total {total_sent} bytes, esperando ACK...")
-        # Espera del ACK "OK\n"
-        ack = sock.recv(1024)
-        print(f"[client {cli_id}] ACK recibido: {ack!r}")
+    # protocol.*  (todo se puede overridear por env si querés)
+    proto_defaults = {
+        "fieldSeparator": ";",
+        "batchSeparator": "~",
+        "messageDelimiter": "\n",
+        "finishedHeader": "F:",
+        "successBody": "OK",
+        "failureBody": "FAIL",
+        "finishedBody": "FINISHED",
+    }
+    cfg["protocol"] = {}
+    for key, default in proto_defaults.items():
+        env_name = "CLI_PROTOCOL_" + key.upper()
+        cfg["protocol"][key] = _get_env(env_name) or read_file(f"protocol.{key}", default)
 
-    print(f"[client {cli_id}] finalizado.")
+    return cfg
+
+def init_logger(level_str: str) -> None:
+    level = getattr(logging, level_str.upper(), logging.INFO)
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname).5s     %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        stream=sys.stdout,
+    )
+
+def print_config(cfg: Dict[str, Any]) -> None:
+    logging.info(
+        "action: config | result: success | client_id: %s | server_address: %s | csv_file: %s | log_level: %s",
+        cfg.get("id", ""),
+        cfg.get("server", {}).get("address", ""),
+        DEFAULT_CSV_FILE_PATH,
+        cfg.get("log", {}).get("level", "INFO"),
+    )
+
+def build_client_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "id": cfg.get("id", ""),
+        "server_address": cfg["server"]["address"],
+        "message_protocol": {
+            "batch_size": cfg["batch"]["maxAmount"],
+            "field_separator": cfg["protocol"]["fieldSeparator"],
+            "batch_separator": cfg["protocol"]["batchSeparator"],
+            "message_delimiter": cfg["protocol"]["messageDelimiter"],
+            "finished_header": cfg["protocol"]["finishedHeader"],
+            "success_response": cfg["protocol"]["successBody"],
+            "failure_response": cfg["protocol"]["failureBody"],
+            "finished_body": cfg["protocol"]["finishedBody"],
+        },
+    }
+
+def main() -> None:
+    cfg = init_config()
+    init_logger(cfg["log"]["level"])
+    print_config(cfg)
+
+    client_config = build_client_config(cfg)
+
+    try:
+        client = Client(client_config, DEFAULT_CSV_FILE_PATH)
+    except Exception as e:
+        logging.critical("Failed to create client: %s", e)
+        sys.exit(1)
+
+    try:
+        client.start_client_loop()
+    except Exception as e:
+        logging.critical("Failed to start client loop: %s", e)
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()

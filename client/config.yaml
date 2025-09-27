@@ -1,5 +1,17 @@
-server_host: server         
-server_port: 5000
-csv_path: /data/agency.csv  
-chunk_size_bytes: 65536     
-send_header: true           
+server:
+  address: server:5000
+
+log:
+  level: INFO
+
+batch:
+  maxAmount: 100
+
+protocol:
+  fieldSeparator: ";"
+  batchSeparator: "~"
+  messageDelimiter: "\n"
+  finishedHeader: "F:"
+  successBody: "OK"
+  failureBody: "FAIL"
+  finishedBody: "FINISHED"
