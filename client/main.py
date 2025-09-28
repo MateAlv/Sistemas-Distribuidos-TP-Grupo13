@@ -1,74 +1,78 @@
 #!/usr/bin/env python3
+
 import os
-import socket
-import yaml
+import sys
+import logging
+import signal
+from configparser import ConfigParser
 
-CFG_PATH = os.getenv("CLIENT_CONFIG", "/config.yaml")
+from common import Client
 
-def load_config():
-    with open(CFG_PATH, "r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f) or {}
-    host = cfg.get("server_host", "server")
-    port = int(cfg.get("server_port", 5000))
-    csv_path = cfg.get("csv_path", "/data/agency.csv")
-    chunk = int(cfg.get("chunk_size_bytes", 65536))
-    send_header = bool(cfg.get("send_header", True))
-    cli_id = os.getenv("CLI_ID", "0")
-    return host, port, csv_path, chunk, send_header, cli_id
+def initialize_config():
+    """
+    Lee parámetros desde ENV > config.ini.
+    Devuelve un dict listo para armar el Client.
+    """
+    config = ConfigParser(os.environ)
+    config.read("config.ini")
 
-def file_size(path):
     try:
-        return os.path.getsize(path)
-    except OSError:
-        return 0
+        params = {
+            "id": os.getenv("CLIENT_ID", config["DEFAULT"]["CLIENT_ID"]),
+            "server_address": os.getenv("SERVER_ADDRESS", config["DEFAULT"]["SERVER_ADDRESS"]),
+            "log_level": os.getenv("LOGGING_LEVEL", config["DEFAULT"]["LOGGING_LEVEL"]),
+            "data_dir": os.getenv("DATA_DIR", config["DEFAULT"]["DATA_DIR"]),
+            "batch_max": int(os.getenv("BATCH_MAX_AMOUNT", config["DEFAULT"]["BATCH_MAX_AMOUNT"])),
+        }
+    except KeyError as e:
+        raise KeyError(f"Missing config key: {e}")
+    except ValueError as e:
+        raise ValueError(f"Invalid config value: {e}")
 
-def send_file(sock, path, chunk_size):
-    sent = 0
-    with open(path, "rb") as f:
-        while True:
-            data = f.read(chunk_size)
-            if not data:
-                break
-            sock.sendall(data)
-            sent += len(data)
-    return sent
+    return params
+
+
+def initialize_log(level_str: str):
+    level = getattr(logging, level_str.upper(), logging.INFO)
+    logging.basicConfig(
+        format="%(asctime)s %(levelname)-8s %(message)s",
+        level=level,
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
 
 def main():
-    host, port, csv_path, chunk_size, send_header, cli_id = load_config()
+    cfg = initialize_config()
+    initialize_log(cfg["log_level"])
 
-    if not os.path.exists(csv_path):
-        raise FileNotFoundError(f"CSV no encontrado en {csv_path}")
+    logging.debug(
+        "action: config | result: success | client_id:%s | server_address:%s | data_dir:%s | log_level:%s | batch_max:%s",
+        cfg["id"], cfg["server_address"], cfg["data_dir"], cfg["log_level"], cfg["batch_max"]
+    )
 
-    size = file_size(csv_path)
-    fname = os.path.basename(csv_path)
+    client_config = {
+        "id": cfg["id"],
+        "server_address": cfg["server_address"],
+        "data_dir": cfg["data_dir"],
+        "message_protocol": {
+            "batch_size": cfg["batch_max"],
+        },
+    }
 
-    addr = (host, port)
-    print(f"[client {cli_id}] conectando a {addr}, enviando {fname} ({size} bytes) en chunks de {chunk_size}...")
+    client = Client(client_config, cfg["data_dir"])
 
-    with socket.create_connection(addr) as sock:
-        # Enviamos un header simple estilo HTTP (texto) y luego el binario del CSV.
-        if send_header:
-            header = (
-                f"CLI_ID: {cli_id}\n"
-                f"FILENAME: {fname}\n"
-                f"SIZE: {size}\n"
-                f"\n"
-            ).encode("utf-8")
-            sock.sendall(header)
+    def shutdown_handler(signum, frame):
+        logging.info("SIGTERM recibido, cerrando cliente")
+        sys.exit(0)
 
-        total_sent = send_file(sock, csv_path, chunk_size)
-        # Importante para indicar fin de escritura sin cerrar la conexión de lectura
-        try:
-            sock.shutdown(socket.SHUT_WR)
-        except Exception:
-            pass
+    signal.signal(signal.SIGTERM, shutdown_handler)
 
-        print(f"[client {cli_id}] enviado total {total_sent} bytes, esperando ACK...")
-        # Espera del ACK "OK\n"
-        ack = sock.recv(1024)
-        print(f"[client {cli_id}] ACK recibido: {ack!r}")
+    try:
+        client.start_client_loop()
+    except Exception as e:
+        logging.critical("Client loop failed: %s", e)
+        sys.exit(1)
 
-    print(f"[client {cli_id}] finalizado.")
 
 if __name__ == "__main__":
     main()
