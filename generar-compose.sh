@@ -12,8 +12,11 @@ CLIENT_NUMBER="$2"
 echo "Nombre del archivo de salida: $OUTPUT_FILE"
 echo "Cantidad de clientes: $CLIENT_NUMBER"
 
+mkdir -p ./.data/dataset
+
+# Cabecera + server
 cat > "$OUTPUT_FILE" <<YAML
-name: tp0
+name: tp-distribuidos-grupo13
 services:
   rabbitmq:
     image: rabbitmq:3-management
@@ -25,16 +28,16 @@ services:
   server:
     container_name: server
     image: server:latest
-    entrypoint: python3 /main.py
+    entrypoint: ["python3", "/main.py"]
     environment:
       - PYTHONUNBUFFERED=1
       - CLI_CLIENTS=${CLIENT_NUMBER}
-    networks:
-      - testing_net
+    networks: [testing_net]
     volumes:
-      - ./server/config.ini:/config.ini
+      - ./server/config.ini:/config.ini:ro
 YAML
 
+# Clients
 for ((i=1; i<=CLIENT_NUMBER; i++)); do
   DATASET_DIR="./.data/client-${i}"
   if [[ -d "${DATASET_DIR}" ]]; then
@@ -47,20 +50,22 @@ for ((i=1; i<=CLIENT_NUMBER; i++)); do
   client${i}:
     container_name: client${i}
     image: client:latest
-    entrypoint: /client
     environment:
       - CLI_ID=${i}
+      - CLI_DATA_DIR=/data
       - DATA_MODE=tree
-    networks:
-      - testing_net
+      - SERVER_ADDRESS=server:12345
+    networks: [testing_net]
     depends_on:
-      - server
+      server:
+        condition: service_started
     volumes:
       - ${MOUNT_PATH}:/data:ro
-      - ./client/config.yaml:/config.yaml
+      - ./client/config.ini:/config.ini:ro
 YAML
 done
 
+# Redes
 cat >> "$OUTPUT_FILE" <<'YAML'
 networks:
   testing_net:
@@ -70,4 +75,4 @@ networks:
         - subnet: 172.25.125.0/24
 YAML
 
-echo "✓ Compose generado en: ${OUTPUT_FILE}"
+echo "Archivo $OUTPUT_FILE generado con éxito."

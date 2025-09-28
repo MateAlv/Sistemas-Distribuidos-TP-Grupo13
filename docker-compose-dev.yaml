@@ -3,47 +3,28 @@ services:
   server:
     container_name: server
     image: server:latest
-    entrypoint: python3 /main.py
+    entrypoint: ["python3", "/main.py"]
     environment:
       - PYTHONUNBUFFERED=1
-      - CLI_CLIENTS=5
-    networks:
-      - testing_net
+      - CLI_CLIENTS=1
+    networks: [testing_net]
     volumes:
-      - ./server/config.ini:/config.ini
-
-  # Ejemplos de clientes (pueden ser generados por el script)
+      - ./server/config.ini:/config.ini:ro
   client1:
     container_name: client1
     image: client:latest
-    entrypoint: /client
     environment:
       - CLI_ID=1
-      - DATA_MODE=tree     # opcional, por si tu cliente usa modo árbol
-    networks:
-      - testing_net
-    depends_on:
-      - server
-    volumes:
-      # Mapa un árbol completo de datos para el cliente 1
-      - ./.data/client-1/:/data:ro
-      - ./client/config.yaml:/config.yaml
-
-  client2:
-    container_name: client2
-    image: client:latest
-    entrypoint: /client
-    environment:
-      - CLI_ID=2
+      - CLI_DATA_DIR=/data
       - DATA_MODE=tree
-    networks:
-      - testing_net
+      - SERVER_ADDRESS=server:12345
+    networks: [testing_net]
     depends_on:
-      - server
+      server:
+        condition: service_started
     volumes:
-      - ./.data/client-2/:/data:ro
-      - ./client/config.yaml:/config.yaml
-
+      - ./.data/client-1:/data:ro
+      - ./client/config.ini:/config.ini:ro
 networks:
   testing_net:
     ipam:

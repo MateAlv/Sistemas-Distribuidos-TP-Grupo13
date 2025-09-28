@@ -1,9 +1,6 @@
 FROM python:3.12-slim
-
-WORKDIR /
-
-# Copiamos el script como ejecutable /client (entrypoint del compose)
-COPY client.py /client
-RUN chmod +x /client
-
-# Entrypoint lo define compose
+ENV PYTHONUNBUFFERED=1
+WORKDIR /client
+COPY . /client/
+ENV PYTHONPATH=/client
+ENTRYPOINT ["python3", "/client/main.py"]

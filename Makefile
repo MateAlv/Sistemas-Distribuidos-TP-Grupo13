@@ -8,6 +8,7 @@ all: docker-image
 docker-image:
 	docker build -f ./server/Dockerfile -t "server:latest" ./server
 	docker build -f ./client/Dockerfile -t "client:latest" ./client
+
 .PHONY: docker-image
 
 docker-compose-up: docker-image
