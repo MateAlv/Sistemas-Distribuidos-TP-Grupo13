@@ -23,16 +23,6 @@ def initialize_config():
             "log_level": os.getenv("LOGGING_LEVEL", config["DEFAULT"]["LOGGING_LEVEL"]),
             "data_dir": os.getenv("DATA_DIR", config["DEFAULT"]["DATA_DIR"]),
             "batch_max": int(os.getenv("BATCH_MAX_AMOUNT", config["DEFAULT"]["BATCH_MAX_AMOUNT"])),
-            "protocol": {
-                "field_separator": os.getenv("FIELD_SEPARATOR", config["PROTOCOL"]["FIELD_SEPARATOR"]),
-                "batch_separator": os.getenv("BATCH_SEPARATOR", config["PROTOCOL"]["BATCH_SEPARATOR"]),
-                "message_delimiter": os.getenv("MESSAGE_DELIMITER", config["PROTOCOL"]["MESSAGE_DELIMITER"]),
-                "finished_header": os.getenv("FINISHED_HEADER", config["PROTOCOL"]["FINISHED_HEADER"]),
-                "success_body": os.getenv("SUCCESS_BODY", config["PROTOCOL"]["SUCCESS_BODY"]),
-                "failure_body": os.getenv("FAILURE_BODY", config["PROTOCOL"]["FAILURE_BODY"]),
-                "finished_body": os.getenv("FINISHED_BODY", config["PROTOCOL"]["FINISHED_BODY"]),
-                "hello": os.getenv("HELLO", config["PROTOCOL"]["HELLO"]),
-            },
         }
     except KeyError as e:
         raise KeyError(f"Missing config key: {e}")
@@ -66,13 +56,11 @@ def main():
         "data_dir": cfg["data_dir"],
         "message_protocol": {
             "batch_size": cfg["batch_max"],
-            **cfg["protocol"],
         },
     }
 
     client = Client(client_config, cfg["data_dir"])
 
-    # opcional: graceful shutdown
     def shutdown_handler(signum, frame):
         logging.info("SIGTERM recibido, cerrando cliente")
         sys.exit(0)

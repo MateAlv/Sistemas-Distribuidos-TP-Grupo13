@@ -7,23 +7,37 @@ import threading
 import logging
 from typing import Dict, Tuple, Optional
 
+# Delimitadores / framing
 _MESSAGE_DELIM = b"\n"
 _HEADER_BLANKLINE = b"\n\n"
 
+# Bind/Timeouts
 DEFAULT_BIND_IP = os.getenv("SERVER_IP", "0.0.0.0")
-DEFAULT_CONNECT_TIMEOUT = float(os.getenv("SERVER_CONNECT_TIMEOUT", "10"))
-DEFAULT_IO_TIMEOUT = float(os.getenv("SERVER_IO_TIMEOUT", "120"))
-SAVE_DIR = os.getenv("SERVER_SAVE_DIR", "").strip()  # si vacío => no guarda a disco
+DEFAULT_IO_TIMEOUT = 120.0
 
+# Persistencia opcional de archivos recibidos
+SAVE_DIR = os.getenv("SERVER_SAVE_DIR", "").strip()  # vacío => no guarda
 
 class Server:
     """
-    Server TCP que soporta:
-      - Handshake opcional: 'HELLO <id>\\n' -> 'OK\\n'
-      - Múltiples archivos por conexión:
-          Header (CLI_ID/FILENAME/SIZE + blank line) y luego SIZE bytes
-          Responde 'OK\\n' por cada archivo
-      - Mensaje final opcional: 'F:FINISHED\\n'
+    Server TCP que habla el protocolo 'I:*' de tu cliente:
+
+      Handshake:
+        C -> S:  I:H <id>\\n
+        S -> C:  I:O\\n
+
+      Envío de archivos (múltiples por conexión):
+        C -> S:  F:\\n
+                 CLI_ID: <id>\\n
+                 FILENAME: <rel_path>\\n
+                 SIZE: <size>\\n
+                 \\n
+                 <size bytes>
+        S -> C:  I:O\\n     (ACK por archivo)
+
+      Fin de stream:
+        C -> S:  I:F\\n
+        S -> C:  I:O\\n
     """
 
     def __init__(self, port: int, listen_backlog: int) -> None:
@@ -86,21 +100,20 @@ class Server:
             sock.settimeout(DEFAULT_IO_TIMEOUT)
             logging.info("action: client_connected | peer:%s", peer)
 
-            # -------- Handshake opcional --------
-            self._maybe_handshake(sock)
+            # -------- Handshake obligatorio según protocolo I:* --------
+            self._do_handshake(sock)
 
-            # -------- Loop de recepción de archivos --------
+            # -------- Loop de recepción de archivos / fin --------
             while True:
                 headers = self._recv_headers(sock)
                 if headers is None:
-                    # EOF limpio del cliente
                     logging.info("action: client_eof | peer:%s", peer)
                     break
 
-                # Soporte de FIN opcional
-                if len(headers) == 1 and headers.get("F", "") == "FINISHED":
+                # Fin explícito: 'I:F'
+                if headers.get("I") == "F":
                     logging.info("action: client_finished | peer:%s", peer)
-                    self._send_line(sock, b"OK")
+                    self._send_line(sock, b"I:O")
                     continue
 
                 cli_id = headers.get("CLI_ID", "?")
@@ -114,10 +127,8 @@ class Server:
                 logging.info("action: recv_file_start | peer:%s | cli_id:%s | file:%s | size:%s",
                              peer, cli_id, fname, size)
 
-                # Recibir exactamente 'size' bytes
                 received = 0
                 if SAVE_DIR:
-                    # Guardar en disco preservando subdirectorios
                     safe_path = os.path.normpath(fname).lstrip("/\\")
                     out_path = os.path.join(SAVE_DIR, safe_path)
                     os.makedirs(os.path.dirname(out_path), exist_ok=True)
@@ -129,8 +140,8 @@ class Server:
                 logging.info("action: recv_file_end | peer:%s | cli_id:%s | file:%s | bytes:%s",
                              peer, cli_id, fname, received)
 
-                # ACK por archivo
-                self._send_line(sock, b"OK")
+                # ACK por archivo (protocolo I:O)
+                self._send_line(sock, b"I:O")
 
         except Exception as e:
             logging.error("action: client_handler_error | peer:%s | error:%r", peer, e)
@@ -146,66 +157,65 @@ class Server:
                 pass
 
     # ---------------------------------------------------------------------
-    # Lectura / Escritura de protocolo
+    # Handshake / Lectura / Escritura
     # ---------------------------------------------------------------------
 
-    def _maybe_handshake(self, sock: socket.socket) -> None:
+    def _do_handshake(self, sock: socket.socket) -> None:
         """
-        Si el cliente envía inmediatamente 'HELLO <id>\\n', respondemos 'OK\\n'.
-        Si llega otra cosa (o tiempo), seguimos normal (no obligatorio).
+        Espera línea 'I:H <id>\\n' y responde 'I:O\\n'.
+        Si no llega a tiempo o llega otra cosa, se considera protocolo inválido.
         """
-        sock.settimeout(1.5)  # breve timeout para handshake
-        try:
-            line = self._recv_line(sock)
-        except socket.timeout:
-            # No hubo handshake; seguimos
-            sock.settimeout(DEFAULT_IO_TIMEOUT)
-            return
-        except Exception:
-            sock.settimeout(DEFAULT_IO_TIMEOUT)
-            return
-
+        sock.settimeout(3.0)  
+        line = self._recv_line(sock)
         sock.settimeout(DEFAULT_IO_TIMEOUT)
 
         if not line:
-            return
+            raise RuntimeError("handshake_empty")
 
         try:
             text = line.decode("utf-8", errors="replace")
         except Exception:
             text = ""
 
-        if text.startswith("HELLO"):
-            logging.debug("action: handshake_ok | line:%r", text)
-            self._send_line(sock, b"OK")
-        else:
-            # No era handshake: probablemente ya sea el comienzo de headers
-            # reinyectamos en un buffer local simulando que no lo consumimos.
-            # Para simplificar, si no es HELLO, asumimos que era ruido y seguimos.
-            logging.debug("action: handshake_skip | line:%r", text)
+        if not text.startswith("I:H"):
+            raise RuntimeError(f"handshake_invalid: {text!r}")
+
+        logging.debug("action: handshake_ok | line:%r", text)
+        self._send_line(sock, b"I:O")
 
     def _recv_headers(self, sock: socket.socket) -> Optional[Dict[str, str]]:
         """
-        Lee cabeceras tipo:
-            KEY: VALUE\\n
-            ...
-            \\n
-        Devuelve dict con keys en mayúsculas.
-        Si el cliente cerró la conexión en silencio, devuelve None.
+        Lee cabeceras hasta blank line ('\\n\\n') o una sola línea 'I:F\\n'.
+        Devuelve dict con keys en mayúsculas. None si EOF limpio sin datos.
         """
         buf = bytearray()
+        raw: Optional[str] = None
+
         while True:
             chunk = sock.recv(1)
             if not chunk:
-                # conexión cerrada; si no hay nada, es EOF limpio
                 if not buf:
                     return None
                 break
             buf += chunk
-            if buf.endswith(_HEADER_BLANKLINE):
+
+            # Caso fin: 'I:F\\n'
+            if buf.endswith(_MESSAGE_DELIM) and buf.strip() == b"I:F":
+                raw = "I:F"
                 break
 
-        raw = buf.decode("utf-8", errors="replace")
+            # Caso header con blank line
+            if buf.endswith(_HEADER_BLANKLINE):
+                raw = buf.decode("utf-8", errors="replace")
+                break
+
+        if raw is None:
+            raw = buf.decode("utf-8", errors="replace")
+
+        # Fin explícito
+        if raw.strip() == "I:F":
+            return {"I": "F"}
+
         headers: Dict[str, str] = {}
         for line in raw.splitlines():
             line = line.strip()
@@ -214,9 +224,9 @@ class Server:
             if ":" in line:
                 k, v = line.split(":", 1)
                 headers[k.strip().upper()] = v.strip()
-            elif line.startswith("F:"):
-                # Soporte de 'F:FINISHED'
-                headers["F"] = line[2:].strip()
+            elif line == "F:":
+                # se ignora la línea 'F:' de apertura (sin valor)
+                continue
         return headers
 
     def _recv_exact(self, sock: socket.socket, nbytes: int, *, sink=None) -> int:
