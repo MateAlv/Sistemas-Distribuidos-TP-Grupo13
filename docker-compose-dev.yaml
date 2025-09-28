@@ -3,45 +3,28 @@ services:
   server:
     container_name: server
     image: server:latest
-    entrypoint: python3 /main.py
+    entrypoint: ["python3", "/main.py"]
     environment:
       - PYTHONUNBUFFERED=1
-      - CLI_CLIENTS=5
-    networks:
-      - testing_net
+      - CLI_CLIENTS=1
+    networks: [testing_net]
     volumes:
-      - ./server/config.ini:/config.ini
-
+      - ./server/config.ini:/config.ini:ro
   client1:
     container_name: client1
     image: client:latest
-    entrypoint: /client
+    # NO sobreescribas entrypoint: lo define el Dockerfile como ["python3","/client/main.py"]
+    # Si quisieras explicitarlo, sería:
+    # entrypoint: ["python3","/client/main.py"]
     environment:
       - CLI_ID=1
-      - DATA_MODE=tree    
-    networks:
-      - testing_net
-    depends_on:
-      - server
-    volumes:
-      - ./.data/client-1/:/data:ro
-      - ./client/config.yaml:/config.yaml
-
-  client2:
-    container_name: client2
-    image: client:latest
-    entrypoint: /client
-    environment:
-      - CLI_ID=2
+      - CLI_DATA_DIR=/data
       - DATA_MODE=tree
-    networks:
-      - testing_net
-    depends_on:
-      - server
+    networks: [testing_net]
+    depends_on: [server]
     volumes:
-      - ./.data/client-2/:/data:ro
-      - ./client/config.yaml:/config.yaml
-
+      - ./.data/client-1:/data:ro
+      - ./client/config.yaml:/config.yaml:ro
 networks:
   testing_net:
     ipam:
