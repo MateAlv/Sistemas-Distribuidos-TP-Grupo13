@@ -15,3 +15,52 @@ Los targets disponibles son:
 | `docker-image`  | Construye las imágenes a ser utilizadas tanto en el servidor como en el cliente. Este target es utilizado por **docker-compose-up**, por lo cual se lo puede utilizar para probar nuevos cambios en las imágenes antes de arrancar el proyecto. |
 | `build` | Compila la aplicación cliente para ejecución en el _host_ en lugar de en Docker. De este modo la compilación es mucho más veloz, pero requiere contar con todo el entorno de Golang y Python instalados en la máquina _host_. |
 
+
+## Protocolo de comunicación (Cliente ↔ Servidor)
+
+### 1. Handshake inicial
+- Cliente → Servidor:
+  I:H <client_id>\n
+
+- Servidor → Cliente:
+  I:O\n
+
+Esto establece la identidad del cliente y confirma que el servidor está listo para recibir archivos.
+
+---
+
+### 2. Envío de archivos (pueden ser varios en la misma conexión TCP)
+Por cada archivo CSV encontrado en el directorio del cliente:
+
+1. Cliente → Servidor: Header de inicio de archivo
+   F:\n
+   CLI_ID: <id>\n
+   FILENAME: <rel_path>\n
+   SIZE: <size_bytes>\n
+   \n
+
+   El \n\n (línea en blanco) marca el fin del header.
+
+2. Cliente → Servidor: Cuerpo binario del archivo (<size_bytes> exactos).
+
+3. Servidor → Cliente: ACK de recepción
+   I:O\n
+
+---
+
+### 3. Señal de fin de transmisión
+Cuando el cliente termina de enviar todos los archivos:
+
+- Cliente → Servidor:
+  I:F\n
+
+- Servidor → Cliente:
+  I:O\n
+
+---
+
+### 4. Características adicionales
+- Conexión: persistente (un solo socket TCP durante toda la sesión).
+- Timeouts: fijos (connect_timeout=10s, io_timeout=30s).
+- Archivos válidos: únicamente con extensión .csv.
+- Handshake: siempre obligatorio.
