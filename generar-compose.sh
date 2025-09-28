@@ -43,22 +43,22 @@ for ((i=1; i<=CLIENT_NUMBER; i++)); do
   client${i}:
     container_name: client${i}
     image: client:latest
-    # NO sobreescribas entrypoint: lo define el Dockerfile como ["python3","/client/main.py"]
-    # Si quisieras explicitarlo, sería:
-    # entrypoint: ["python3","/client/main.py"]
     environment:
       - CLI_ID=${i}
       - CLI_DATA_DIR=/data
       - DATA_MODE=tree
+      - SERVER_ADDRESS=server:12345
     networks: [testing_net]
-    depends_on: [server]
+    depends_on:
+      server:
+        condition: service_started
     volumes:
       - ${MOUNT_PATH}:/data:ro
-      - ./client/config.yaml:/config.yaml:ro
+      - ./client/config.ini:/config.ini:ro
 YAML
 done
 
-# Red
+# Redes
 cat >> "$OUTPUT_FILE" <<'YAML'
 networks:
   testing_net:

@@ -13,18 +13,18 @@ services:
   client1:
     container_name: client1
     image: client:latest
-    # NO sobreescribas entrypoint: lo define el Dockerfile como ["python3","/client/main.py"]
-    # Si quisieras explicitarlo, sería:
-    # entrypoint: ["python3","/client/main.py"]
     environment:
       - CLI_ID=1
       - CLI_DATA_DIR=/data
       - DATA_MODE=tree
+      - SERVER_ADDRESS=server:12345
     networks: [testing_net]
-    depends_on: [server]
+    depends_on:
+      server:
+        condition: service_started
     volumes:
       - ./.data/client-1:/data:ro
-      - ./client/config.yaml:/config.yaml:ro
+      - ./client/config.ini:/config.ini:ro
 networks:
   testing_net:
     ipam:
