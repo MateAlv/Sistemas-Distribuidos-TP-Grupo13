@@ -15,6 +15,13 @@ echo "Cantidad de clientes: $CLIENT_NUMBER"
 cat > "$OUTPUT_FILE" <<YAML
 name: tp0
 services:
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: rabbitmq_tests
+    hostname: rabbitmq
+    ports:
+      - "5673:5672"
+      - "15673:15672"
   server:
     container_name: server
     image: server:latest
