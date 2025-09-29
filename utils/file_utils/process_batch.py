@@ -1,24 +1,9 @@
 import datetime
-import TransactionsFileRow, TransactionsItemsFileRow, MenuItemsFileRow, StoresFileRow, UsersFileRow
-import TransactionsProcessRow, TransactionsItemsProcessRow, MenuItemsProcessRow, StoresProcessRow, UsersProcessRow
-from utils.file_utils.table_type import TableType
+from file_table import *
+from process_table import *
+from table_type import TableType
+from table_row_registry import TableRowRegistry
 
-PROCESS_CLASSES = {
-    TableType.TRANSACTIONS: lambda: TransactionsProcessRow,
-    TableType.TRANSACTIONS_ITEMS: lambda: TransactionsItemsProcessRow,
-    TableType.MENU_ITEMS: lambda: MenuItemsProcessRow,
-    TableType.STORES: lambda: StoresProcessRow,
-    TableType.USERS: lambda: UsersProcessRow,
-}
-
-FILE_CLASSES = {
-    TableType.TRANSACTIONS: lambda: TransactionsFileRow,
-    TableType.TRANSACTIONS_ITEMS: lambda: TransactionsItemsFileRow,
-    TableType.MENU_ITEMS: lambda: MenuItemsFileRow,
-    TableType.STORES: lambda: StoresFileRow,
-    TableType.USERS: lambda: UsersFileRow,
-}
-    
 class ProcessBatchHeader:
 
     def __init__(self, client_id: int, table_type: TableType, size: int = 0):
@@ -49,7 +34,7 @@ class ProcessBatchHeader:
 # PROCESS BATCH
 # =========================================
 class ProcessBatch:
-    def __init__(self, rows, table_type: TableType, client_id: int):
+    def __init__(self, rows: TableProcessRow, table_type: TableType, client_id: int):
         self.header = ProcessBatchHeader(client_id, table_type)
         self.rows = rows
         self.header.size = sum(len(r.serialize()) for r in rows)
@@ -65,21 +50,23 @@ class ProcessBatch:
     def deserialize(data: bytes, header: ProcessBatchHeader):
         rows = []
         offset = 0
-        row_cls = header.row_cls()
+        process_cls = TableRowRegistry.get_process_class(header.table_type)
         payload = data
         while offset < len(payload):
-            row, consumed = row_cls.deserialize(payload[offset:])
+            row, consumed = process_cls.deserialize(payload[offset:])
             rows.append(row)
             offset += consumed
         return ProcessBatch(rows, header.table_type, header.client_id)
-
-    def from_file_rows(file_rows_serialized, file_path: str, client_id: int):
+    
+    @staticmethod
+    def from_file_rows(file_rows_serialized: bytes, file_path: str, client_id: int):
         if not file_rows_serialized:
             raise ValueError("No se pueden convertir filas vacías")
-        table_type = TableType.from_path(file_path)
         
-        file_cls = FILE_CLASSES.get(table_type)
-        process_cls = PROCESS_CLASSES.get(table_type)
+        table_type = TableType.from_path(file_path)
+        file_cls = TableRowRegistry.get_file_class(table_type)
+        process_cls = TableRowRegistry.get_process_class(table_type)
+        
         if not file_cls or not process_cls:
             raise ValueError(f"Tipo de tabla no soportado: {table_type}")
         

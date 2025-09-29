@@ -1,3 +1,4 @@
+import datetime
 
 # =========================================
 # BASE FILE ROW
@@ -11,7 +12,7 @@ class TableFileRow:
         raise NotImplementedError
 
     @staticmethod
-    def deserialize(data: bytes) -> List[TableFileRow]:
+    def deserialize(data: bytes):
         raise NotImplementedError
 
 
@@ -31,14 +32,14 @@ class TableFileRow:
 # =========================================
 class TransactionsFileRow(TableFileRow):
     def __init__(self, 
-                 transaction_id, 
-                 store_id, 
-                 payment_method_id, 
-                 voucher_id, 
-                 user_id, 
-                 original_amount, 
-                 discount_applied, 
-                 final_amount, 
+                 transaction_id: str, 
+                 store_id: int, 
+                 payment_method_id: int, 
+                 voucher_id: int, 
+                 user_id: int, 
+                 original_amount: float, 
+                 discount_applied: float, 
+                 final_amount: float, 
                  created_at: datetime.date):
         self.transaction_id = transaction_id
         self.store_id = store_id
@@ -84,11 +85,11 @@ class TransactionsFileRow(TableFileRow):
 # =========================================
 class TransactionsItemsFileRow(TableFileRow):
     def __init__(self, 
-                 transaction_id, 
-                 item_id, 
-                 quantity, 
-                 unit_price, 
-                 subtotal, 
+                 transaction_id: str, 
+                 item_id: int, 
+                 quantity: int, 
+                 unit_price: float, 
+                 subtotal: float, 
                  created_at: datetime.date):
         self.transaction_id = transaction_id
         self.item_id = item_id
@@ -121,22 +122,31 @@ class TransactionsItemsFileRow(TableFileRow):
 # - Campos:
 #       - item_id: int
 #       - item_name: String
-#       - quantity: int
-#       - unit_price: float
-#       - subtotal: float 
-#       - created_at: Date
+#       - category: String
+#       - price: float
+#       - is_seasonal: bool
+#       - available_from: Date
+#       - available_to: Date
 # =========================================
 class MenuItemsFileRow(TableFileRow):
-    def __init__(self, item_id, name, quantity, unit_price, subtotal, created_at):
-        self.item_id = item_id        
-        self.name = name
-        self.quantity = quantity
-        self.unit_price = unit_price
-        self.subtotal = subtotal
-        self.created_at = created_at
+    def __init__(self, 
+                 item_id: int, 
+                 name: str, 
+                 category: str, 
+                 price: float, 
+                 is_seasonal: bool, 
+                 available_from: datetime.date, 
+                 available_to: datetime.date):
+        self.item_id = item_id
+        self.item_name = name
+        self.category = category
+        self.price = price
+        self.is_seasonal = is_seasonal
+        self.available_from = available_from
+        self.available_to = available_to
 
     def serialize(self) -> bytes:
-        return f"{self.item_id};{self.name};{self.quantity};{self.unit_price};{self.subtotal};{self.created_at.isoformat()}\n".encode("utf-8")
+        return f"{self.item_id};{self.item_name};{self.category};{self.price};{self.is_seasonal};{self.available_from.isoformat()};{self.available_to.isoformat()}\n".encode("utf-8")
 
     @staticmethod
     def deserialize(data: bytes):
@@ -145,10 +155,11 @@ class MenuItemsFileRow(TableFileRow):
         row = MenuItemsFileRow(
             int(parts[0]),
             parts[1],
-            int(parts[2]),
+            parts[2],
             float(parts[3]),
-            float(parts[4]),
-            datetime.date.fromisoformat(parts[5])
+            parts[4].lower() == 'true',
+            datetime.date.fromisoformat(parts[5]),
+            datetime.date.fromisoformat(parts[6])
         )
         consumed = len(line.encode("utf-8")) + 1
         return row, consumed
@@ -166,7 +177,14 @@ class MenuItemsFileRow(TableFileRow):
 #       - longitude: float
 # =========================================
 class StoresFileRow(TableFileRow):
-    def __init__(self, store_id, store_name, street, city, state, latitude, longitude):
+    def __init__(self, 
+                 store_id: int, 
+                 store_name: str, 
+                 street: str, 
+                 city: str, 
+                 state: str, 
+                 latitude: float, 
+                 longitude: float):
         self.store_id = store_id
         self.store_name = store_name
         self.street = street
@@ -206,7 +224,11 @@ class StoresFileRow(TableFileRow):
 
 class UsersFileRow(TableFileRow):
 
-    def __init__(self, user_id, gender, birthdate, registration_at):
+    def __init__(self, 
+                 user_id: int,
+                 gender: str,
+                 birthdate: datetime.date,
+                 registration_at: datetime.date):
         self.user_id = user_id
         self.gender = gender
         self.birthdate = birthdate

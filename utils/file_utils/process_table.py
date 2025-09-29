@@ -1,3 +1,7 @@
+import datetime
+from file_table import *
+from table_type import TableType
+
 class YearHalf:
     def __init__(self, year: int, half: int):
         self.year = year
@@ -75,7 +79,6 @@ class TransactionsProcessRow(TableProcessRow):
             int(parts[1]),
             float(parts[2]),
             datetime.date.fromisoformat(parts[3]),
-            YearHalf.from_date(datetime.date.fromisoformat(parts[3]))
         )
         consumed = len(line.encode("utf-8")) + 1
         return row, consumed
@@ -136,17 +139,17 @@ class TransactionsItemsProcessRow(TableProcessRow):
 # =========================================
 
 class MenuItemsProcessRow(TableProcessRow):
-    def __init__(self, item_id, name):
+    def __init__(self, item_id, item_name):
         self.item_id = item_id
-        self.name = name
-        
+        self.item_name = item_name
+
     def serialize(self) -> bytes:
-        return f"{self.item_id};{self.name}\n".encode("utf-8")
+        return f"{self.item_id};{self.item_name}\n".encode("utf-8")
 
     def from_file_row(file_row: MenuItemsFileRow):
         return MenuItemsProcessRow(
             file_row.item_id,
-            file_row.name
+            file_row.item_name
         )
     
     @staticmethod
@@ -168,17 +171,17 @@ class MenuItemsProcessRow(TableProcessRow):
 # =========================================
 
 class StoresProcessRow(TableProcessRow):
-    def __init__(self, store_id, name):
+    def __init__(self, store_id, store_name):
         self.store_id = store_id
-        self.name = name
+        self.store_name = store_name
         
     def serialize(self) -> bytes:
-        return f"{self.store_id};{self.name}\n".encode("utf-8")
+        return f"{self.store_id};{self.store_name}\n".encode("utf-8")
 
     def from_file_row(file_row: StoresFileRow):
         return StoresProcessRow(
             file_row.store_id,
-            file_row.name
+            file_row.store_name
         )
     
     @staticmethod
@@ -201,17 +204,17 @@ class StoresProcessRow(TableProcessRow):
 # =========================================
 
 class UsersProcessRow(TableProcessRow):
-    def __init__(self, user_id, birth_date: datetime.date):
+    def __init__(self, user_id, birthdate: datetime.date):
         self.user_id = user_id
-        self.birth_date = birth_date
+        self.birthdate = birthdate
         
     def serialize(self) -> bytes:
-        return f"{self.user_id};{self.birth_date.isoformat()}\n".encode("utf-8")
+        return f"{self.user_id};{self.birthdate.isoformat()}\n".encode("utf-8")
 
     def from_file_row(file_row: UsersFileRow):
         return UsersProcessRow(
             file_row.user_id,
-            file_row.birth_date
+            file_row.birthdate
         )
     
     @staticmethod
