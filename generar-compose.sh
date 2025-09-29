@@ -18,6 +18,13 @@ mkdir -p ./.data/dataset
 cat > "$OUTPUT_FILE" <<YAML
 name: tp-distribuidos-grupo13
 services:
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: rabbitmq_tests
+    hostname: rabbitmq
+    ports:
+      - "5673:5672"
+      - "15673:15672"
   server:
     container_name: server
     build: ./server
