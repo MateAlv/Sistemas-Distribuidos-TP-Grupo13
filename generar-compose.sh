@@ -43,7 +43,7 @@ for ((i=1; i<=CLIENT_NUMBER; i++)); do
   if [[ -d "${DATASET_DIR}" ]]; then
     MOUNT_PATH="${DATASET_DIR}"
   else
-    MOUNT_PATH="./.data/dataset"
+    MOUNT_PATH="./.data/"
   fi
 
   cat >> "$OUTPUT_FILE" <<YAML

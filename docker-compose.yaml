@@ -23,7 +23,7 @@ services:
       server:
         condition: service_started
     volumes:
-      - ./.data/dataset:/data:ro
+      - ./.data/:/data:ro
       - ./client/config.ini:/config.ini:ro
 networks:
   testing_net:
