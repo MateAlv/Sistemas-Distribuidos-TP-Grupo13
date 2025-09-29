@@ -1,3 +1,5 @@
 middleware/__pycache__/
 .data/
 .vscode/
+.venv/
+__pycache__/
