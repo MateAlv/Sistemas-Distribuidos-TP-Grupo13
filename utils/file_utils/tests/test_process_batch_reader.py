@@ -1,36 +1,15 @@
-from file_table import UsersFileRow
 import datetime
 import pytest
-from process_batch import ProcessBatch, ProcessBatchHeader
-from file_table import TransactionsFileRow
+from process_chunk import ProcessChunk, ProcessChunkHeader
+from process_batch_reader import ProcessBatchReader
+from file_table import UsersFileRow, TransactionsFileRow
 from process_table import TransactionsProcessRow
 from table_type import TableType
-
-def test_process_batch_header_serialize_deserialize():
-    header = ProcessBatchHeader(123, TableType.TRANSACTIONS, 456)
-    serialized = header.serialize()
-    deserialized = ProcessBatchHeader.deserialize(serialized)
-    assert deserialized.client_id == 123
-    assert deserialized.table_type == TableType.TRANSACTIONS
-    assert deserialized.size == 456
-
-def test_process_batch_serialize_deserialize():
-    row = TransactionsFileRow("tx1", 1, 2, 3, 4, 100, 0, 100, datetime.date(2023, 5, 1))
-    process_row = TransactionsProcessRow.from_file_row(row)
-    batch = ProcessBatch([process_row], TableType.TRANSACTIONS, client_id=999)
-    serialized = batch.serialize()
-    header = ProcessBatchHeader.deserialize(serialized[:12])
-    assert header.client_id == 999
-    assert header.table_type == TableType.TRANSACTIONS
-    assert header.size == len(serialized) - 12
-    deserialized = ProcessBatch.deserialize(serialized[12:], header)
-    assert len(deserialized.rows) == 1
-    assert deserialized.rows[0].store_id == 1
 
 def test_process_batch_from_file_rows():
     row = TransactionsFileRow("tx1", 1, 2, 3, 4, 100, 0, 100, datetime.date(2023, 5, 1))
     serialized = row.serialize()
-    batch = ProcessBatch.from_file_rows(serialized, "/data/transactions/tx.csv", client_id=111)
+    batch = ProcessBatchReader.from_file_rows(serialized, "/data/transactions/tx.csv", client_id=111)
     assert len(batch.rows) == 1
     assert batch.rows[0].store_id == 1
 
@@ -45,7 +24,7 @@ def test_process_batch_from_many_file_rows():
     ]
     
     serialized = b"".join(r.serialize() for r in rows)
-    batch = ProcessBatch.from_file_rows(serialized, "/data/users/tx.csv", client_id=111)
+    batch = ProcessBatchReader.from_file_rows(serialized, "/data/users/tx.csv", client_id=111)
     
     assert batch.header.client_id == 111
     assert batch.header.table_type == TableType.USERS
@@ -68,15 +47,14 @@ def test_process_batch_serialize_deserialize_many():
     ]
     
     serialized = b"".join(r.serialize() for r in rows)
-    batch = ProcessBatch.from_file_rows(serialized, "/data/users/tx.csv", client_id=111)
+    batch = ProcessBatchReader.from_file_rows(serialized, "/data/users/tx.csv", client_id=111)
     serialized_batch = batch.serialize()
+
+    deserialized_batch = ProcessBatchReader.from_bytes(serialized_batch)
+    assert deserialized_batch.header.client_id == 111
+    assert deserialized_batch.header.table_type == TableType.USERS
+    assert deserialized_batch.header.size == len(serialized_batch) - ProcessChunkHeader.HEADER_SIZE
     
-    header = ProcessBatchHeader.deserialize(serialized_batch[:12])
-    assert header.client_id == 111
-    assert header.table_type == TableType.USERS
-    assert header.size == len(serialized_batch) - 12
-    
-    deserialized_batch = ProcessBatch.deserialize(serialized_batch[12:], header)
     assert len(deserialized_batch.rows) == 6
     assert deserialized_batch.rows[0].user_id == 1
     assert deserialized_batch.rows[1].user_id == 2
@@ -87,4 +65,4 @@ def test_process_batch_serialize_deserialize_many():
 
 def test_process_batch_from_file_rows_empty():
     with pytest.raises(ValueError):
-        ProcessBatch.from_file_rows(b"", "/data/transactions/tx.csv", client_id=111)
+        ProcessBatchReader.from_file_rows(b"", "/data/transactions/tx.csv", client_id=111)

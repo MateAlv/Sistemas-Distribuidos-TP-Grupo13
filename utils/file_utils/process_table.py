@@ -52,20 +52,29 @@ class TableProcessRow:
 #       - year_half_created_at: YearHalf
 # =========================================
 class TransactionsProcessRow(TableProcessRow):
-    def __init__(self, transaction_id, store_id, final_amount, created_at: datetime.date):
+    def __init__(self, transaction_id: str, store_id: int, user_id: int, final_amount: float, created_at: datetime.date):
         self.transaction_id = transaction_id
         self.store_id = store_id
+        self.user_id = user_id
         self.final_amount = final_amount
         self.created_at = created_at
         self.year_half_created_at = YearHalf.from_date(created_at)
 
     def serialize(self) -> bytes:
-        return f"{self.transaction_id};{self.store_id};{self.final_amount};{self.created_at.isoformat()};{self.year_half_created_at}\n".encode("utf-8")
+        transaction_id_str = self.transaction_id if self.transaction_id is not None else ""
+        store_id_str = str(self.store_id) if self.store_id is not None else ""
+        user_id_str = str(self.user_id) if self.user_id is not None else ""
+        final_amount_str = str(self.final_amount) if self.final_amount is not None else ""
+        created_at_str = self.created_at.isoformat() if self.created_at is not None else ""
+        year_half_created_at_str = str(self.year_half_created_at) if self.year_half_created_at is not None else ""
+
+        return f"{transaction_id_str};{store_id_str};{user_id_str};{final_amount_str};{created_at_str};{year_half_created_at_str}\n".encode("utf-8")
 
     def from_file_row(file_row: TransactionsFileRow):
         return TransactionsProcessRow(
             file_row.transaction_id,
             file_row.store_id,
+            file_row.user_id,
             file_row.final_amount,
             file_row.created_at
         )
@@ -74,13 +83,16 @@ class TransactionsProcessRow(TableProcessRow):
     def deserialize(data: bytes):
         line = data.split(b"\n", 1)[0].decode("utf-8")
         parts = line.split(";")
-        row = TransactionsProcessRow(
-            parts[0],
-            int(parts[1]),
-            float(parts[2]),
-            datetime.date.fromisoformat(parts[3]),
-        )
+        
+        trans_id = parts[0] if len(parts[0]) > 0 else None
+        store_id = int(parts[1]) if len(parts[1]) > 0 else None
+        user_id = int(parts[2]) if len(parts[2]) > 0 else None
+        final_amount = float(parts[3]) if len(parts[3]) > 0 else None
+        created_at = datetime.date.fromisoformat(parts[4]) if len(parts[4]) > 0 else None
+
+        row = TransactionsProcessRow(trans_id, store_id, user_id, final_amount, created_at)
         consumed = len(line.encode("utf-8")) + 1
+        
         return row, consumed
 
 # =========================================
@@ -89,14 +101,14 @@ class TransactionsProcessRow(TableProcessRow):
 # - Campos: 
 #       - transaction_id: String
 #       - item_id: int
-#       - quantity: int
-#       - subtotal: float
+#       - quantity: int -> SUM
+#       - subtotal: float -> SUM
 #       - created_at: Date
 #       - month_year_created_at: MonthYear
 # =========================================
 
 class TransactionsItemsProcessRow(TableProcessRow):
-    def __init__(self, transaction_id, item_id, quantity, subtotal, created_at: datetime.date):
+    def __init__(self, transaction_id: str, item_id: int, quantity: int, subtotal: float, created_at: datetime.date):
         self.transaction_id = transaction_id
         self.item_id = item_id
         self.quantity = quantity
@@ -105,7 +117,14 @@ class TransactionsItemsProcessRow(TableProcessRow):
         self.month_year_created_at = MonthYear.from_date(created_at)
         
     def serialize(self) -> bytes:
-        return f"{self.transaction_id};{self.item_id};{self.quantity};{self.subtotal};{self.created_at.isoformat()};{self.month_year_created_at}\n".encode("utf-8")
+        transaction_id_str = self.transaction_id if self.transaction_id is not None else ""
+        item_id_str = str(self.item_id) if self.item_id is not None else ""
+        quantity_str = str(self.quantity) if self.quantity is not None else ""
+        subtotal_str = str(self.subtotal) if self.subtotal is not None else ""
+        created_at_str = self.created_at.isoformat() if self.created_at is not None else ""
+        month_year_created_at_str = str(self.month_year_created_at) if self.month_year_created_at is not None else ""
+
+        return f"{transaction_id_str};{item_id_str};{quantity_str};{subtotal_str};{created_at_str};{month_year_created_at_str}\n".encode("utf-8")
 
     def from_file_row(file_row: TransactionsItemsFileRow):
         return TransactionsItemsProcessRow(
@@ -120,14 +139,16 @@ class TransactionsItemsProcessRow(TableProcessRow):
     def deserialize(data: bytes):
         line = data.split(b"\n", 1)[0].decode("utf-8")
         parts = line.split(";")
-        row = TransactionsItemsProcessRow(
-            parts[0],
-            int(parts[1]),
-            int(parts[2]),
-            float(parts[3]),
-            datetime.date.fromisoformat(parts[4])
-        )
+
+        transaction_id = parts[0] if len(parts[0]) > 0 else None
+        item_id = int(parts[1]) if len(parts[1]) > 0 else None
+        quantity = int(parts[2]) if len(parts[2]) > 0 else None
+        subtotal = float(parts[3]) if len(parts[3]) > 0 else None
+        created_at = datetime.date.fromisoformat(parts[4]) if len(parts[4]) > 0 else None
+
+        row = TransactionsItemsProcessRow(transaction_id, item_id, quantity, subtotal, created_at)
         consumed = len(line.encode("utf-8")) + 1
+        
         return row, consumed
     
 # =========================================
@@ -139,12 +160,15 @@ class TransactionsItemsProcessRow(TableProcessRow):
 # =========================================
 
 class MenuItemsProcessRow(TableProcessRow):
-    def __init__(self, item_id, item_name):
+    def __init__(self, item_id: int, item_name: str):
         self.item_id = item_id
         self.item_name = item_name
 
     def serialize(self) -> bytes:
-        return f"{self.item_id};{self.item_name}\n".encode("utf-8")
+        item_id_str = str(self.item_id) if self.item_id is not None else ""
+        item_name_str = self.item_name if self.item_name is not None else ""
+        
+        return f"{item_id_str};{item_name_str}\n".encode("utf-8")
 
     def from_file_row(file_row: MenuItemsFileRow):
         return MenuItemsProcessRow(
@@ -156,11 +180,13 @@ class MenuItemsProcessRow(TableProcessRow):
     def deserialize(data: bytes):
         line = data.split(b"\n", 1)[0].decode("utf-8")
         parts = line.split(";")
-        row = MenuItemsProcessRow(
-            int(parts[0]),
-            parts[1]
-        )
+
+        item_id = int(parts[0]) if len(parts[0]) > 0 else None
+        item_name = parts[1] if len(parts[1]) > 0 else None
+
+        row = MenuItemsProcessRow(item_id, item_name)
         consumed = len(line.encode("utf-8")) + 1
+        
         return row, consumed
 # =========================================
 # Stores Process Row
@@ -171,12 +197,15 @@ class MenuItemsProcessRow(TableProcessRow):
 # =========================================
 
 class StoresProcessRow(TableProcessRow):
-    def __init__(self, store_id, store_name):
+    def __init__(self, store_id: int, store_name: str):
         self.store_id = store_id
         self.store_name = store_name
         
     def serialize(self) -> bytes:
-        return f"{self.store_id};{self.store_name}\n".encode("utf-8")
+        store_id_str = str(self.store_id) if self.store_id is not None else ""
+        store_name_str = self.store_name if self.store_name is not None else ""
+        
+        return f"{store_id_str};{store_name_str}\n".encode("utf-8")
 
     def from_file_row(file_row: StoresFileRow):
         return StoresProcessRow(
@@ -188,10 +217,12 @@ class StoresProcessRow(TableProcessRow):
     def deserialize(data: bytes):
         line = data.split(b"\n", 1)[0].decode("utf-8")
         parts = line.split(";")
-        row = StoresProcessRow(
-            int(parts[0]),
-            parts[1]
-        )
+
+        store_id = int(parts[0]) if len(parts[0]) > 0 else None
+        store_name = parts[1] if len(parts[1]) > 0 else None
+        
+        row = StoresProcessRow(store_id, store_name)
+        
         consumed = len(line.encode("utf-8")) + 1
         return row, consumed
     
@@ -204,12 +235,15 @@ class StoresProcessRow(TableProcessRow):
 # =========================================
 
 class UsersProcessRow(TableProcessRow):
-    def __init__(self, user_id, birthdate: datetime.date):
+    def __init__(self, user_id: int, birthdate: datetime.date):
         self.user_id = user_id
         self.birthdate = birthdate
         
     def serialize(self) -> bytes:
-        return f"{self.user_id};{self.birthdate.isoformat()}\n".encode("utf-8")
+        user_id_str = str(self.user_id) if self.user_id is not None else ""
+        birthdate_str = self.birthdate.isoformat() if self.birthdate is not None else ""
+
+        return f"{user_id_str};{birthdate_str}\n".encode("utf-8")
 
     def from_file_row(file_row: UsersFileRow):
         return UsersProcessRow(
@@ -221,10 +255,12 @@ class UsersProcessRow(TableProcessRow):
     def deserialize(data: bytes):
         line = data.split(b"\n", 1)[0].decode("utf-8")
         parts = line.split(";")
-        row = UsersProcessRow(
-            int(parts[0]),
-            datetime.date.fromisoformat(parts[1])
-        )
+
+        user_id = int(parts[0]) if len(parts[0]) > 0 else None
+        birthdate = datetime.date.fromisoformat(parts[1]) if len(parts[1]) > 0 else None
+
+        row = UsersProcessRow(user_id, birthdate)
+        
         consumed = len(line.encode("utf-8")) + 1
         return row, consumed
 # =========================================
