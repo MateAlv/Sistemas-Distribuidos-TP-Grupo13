@@ -135,8 +135,29 @@ class Server:
                     with open(out_path, "wb") as f:
                         received = self._recv_exact(sock, size, sink=f.write)
                 else:
-                    received = self._recv_exact(sock, size)  # descarta
+                    """
+                    # Recive el tamaño del batch (int) y luego los datos del batch
+                    batch_size = self._recv_exact(sock, 4)
+                    payload_received = self._recv_exact(sock, batch_size)
 
+                    # Deserializa el batch recibido para convertirlo en objeto ProcessBatch
+                    process_batch = ProcessBatch.from_file_rows(payload_received[12:], fname, cli_id)
+                    # Aquí puedes procesar el objeto process_batch según sea necesario
+                    if process_batch.table_type() == TableType.TRANSACTIONS or process_batch.table_type() == TableType.TRANSACTIONS_ITEMS:
+                        # Envia al filtro 1
+                        pass
+                    elif process_batch.table_type() == TableType.STORES:
+                        # Envia al join Stores 
+                        # Envia al TOP 3
+                        pass
+                    elif process_batch.table_type() == TableType.USERS:
+                        # Envia al join Users
+                        pass
+                    elif process_batch.table_type() == TableType.MENU_ITEMS:
+                        # Envia al join MenuItems
+                        pass
+                    """
+                    
                 logging.info("action: recv_file_end | peer:%s | cli_id:%s | file:%s | bytes:%s",
                              peer, cli_id, fname, received)
 
