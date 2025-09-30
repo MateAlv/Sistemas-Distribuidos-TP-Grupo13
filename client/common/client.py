@@ -3,7 +3,7 @@ import os
 import logging
 from typing import Dict, Tuple
 
-from common.batch_reader import DirectoryBatchReader
+from common.directory_batch_reader import DirectoryBatchReader
 from common.sender import Sender
 
 
