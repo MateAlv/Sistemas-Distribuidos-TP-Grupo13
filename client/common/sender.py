@@ -85,30 +85,8 @@ class Sender:
         if line != OK_HEADER.encode("utf-8"):
             raise RuntimeError(f"Handshake inválido, esperaba {OK_HEADER}, recibí {line!r}")
         logging.debug("handshake_ok | id=%s", client_id)
-
-    # -------- Archivos --------
-
-    def start_file(self, client_id: str, rel_path: str, size: int) -> None:
-        """
-        Envía header de archivo:
-            F:\n
-            CLI_ID: <id>\n
-            FILENAME: <rel_path>\n
-            SIZE: <size>\n
-            IS_FINAL: 0\n
-            \n
-        """
-        self._ensure_socket()
-        header = (
-            f"{FILE_HEADER}\n"
-            f"CLI_ID: {client_id}\n"
-            f"FILENAME: {rel_path}\n"
-            f"SIZE: {size}\n"
-            f"\n"
-        ).encode("utf-8")
-        self._sendall(header)
-        logging.debug("file_header_sent | file=%s size=%s", rel_path, size)
-
+    
+    # -------- Envío de batches --------
     def send_batch(self, data: bytes) -> None:
         """Envía un chunk del cuerpo binario del archivo."""
         self._ensure_socket()
@@ -144,19 +122,6 @@ class Sender:
             logging.debug("finished_no_response | err=%r", e)
 
     # ---------------- Internos ----------------
-
-    def _ensure_socket(self) -> None:
-        if self._sock is None:
-            raise RuntimeError("Sender no conectado. Llamá a connect() primero.")
-
-    def _sendall(self, data: bytes) -> None:
-        assert self._sock is not None
-        view = memoryview(data)
-        while view:
-            sent = self._sock.send(view)
-            if sent == 0:
-                raise OSError("socket send devolvió 0 (conexión rota)")
-            view = view[sent:]
 
     def _recv_line(self) -> bytes:
         """

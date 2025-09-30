@@ -3,7 +3,8 @@ import os
 import logging
 from typing import Dict, Tuple
 
-from common.directory_batch_reader import DirectoryBatchReader
+from common.directory_reader import DirectoryReader
+from common.batch_reader import BatchReader
 from common.sender import Sender
 
 
@@ -14,24 +15,8 @@ from common.sender import Sender
 CONNECT_TIMEOUT_S: float = 10.0
 IO_TIMEOUT_S: float = 30.0
 
-# Archivos: solo CSV
-ALLOWED_EXTS = {".csv"}
-
-
 class Client:
-    """
-    Protocolo (socket persistente):
-      I:H <id>\n           → I:O
-      Por cada archivo CSV:
-        F:\n
-        CLI_ID: <id>\n
-        FILENAME: <rel_path>\n
-        SIZE: <size>\n
-        \n
-        <size bytes>        → I:O
-      I:F\n                 → I:O
-    """
-
+   
     def __init__(self, config: Dict, default_data_dir: str = "/data") -> None:
         # Identidad del cliente
         self.id: str = str(config.get("id", ""))
@@ -60,16 +45,6 @@ class Client:
         Único modo soportado: conexión TCP persistente para TODO el directorio.
         Solo procesa archivos con extensión .csv (case-insensitive).
         """
-        # Lector de directorio en modo binario por chunks
-        reader = DirectoryBatchReader(
-            self.data_dir,
-            self.batch_size,
-            mode="bytes",
-            extensions=list(ALLOWED_EXTS),
-        )
-
-        total_files_hint = self._count_csv_files(self.data_dir)
-        logging.info("Conexión TCP persistente para ~%d archivo(s)", total_files_hint)
 
         # Conexión persistente + handshake obligatorio
         with Sender(
@@ -78,34 +53,30 @@ class Client:
             connect_timeout=CONNECT_TIMEOUT_S,
             io_timeout=IO_TIMEOUT_S,
         ) as sender:
+        
+        
             # Handshake SIEMPRE encendido
             sender.send_hello(self.id)
-
+            logging.info("Cliente %s: handshake OK con %s:%s", self.id, self.server_host, self.server_port)
+            # Lector de batches
+            reader = BatchReader(
+                client_id=int(self.id),
+                root=self.data_dir,
+                max_batch_size=self.batch_size,
+            )
+            logging.info("Cliente %s: comenzando envío de datos a %s:%s", self.id, self.server_host, self.server_port)
+            
             # Stream de archivos
-            for fc in reader:
-                if fc.first:
-                    sender.start_file(self.id, fc.rel_path, fc.file_size)
-                if fc.data:
-                    sender.send_batch(fc.data)
-                if fc.last:
+            for chunk in reader.iter():
+                if chunk.data:
+                    sender.send_batch(chunk.data)
+                if chunk.is_last_file_chunk():
                     sender.end_file_and_wait_ack()
 
             # Señal de fin
             sender.send_finished()
 
         logging.info("Cliente %s: envío completado (single).", self.id)
-
-    # ---------------------------
-    # Utilitarios
-    # ---------------------------
-    def _count_csv_files(self, root: str) -> int:
-        cnt = 0
-        for _, _, files in os.walk(os.path.abspath(root)):
-            for name in files:
-                _, ext = os.path.splitext(name)
-                if ext.lower() in ALLOWED_EXTS:
-                    cnt += 1
-        return cnt
 
     # ---------------------------
     # Helpers
