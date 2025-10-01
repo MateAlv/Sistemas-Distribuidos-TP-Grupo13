@@ -1,2 +1,5 @@
-.data/client-1/
-
+middleware/__pycache__/
+.data/
+.vscode/
+.venv/
+__pycache__/

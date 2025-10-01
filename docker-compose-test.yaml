@@ -2,17 +2,23 @@ name: tp-distribuidos-grupo13
 services:
   server:
     container_name: server
-    build: ./server
-    entrypoint: ["python3", "/main.py"]
+    build:
+      context: .             # project root
+      dockerfile: server/Dockerfile
+    entrypoint: ["python3", "main.py"]
     environment:
       - PYTHONUNBUFFERED=1
       - CLI_CLIENTS=1
     networks: [testing_net]
     volumes:
       - ./server/config.ini:/config.ini:ro
-  client1:
+      - ./utils:/server/utils:ro
+  client:
     container_name: client1
-    build: ./client
+    build:
+      context: .             # project root
+      dockerfile: client/Dockerfile
+    entrypoint: ["python3", "main.py"]
     environment:
       - CLI_ID=1
       - CLI_DATA_DIR=/data
@@ -23,8 +29,9 @@ services:
       server:
         condition: service_started
     volumes:
-      - ./.data/:/data:ro
+      - ./utils/communication/tests/test_data:/data:ro
       - ./client/config.ini:/config.ini:ro
+      - ./utils:/client/utils:ro
 networks:
   testing_net:
     ipam:

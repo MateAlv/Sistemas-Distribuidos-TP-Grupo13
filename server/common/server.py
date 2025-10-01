@@ -1,11 +1,16 @@
 # server/common/server.py
-from __future__ import annotations
+from logging import log
 
 import os
 import socket
 import threading
 import logging
 from typing import Dict, Tuple, Optional
+from utils.communication.socket_utils import ensure_socket, recv_exact, sendall
+from utils.file_utils.process_batch_reader import ProcessBatchReader
+from utils.communication.file_chunk import FileChunk, FileChunkHeader
+from utils.file_utils.table_type import TableType
+
 
 # Delimitadores / framing
 _MESSAGE_DELIM = b"\n"
@@ -18,26 +23,33 @@ DEFAULT_IO_TIMEOUT = 120.0
 # Persistencia opcional de archivos recibidos
 SAVE_DIR = os.getenv("SERVER_SAVE_DIR", "").strip()  # vacío => no guarda
 
+# ============================
+# Protocolo (constantes)
+# ============================
+
+# Identificadores de control
+
+H_ID_HANDSHAKE: int = 1   # Handshake HELLO
+H_ID_DATA: int = 2    # File header
+H_ID_FINISH: int = 3  # Finished
+H_ID_OK: int = 4       # OK genérico
+# ----------------------------
 class Server:
     """
-    Server TCP que habla el protocolo 'I:*' de tu cliente:
+    Server TCP que habla el protocolo de tu cliente:
 
       Handshake:
-        C -> S:  I:H <id>\\n
-        S -> C:  I:O\\n
+        C -> S:  H 
+        S -> C:  O
 
       Envío de archivos (múltiples por conexión):
-        C -> S:  F:\\n
-                 CLI_ID: <id>\\n
-                 FILENAME: <rel_path>\\n
-                 SIZE: <size>\\n
-                 \\n
-                 <size bytes>
-        S -> C:  I:O\\n     (ACK por archivo)
+        C -> S:  F:
+                 FileChunk
+        S -> C:  O    (ACK por chunk)
 
       Fin de stream:
-        C -> S:  I:F\\n
-        S -> C:  I:O\\n
+        C -> S:  F
+        S -> C:  O
     """
 
     def __init__(self, port: int, listen_backlog: int) -> None:
@@ -100,48 +112,35 @@ class Server:
             sock.settimeout(DEFAULT_IO_TIMEOUT)
             logging.info("action: client_connected | peer:%s", peer)
 
-            # -------- Handshake obligatorio según protocolo I:* --------
+            # -------- Handshake obligatorio según protocolo --------
             self._do_handshake(sock)
 
             # -------- Loop de recepción de archivos / fin --------
             while True:
-                headers = self._recv_headers(sock)
-                if headers is None:
-                    logging.info("action: client_eof | peer:%s", peer)
+                header = self._recv_header_id(sock)
+                if header is None:
                     break
 
-                # Fin explícito: 'I:F'
-                if headers.get("I") == "F":
-                    logging.info("action: client_finished | peer:%s", peer)
-                    self._send_line(sock, b"I:O")
+                if header == H_ID_DATA:
+                    logging.debug("action: recv_file_chunk_header | peer:%s", peer)
+                    # Recibe y procesa el chunk
+                    self._handle_file_chunks(sock)
+                    # ACK por chunk
+                    sendall(sock, self.header_id_to_bytes(H_ID_OK))
                     continue
 
-                cli_id = headers.get("CLI_ID", "?")
-                fname = headers.get("FILENAME", "unknown")
-                size_s = headers.get("SIZE", "0")
-                try:
-                    size = int(size_s)
-                except Exception:
-                    size = 0
-
-                logging.info("action: recv_file_start | peer:%s | cli_id:%s | file:%s | size:%s",
-                             peer, cli_id, fname, size)
-
-                received = 0
-                if SAVE_DIR:
-                    safe_path = os.path.normpath(fname).lstrip("/\\")
-                    out_path = os.path.join(SAVE_DIR, safe_path)
-                    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-                    with open(out_path, "wb") as f:
-                        received = self._recv_exact(sock, size, sink=f.write)
-                else:
-                    received = self._recv_exact(sock, size)  # descarta
-
+                if header == H_ID_FINISH:
+                    logging.info("action: recv_finished | peer:%s", peer)
+                    # ACK final
+                    sendall(sock, self.header_id_to_bytes(H_ID_OK))
+                    break
+    
+                    
                 logging.info("action: recv_file_end | peer:%s | cli_id:%s | file:%s | bytes:%s",
                              peer, cli_id, fname, received)
 
                 # ACK por archivo (protocolo I:O)
-                self._send_line(sock, b"I:O")
+                sendall(sock, self.header_id_to_bytes(H_ID_OK))
 
         except Exception as e:
             logging.error("action: client_handler_error | peer:%s | error:%r", peer, e)
@@ -162,112 +161,76 @@ class Server:
 
     def _do_handshake(self, sock: socket.socket) -> None:
         """
-        Espera línea 'I:H <id>\\n' y responde 'I:O\\n'.
-        Si no llega a tiempo o llega otra cosa, se considera protocolo inválido.
+        Espera un solo byte 'H'. Responde 'O'.
         """
-        sock.settimeout(3.0)  
-        line = self._recv_line(sock)
+        sock.settimeout(3.0)
+        logging.debug("action: handshake_wait | timeout:3s")
+        header = self._recv_header_id(sock)
+        logging.debug("action: handshake_recv | byte:%r", header)
         sock.settimeout(DEFAULT_IO_TIMEOUT)
 
-        if not line:
+        if not header:
             raise RuntimeError("handshake_empty")
 
-        try:
-            text = line.decode("utf-8", errors="replace")
-        except Exception:
-            text = ""
+        if header != H_ID_HANDSHAKE:
+            raise RuntimeError(f"handshake_invalid: {header!r}")
 
-        if not text.startswith("I:H"):
-            raise RuntimeError(f"handshake_invalid: {text!r}")
+        logging.debug("action: handshake_ok | byte:%r", header)
+        sendall(sock, self.header_id_to_bytes(H_ID_OK))
 
-        logging.debug("action: handshake_ok | line:%r", text)
-        self._send_line(sock, b"I:O")
-
-    def _recv_headers(self, sock: socket.socket) -> Optional[Dict[str, str]]:
+    def _handle_file_chunks(self, sock: socket.socket) -> None:
+        # Recive el tamaño del batch (int) y luego los datos del batch
+        chunk = FileChunk.recv(sock)
+        logging.info("action: recv_file_chunk | peer:%s | cli_id:%s | file:%s | bytes:%s",
+                     peer, chunk.client_id(), chunk.path(), chunk.payload_size())
+        # Deserializa el batch recibido para convertirlo en objeto ProcessBatch
+        process_chunk = ProcessBatchReader.from_file_rows(chunk.payload(), chunk.path(), chunk.client_id())
+        # Aquí puedes procesar el objeto process_chunk según sea necesario
+        if process_chunk.table_type() == TableType.TRANSACTIONS or process_batch.table_type() == TableType.TRANSACTIONS_ITEMS:
+            # Envia al filtro 1
+            logging.info("action: send_to_filter1 | peer:%s | cli_id:%s | file:%s | bytes:%s",
+                         peer, chunk.client_id(), chunk.path(), chunk.payload_size())
+            pass
+        elif process_chunk.table_type() == TableType.STORES:
+            # Envia al join Stores 
+            logging.info("action: send_to_join_stores | peer:%s | cli_id:%s | file:%s | bytes:%s",
+                         peer, chunk.client_id(), chunk.path(), chunk.payload_size())
+            # Envia al TOP 3
+            logging.info("action: send_to_top3 | peer:%s | cli_id:%s | file:%s | bytes:%s",
+                         peer, chunk.client_id(), chunk.path(), chunk.payload_size())
+            pass
+        elif process_chunk.table_type() == TableType.USERS:
+            # Envia al join Users
+            logging.info("action: send_to_join_users | peer:%s | cli_id:%s | file:%s | bytes:%s",
+                         peer, chunk.client_id(), chunk.path(), chunk.payload_size())
+            pass
+        elif process_chunk.table_type() == TableType.MENU_ITEMS:
+            # Envia al join MenuItems
+            logging.info("action: send_to_join_menu_items | peer:%s | cli_id:%s | file:%s | bytes:%s",
+                         peer, chunk.client_id(), chunk.path(), chunk.payload_size())
+            pass
+    
+    # ---------------- Internos ----------------
+    
+    def _recv_header_id(self, sock: socket.socket) -> int:
         """
-        Lee cabeceras hasta blank line ('\\n\\n') o una sola línea 'I:F\\n'.
-        Devuelve dict con keys en mayúsculas. None si EOF limpio sin datos.
+        Lee exactamente un byte de cabecera.
+        Devuelve None si EOF limpio sin datos.
         """
-        buf = bytearray()
-        raw: Optional[str] = None
+        ensure_socket(sock)
+        b = recv_exact(sock, 1)
+        header_int = self.header_id_from_bytes(b)
+        return header_int
 
-        while True:
-            chunk = sock.recv(1)
-            if not chunk:
-                if not buf:
-                    return None
-                break
-            buf += chunk
-
-            # Caso fin: 'I:F\\n'
-            if buf.endswith(_MESSAGE_DELIM) and buf.strip() == b"I:F":
-                raw = "I:F"
-                break
-
-            # Caso header con blank line
-            if buf.endswith(_HEADER_BLANKLINE):
-                raw = buf.decode("utf-8", errors="replace")
-                break
-
-        if raw is None:
-            raw = buf.decode("utf-8", errors="replace")
-
-        # Fin explícito
-        if raw.strip() == "I:F":
-            return {"I": "F"}
-
-        headers: Dict[str, str] = {}
-        for line in raw.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            if ":" in line:
-                k, v = line.split(":", 1)
-                headers[k.strip().upper()] = v.strip()
-            elif line == "F:":
-                # se ignora la línea 'F:' de apertura (sin valor)
-                continue
-        return headers
-
-    def _recv_exact(self, sock: socket.socket, nbytes: int, *, sink=None) -> int:
-        """
-        Lee exactamente nbytes del socket. Si 'sink' es una función (p. ej. f.write),
-        envía cada chunk allí; si no, descarta. Devuelve bytes recibidos.
-        """
-        remaining = nbytes
-        total = 0
-        CHUNK = 64 * 1024
-        while remaining > 0:
-            to_read = CHUNK if remaining > CHUNK else remaining
-            data = sock.recv(to_read)
-            if not data:
-                raise OSError(f"connection closed early; remaining={remaining}")
-            total += len(data)
-            remaining -= len(data)
-            if sink:
-                sink(data)
-        return total
-
-    def _recv_line(self, sock: socket.socket) -> bytes:
-        buf = bytearray()
-        while True:
-            b = sock.recv(1)
-            if not b:
-                break
-            buf += b
-            if buf.endswith(_MESSAGE_DELIM):
-                break
-        return bytes(buf).rstrip(b"\r\n")
-
-    def _send_line(self, sock: socket.socket, line: bytes) -> None:
-        """Envía `line + \\n` asegurando escritura completa."""
-        data = line + _MESSAGE_DELIM
-        view = memoryview(data)
-        while view:
-            sent = sock.send(view)
-            if sent == 0:
-                raise OSError("socket send returned 0")
-            view = view[sent:]
+    def header_id_to_bytes(self, header: int) -> bytes:
+        if not isinstance(header, int):
+            raise TypeError(f"header debe ser int, no {type(header).__name__}")
+        if not (0 <= header <= 255):
+            raise ValueError(f"header fuera de rango [0,255]: {header}")
+        return header.to_bytes(1, byteorder='big')
+    
+    def header_id_from_bytes(self, data: bytes) -> int:
+        return int.from_bytes(data, byteorder='big')
 
     # ---------------------------------------------------------------------
 
