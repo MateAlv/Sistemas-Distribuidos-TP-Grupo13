@@ -1,10 +1,10 @@
 import datetime
 import pytest
-from process_chunk import ProcessChunk, ProcessChunkHeader
-from process_batch_reader import ProcessBatchReader
-from file_table import UsersFileRow, TransactionsFileRow
-from process_table import TransactionsProcessRow
-from table_type import TableType
+from ..process_chunk import ProcessChunk, ProcessChunkHeader
+from ..process_batch_reader import ProcessBatchReader
+from ..file_table import UsersFileRow, TransactionsFileRow
+from ..process_table import TransactionsProcessRow
+from ..table_type import TableType
 
 def test_process_batch_from_file_rows():
     row = TransactionsFileRow("tx1", 1, 2, 3, 4, 100, 0, 100, datetime.date(2023, 5, 1))

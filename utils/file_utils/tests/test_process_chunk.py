@@ -1,10 +1,9 @@
-from file_table import UsersFileRow
 import datetime
 import pytest
-from process_chunk import ProcessChunk, ProcessChunkHeader
-from file_table import TransactionsFileRow
-from process_table import TransactionsProcessRow
-from table_type import TableType
+from ..process_chunk import ProcessChunk, ProcessChunkHeader
+from ..file_table import TransactionsFileRow, UsersFileRow
+from ..process_table import TransactionsProcessRow
+from ..table_type import TableType
 
 def test_process_chunk_header_serialize_deserialize():
     header = ProcessChunkHeader(123, TableType.TRANSACTIONS, 456)

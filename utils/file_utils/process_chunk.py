@@ -1,8 +1,8 @@
 import datetime
-from file_table import *
-from process_table import *
-from table_type import TableType
-from table_row_registry import TableRowRegistry
+from .file_table import *
+from .process_table import *
+from .table_type import TableType
+from .table_row_registry import TableRowRegistry
 
 class ProcessChunkHeader:
 

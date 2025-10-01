@@ -1,5 +1,5 @@
 import pytest
-from table_type import TableType
+from ..table_type import TableType
 
 def test_table_type_from_path_valid():
     path = "/data/transactions/transactions_2023.csv"

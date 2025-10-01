@@ -1,6 +1,6 @@
 import datetime
-from file_table import *
-from table_type import TableType
+from .file_table import *
+from .table_type import TableType
 
 class YearHalf:
     def __init__(self, year: int, half: int):

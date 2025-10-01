@@ -1,6 +1,6 @@
-from common.directory_reader import DirectoryReader
+from directory_reader import DirectoryReader
 
-TEST_PATH = "./client/common/tests/test_data"
+TEST_PATH = "./utils/communication/tests/test_data"
 
 def test_directory_reader_creation():
     # Crear reader

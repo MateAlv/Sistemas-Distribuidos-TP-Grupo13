@@ -1,10 +1,10 @@
 import datetime
-from process_table import (
+from ..process_table import (
     YearHalf, MonthYear,
     TransactionsProcessRow, TransactionsItemsProcessRow,
     MenuItemsProcessRow, StoresProcessRow, UsersProcessRow
 )
-from file_table import (
+from ..file_table import (
     TransactionsFileRow, TransactionsItemsFileRow,
     MenuItemsFileRow, StoresFileRow, UsersFileRow
 )

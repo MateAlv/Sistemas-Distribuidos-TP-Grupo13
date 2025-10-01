@@ -1,10 +1,10 @@
 # client/common/tests/test_batch_reader.py
 import os
 import pytest
-from common.batch_reader import BatchReader
-from common.file_chunk import FileChunk
+from batch_reader import BatchReader
+from file_chunk import FileChunk
 
-TEST_PATH = "./client/common/tests/test_data"
+TEST_PATH = "./utils/communication/tests/test_data"
 MAX_BATCH_SIZE = 8 * 1024  # 8KB
 
 @pytest.mark.parametrize("folder", ["menu_items", "stores"])

@@ -1,6 +1,6 @@
 import datetime
 import pytest
-from file_table import (
+from ..file_table import (
     TransactionsFileRow,
     TransactionsItemsFileRow,
     MenuItemsFileRow,
