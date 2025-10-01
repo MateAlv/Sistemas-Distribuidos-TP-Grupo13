@@ -2,7 +2,7 @@ name: tp-distribuidos-grupo13
 services:
   server:
     container_name: server
-    image: server:latest
+    build: ./server
     entrypoint: ["python3", "/main.py"]
     environment:
       - PYTHONUNBUFFERED=1
@@ -12,7 +12,7 @@ services:
       - ./server/config.ini:/config.ini:ro
   client1:
     container_name: client1
-    image: client:latest
+    build: ./client
     environment:
       - CLI_ID=1
       - CLI_DATA_DIR=/data
@@ -23,7 +23,7 @@ services:
       server:
         condition: service_started
     volumes:
-      - ./.data/client-1:/data:ro
+      - ./.data/:/data:ro
       - ./client/config.ini:/config.ini:ro
 networks:
   testing_net:

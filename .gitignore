@@ -1,2 +1,5 @@
 middleware/__pycache__/
-.data/client-1/
+.data/
+.vscode/
+.venv/
+__pycache__/

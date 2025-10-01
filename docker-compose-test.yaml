@@ -1,26 +1,40 @@
+name: tp-distribuidos-grupo13
 services:
-  rabbitmq:
-    image: rabbitmq:3-management
-    container_name: rabbitmq_tests
-    hostname: rabbitmq
-    ports:
-      - "5673:5672"
-      - "15673:15672"
-    healthcheck:
-      test: ["CMD", "rabbitmqctl", "status"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-
-  app:
+  server:
+    container_name: server
     build:
-      context: .
-      dockerfile: middleware/middleware.dockerfile
-    container_name: middleware_tests
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
+      context: .             # project root
+      dockerfile: server/Dockerfile
+    entrypoint: ["python3", "main.py"]
+    environment:
+      - PYTHONUNBUFFERED=1
+      - CLI_CLIENTS=1
+    networks: [testing_net]
     volumes:
-      - ./middleware:/app/middleware
-    working_dir: /app
-    command: ["pytest", "-s", "middleware/middleware_tests.py"]
+      - ./server/config.ini:/config.ini:ro
+      - ./utils:/server/utils:ro
+  client:
+    container_name: client1
+    build:
+      context: .             # project root
+      dockerfile: client/Dockerfile
+    entrypoint: ["python3", "main.py"]
+    environment:
+      - CLI_ID=1
+      - CLI_DATA_DIR=/data
+      - DATA_MODE=tree
+      - SERVER_ADDRESS=server:12345
+    networks: [testing_net]
+    depends_on:
+      server:
+        condition: service_started
+    volumes:
+      - ./utils/communication/tests/test_data:/data:ro
+      - ./client/config.ini:/config.ini:ro
+      - ./utils:/client/utils:ro
+networks:
+  testing_net:
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.25.125.0/24

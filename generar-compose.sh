@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ "${1:-}" == "" || "${2:-}" == "" ]]; then
-  echo "Uso: $0 <archivo_salida> <cantidad_clientes>" >&2
+if [[ "${1:-}" == "" ]]; then
+  echo "Uso: $0 <cantidad_clientes>" >&2
   exit 1
 fi
 
-OUTPUT_FILE="$1"
-CLIENT_NUMBER="$2"
+OUTPUT_FILE="docker-compose-dev.yaml"
+CLIENT_NUMBER="$1"
 
 echo "Nombre del archivo de salida: $OUTPUT_FILE"
 echo "Cantidad de clientes: $CLIENT_NUMBER"
@@ -27,7 +27,7 @@ services:
       - "15673:15672"
   server:
     container_name: server
-    image: server:latest
+    build: ./server
     entrypoint: ["python3", "/main.py"]
     environment:
       - PYTHONUNBUFFERED=1
@@ -43,13 +43,13 @@ for ((i=1; i<=CLIENT_NUMBER; i++)); do
   if [[ -d "${DATASET_DIR}" ]]; then
     MOUNT_PATH="${DATASET_DIR}"
   else
-    MOUNT_PATH="./.data/dataset"
+    MOUNT_PATH="./.data/"
   fi
 
   cat >> "$OUTPUT_FILE" <<YAML
   client${i}:
     container_name: client${i}
-    image: client:latest
+    build: ./client
     environment:
       - CLI_ID=${i}
       - CLI_DATA_DIR=/data
