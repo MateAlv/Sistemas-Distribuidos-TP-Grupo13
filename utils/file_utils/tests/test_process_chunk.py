@@ -1,7 +1,7 @@
 import datetime
 import pytest
 from ..process_chunk import ProcessChunk, ProcessChunkHeader
-from ..file_table import TransactionsFileRow, UsersFileRow
+from ..file_table import TransactionsFileRow, UsersFileRow, DateTime
 from ..process_table import TransactionsProcessRow
 from ..table_type import TableType
 
@@ -15,7 +15,8 @@ def test_process_chunk_header_serialize_deserialize():
 
 def test_process_chunk_serialize_deserialize():
     
-    row = TransactionsFileRow("tx1", 1, 2, 3, 4, 100, 0, 100, datetime.date(2023, 5, 1))
+    date = DateTime(datetime.date(2023, 5, 1), datetime.time(0, 0))
+    row = TransactionsFileRow("tx1", 1, 2, 3, 4, 100, 0, 100, date)
     process_row = TransactionsProcessRow.from_file_row(row)
     
     header = ProcessChunkHeader(999, TableType.TRANSACTIONS)
@@ -30,3 +31,9 @@ def test_process_chunk_serialize_deserialize():
     deserialized = ProcessChunk.deserialize(header, serialized[ProcessChunkHeader.HEADER_SIZE:])
     assert len(deserialized.rows) == 1
     assert deserialized.rows[0].store_id == 1
+    assert deserialized.rows[0].transaction_id == "tx1"
+    assert deserialized.rows[0].user_id == 4
+    assert deserialized.rows[0].final_amount == 100
+    assert deserialized.rows[0].created_at.date == datetime.date(2023, 5, 1)
+    assert deserialized.rows[0].created_at.time == datetime.time(0, 0)
+    assert str(deserialized.rows[0].year_half_created_at) == "2023-H1"

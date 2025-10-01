@@ -52,20 +52,20 @@ class TableProcessRow:
 #       - year_half_created_at: YearHalf
 # =========================================
 class TransactionsProcessRow(TableProcessRow):
-    def __init__(self, transaction_id: str, store_id: int, user_id: int, final_amount: float, created_at: datetime.date):
+    def __init__(self, transaction_id: str, store_id: int, user_id: int, final_amount: float, created_at: DateTime):
         self.transaction_id = transaction_id
         self.store_id = store_id
         self.user_id = user_id
         self.final_amount = final_amount
         self.created_at = created_at
-        self.year_half_created_at = YearHalf.from_date(created_at)
+        self.year_half_created_at = YearHalf.from_date(created_at.date)
 
     def serialize(self) -> bytes:
         transaction_id_str = self.transaction_id if self.transaction_id is not None else ""
         store_id_str = str(self.store_id) if self.store_id is not None else ""
         user_id_str = str(self.user_id) if self.user_id is not None else ""
         final_amount_str = str(self.final_amount) if self.final_amount is not None else ""
-        created_at_str = self.created_at.isoformat() if self.created_at is not None else ""
+        created_at_str = str(self.created_at) if self.created_at is not None else ""
         year_half_created_at_str = str(self.year_half_created_at) if self.year_half_created_at is not None else ""
 
         return f"{transaction_id_str};{store_id_str};{user_id_str};{final_amount_str};{created_at_str};{year_half_created_at_str}\n".encode("utf-8")
@@ -88,7 +88,7 @@ class TransactionsProcessRow(TableProcessRow):
         store_id = int(parts[1]) if len(parts[1]) > 0 else None
         user_id = int(parts[2]) if len(parts[2]) > 0 else None
         final_amount = float(parts[3]) if len(parts[3]) > 0 else None
-        created_at = datetime.date.fromisoformat(parts[4]) if len(parts[4]) > 0 else None
+        created_at = DateTime.from_string(parts[4]) if len(parts[4]) > 0 else None
 
         row = TransactionsProcessRow(trans_id, store_id, user_id, final_amount, created_at)
         consumed = len(line.encode("utf-8")) + 1
@@ -108,20 +108,20 @@ class TransactionsProcessRow(TableProcessRow):
 # =========================================
 
 class TransactionsItemsProcessRow(TableProcessRow):
-    def __init__(self, transaction_id: str, item_id: int, quantity: int, subtotal: float, created_at: datetime.date):
+    def __init__(self, transaction_id: str, item_id: int, quantity: int, subtotal: float, created_at: DateTime):
         self.transaction_id = transaction_id
         self.item_id = item_id
         self.quantity = quantity
         self.subtotal = subtotal
         self.created_at = created_at
-        self.month_year_created_at = MonthYear.from_date(created_at)
+        self.month_year_created_at = MonthYear.from_date(created_at.date)
         
     def serialize(self) -> bytes:
         transaction_id_str = self.transaction_id if self.transaction_id is not None else ""
         item_id_str = str(self.item_id) if self.item_id is not None else ""
         quantity_str = str(self.quantity) if self.quantity is not None else ""
         subtotal_str = str(self.subtotal) if self.subtotal is not None else ""
-        created_at_str = self.created_at.isoformat() if self.created_at is not None else ""
+        created_at_str = str(self.created_at) if self.created_at is not None else ""
         month_year_created_at_str = str(self.month_year_created_at) if self.month_year_created_at is not None else ""
 
         return f"{transaction_id_str};{item_id_str};{quantity_str};{subtotal_str};{created_at_str};{month_year_created_at_str}\n".encode("utf-8")
@@ -144,7 +144,7 @@ class TransactionsItemsProcessRow(TableProcessRow):
         item_id = int(parts[1]) if len(parts[1]) > 0 else None
         quantity = int(parts[2]) if len(parts[2]) > 0 else None
         subtotal = float(parts[3]) if len(parts[3]) > 0 else None
-        created_at = datetime.date.fromisoformat(parts[4]) if len(parts[4]) > 0 else None
+        created_at = DateTime.from_string(parts[4]) if len(parts[4]) > 0 else None
 
         row = TransactionsItemsProcessRow(transaction_id, item_id, quantity, subtotal, created_at)
         consumed = len(line.encode("utf-8")) + 1

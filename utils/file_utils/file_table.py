@@ -16,6 +16,21 @@ class TableFileRow:
         raise NotImplementedError
 
 
+class DateTime:
+    def __init__(self, date: datetime.date, time: datetime.time):
+        self.date = date
+        self.time = time
+    
+    def __str__(self):
+        # Ejemplo: "2023-10-05 14:30:00"
+        return f"{self.date.isoformat()} {self.time.isoformat()}"
+    
+    def from_string(date_str: str):
+        date_part, time_part = date_str.split(" ")
+        date = datetime.date.fromisoformat(date_part)
+        time = datetime.time.fromisoformat(time_part)
+        return DateTime(date, time)
+    
 # =========================================
 # Transactions File Row
 # - Representa una fila del archivo de transacciones.
@@ -40,7 +55,7 @@ class TransactionsFileRow(TableFileRow):
                  original_amount: float, 
                  discount_applied: float, 
                  final_amount: float, 
-                 created_at: datetime.date):
+                 created_at: DateTime):
         self.transaction_id = transaction_id
         self.store_id = store_id
         self.payment_method_id = payment_method_id
@@ -60,7 +75,7 @@ class TransactionsFileRow(TableFileRow):
         original_amount_str = str(self.original_amount) if self.original_amount is not None else ""
         discount_applied_str = str(self.discount_applied) if self.discount_applied is not None else ""
         final_amount_str = str(self.final_amount) if self.final_amount is not None else ""
-        created_at_str = self.created_at.isoformat() if self.created_at is not None else ""
+        created_at_str = str(self.created_at) if self.created_at is not None else ""
 
         return f"{transaction_id_str};{store_id_str};{payment_method_id_str};{voucher_id_str};{user_id_str};{original_amount_str};{discount_applied_str};{final_amount_str};{created_at_str}\n".encode("utf-8")
 
@@ -77,7 +92,7 @@ class TransactionsFileRow(TableFileRow):
         original_amount = float(parts[5]) if len(parts[5]) > 0 else None
         discount_applied = float(parts[6]) if len(parts[6]) > 0 else None
         final_amount = float(parts[7]) if len(parts[7]) > 0 else None
-        created_at = datetime.date.fromisoformat(parts[8]) if len(parts[8]) > 0 else None
+        created_at = DateTime.from_string(parts[8]) if len(parts[8]) > 0 else None
 
         row = TransactionsFileRow(
             transaction_id, 
@@ -112,7 +127,7 @@ class TransactionsItemsFileRow(TableFileRow):
                  quantity: int, 
                  unit_price: float, 
                  subtotal: float, 
-                 created_at: datetime.date):
+                 created_at: DateTime):
         self.transaction_id = transaction_id
         self.item_id = item_id
         self.quantity = quantity
@@ -126,7 +141,7 @@ class TransactionsItemsFileRow(TableFileRow):
         quantity_str = str(self.quantity) if self.quantity is not None else ""
         unit_price_str = str(self.unit_price) if self.unit_price is not None else ""
         subtotal_str = str(self.subtotal) if self.subtotal is not None else ""
-        created_at_str = self.created_at.isoformat() if self.created_at is not None else ""
+        created_at_str = str(self.created_at) if self.created_at is not None else ""
 
         return f"{transaction_id_str};{item_id_str};{quantity_str};{unit_price_str};{subtotal_str};{created_at_str}\n".encode("utf-8")
 
@@ -140,7 +155,7 @@ class TransactionsItemsFileRow(TableFileRow):
         quantity = int(parts[2]) if len(parts[2]) > 0 else None
         unit_price = float(parts[3]) if len(parts[3]) > 0 else None
         subtotal = float(parts[4]) if len(parts[4]) > 0 else None
-        created_at = datetime.date.fromisoformat(parts[5]) if len(parts[5]) > 0 else None
+        created_at = DateTime.from_string(parts[5]) if len(parts[5]) > 0 else None
         
         row = TransactionsItemsFileRow(
             trans_id,
@@ -172,8 +187,8 @@ class MenuItemsFileRow(TableFileRow):
                  category: str, 
                  price: float, 
                  is_seasonal: bool, 
-                 available_from: datetime.date, 
-                 available_to: datetime.date):
+                 available_from: DateTime, 
+                 available_to: DateTime):
         self.item_id = item_id
         self.item_name = name
         self.category = category
@@ -188,8 +203,8 @@ class MenuItemsFileRow(TableFileRow):
         category_str = self.category if self.category is not None else ""
         price_str = str(self.price) if self.price is not None else ""
         is_seasonal_str = str(self.is_seasonal) if self.is_seasonal is not None else ""
-        available_from_str = self.available_from.isoformat() if self.available_from is not None else ""
-        available_to_str = self.available_to.isoformat() if self.available_to is not None else ""
+        available_from_str = str(self.available_from) if self.available_from is not None else ""
+        available_to_str = str(self.available_to) if self.available_to is not None else ""
 
         return f"{item_id_str};{item_name_str};{category_str};{price_str};{is_seasonal_str};{available_from_str};{available_to_str}\n".encode("utf-8")
 
@@ -203,9 +218,9 @@ class MenuItemsFileRow(TableFileRow):
         category = parts[2] if len(parts[2]) > 0 else None
         price = float(parts[3]) if len(parts[3]) > 0 else None
         is_seasonal = parts[4].lower() == 'true' if len(parts[4]) > 0 else None
-        available_from = datetime.date.fromisoformat(parts[5]) if len(parts[5]) > 0 else None
-        available_to = datetime.date.fromisoformat(parts[6]) if len(parts[6]) > 0 else None
-        
+        available_from = DateTime.from_string(parts[5]) if len(parts[5]) > 0 else None
+        available_to = DateTime.from_string(parts[6]) if len(parts[6]) > 0 else None
+
         row = MenuItemsFileRow(
             item_id,
             item_name,
@@ -301,7 +316,7 @@ class UsersFileRow(TableFileRow):
                  user_id: int,
                  gender: str,
                  birthdate: datetime.date,
-                 registration_at: datetime.date):
+                 registration_at: DateTime):
         self.user_id = user_id
         self.gender = gender
         self.birthdate = birthdate
@@ -312,7 +327,7 @@ class UsersFileRow(TableFileRow):
         user_id_str = str(self.user_id) if self.user_id is not None else ""
         gender_str = self.gender if self.gender is not None else ""
         birthdate_str = self.birthdate.isoformat() if self.birthdate is not None else ""
-        registration_at_str = self.registration_at.isoformat() if self.registration_at is not None else ""
+        registration_at_str = str(self.registration_at) if self.registration_at is not None else ""
 
         return f"{user_id_str};{gender_str};{birthdate_str};{registration_at_str}\n".encode("utf-8")
 
@@ -324,7 +339,7 @@ class UsersFileRow(TableFileRow):
         user_id = int(parts[0]) if len(parts[0]) > 0 else None
         gender = parts[1] if len(parts[1]) > 0 else None
         birthdate = datetime.date.fromisoformat(parts[2]) if len(parts[2]) > 0 else None
-        registration_at = datetime.date.fromisoformat(parts[3]) if len(parts[3]) > 0 else None
+        registration_at = DateTime.from_string(parts[3]) if len(parts[3]) > 0 else None
         
         row = UsersFileRow(
             user_id,

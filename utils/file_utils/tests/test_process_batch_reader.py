@@ -2,25 +2,35 @@ import datetime
 import pytest
 from ..process_chunk import ProcessChunk, ProcessChunkHeader
 from ..process_batch_reader import ProcessBatchReader
-from ..file_table import UsersFileRow, TransactionsFileRow
+from ..file_table import UsersFileRow, TransactionsFileRow, DateTime
 from ..process_table import TransactionsProcessRow
 from ..table_type import TableType
 
 def test_process_batch_from_file_rows():
-    row = TransactionsFileRow("tx1", 1, 2, 3, 4, 100, 0, 100, datetime.date(2023, 5, 1))
+    date = DateTime(datetime.date(2023, 5, 1), datetime.time(0, 0))
+    row = TransactionsFileRow("tx1", 1, 2, 3, 4, 100, 0, 100, date)
     serialized = row.serialize()
     batch = ProcessBatchReader.from_file_rows(serialized, "/data/transactions/tx.csv", client_id=111)
     assert len(batch.rows) == 1
+    assert batch.header.client_id == 111
+    assert batch.header.table_type == TableType.TRANSACTIONS
+    assert batch.header.size == len(serialized) 
     assert batch.rows[0].store_id == 1
+    assert batch.rows[0].transaction_id == "tx1"
+    assert batch.rows[0].user_id == 4
+    assert batch.rows[0].final_amount == 100
+    assert batch.rows[0].created_at.date == datetime.date(2023, 5, 1)
+    assert batch.rows[0].created_at.time == datetime.time(0, 0)
+    assert str(batch.rows[0].year_half_created_at) == "2023-H1"
 
 def test_process_batch_from_many_file_rows():
     rows = [
-        UsersFileRow(1, "M", datetime.date(1990, 1, 1), datetime.date(2020, 1, 1)),
-        UsersFileRow(2, "F", datetime.date(1985, 6, 15), datetime.date(2019, 3, 20)),
-        UsersFileRow(3, "M", datetime.date(1992, 2, 2), datetime.date(2021, 2, 2)),
-        UsersFileRow(4, "F", datetime.date(1988, 3, 3), datetime.date(2020, 3, 3)),
-        UsersFileRow(5, "M", datetime.date(1995, 4, 4), datetime.date(2022, 4, 4)),
-        UsersFileRow(6, "F", datetime.date(1991, 5, 5), datetime.date(2018, 5, 5)),
+        UsersFileRow(1, "M", datetime.date(1990, 1, 1), DateTime(datetime.date(2020, 1, 1), datetime.time(0, 0))),
+        UsersFileRow(2, "F", datetime.date(1985, 6, 15), DateTime(datetime.date(2019, 3, 20), datetime.time(0, 0))),
+        UsersFileRow(3, "M", datetime.date(1992, 2, 2), DateTime(datetime.date(2021, 2, 2), datetime.time(0, 0))),
+        UsersFileRow(4, "F", datetime.date(1988, 3, 3), DateTime(datetime.date(2020, 3, 3), datetime.time(0, 0))),
+        UsersFileRow(5, "M", datetime.date(1995, 4, 4), DateTime(datetime.date(2022, 4, 4), datetime.time(0, 0))),
+        UsersFileRow(6, "F", datetime.date(1991, 5, 5), DateTime(datetime.date(2018, 5, 5), datetime.time(0, 0))),
     ]
     
     serialized = b"".join(r.serialize() for r in rows)
@@ -38,12 +48,12 @@ def test_process_batch_from_many_file_rows():
 
 def test_process_batch_serialize_deserialize_many():
     rows = [
-        UsersFileRow(1, "M", datetime.date(1990, 1, 1), datetime.date(2020, 1, 1)),
-        UsersFileRow(2, "F", datetime.date(1985, 6, 15), datetime.date(2019, 3, 20)),
-        UsersFileRow(3, "M", datetime.date(1992, 2, 2), datetime.date(2021, 2, 2)),
-        UsersFileRow(4, "F", datetime.date(1988, 3, 3), datetime.date(2020, 3, 3)),
-        UsersFileRow(5, "M", datetime.date(1995, 4, 4), datetime.date(2022, 4, 4)),
-        UsersFileRow(6, "F", datetime.date(1991, 5, 5), datetime.date(2018, 5, 5)),
+        UsersFileRow(1, "M", datetime.date(1990, 1, 1), DateTime(datetime.date(2020, 1, 1), datetime.time(0, 0))),
+        UsersFileRow(2, "F", datetime.date(1985, 6, 15), DateTime(datetime.date(2019, 3, 20), datetime.time(0, 0))),
+        UsersFileRow(3, "M", datetime.date(1992, 2, 2), DateTime(datetime.date(2021, 2, 2), datetime.time(0, 0))),
+        UsersFileRow(4, "F", datetime.date(1988, 3, 3), DateTime(datetime.date(2020, 3, 3), datetime.time(0, 0))),
+        UsersFileRow(5, "M", datetime.date(1995, 4, 4), DateTime(datetime.date(2022, 4, 4), datetime.time(0, 0))),
+        UsersFileRow(6, "F", datetime.date(1991, 5, 5), DateTime(datetime.date(2018, 5, 5), datetime.time(0, 0))),
     ]
     
     serialized = b"".join(r.serialize() for r in rows)
