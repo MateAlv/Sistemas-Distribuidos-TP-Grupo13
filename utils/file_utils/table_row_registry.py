@@ -1,6 +1,6 @@
-from table_type import TableType
-from process_table import *
-from file_table import *
+from .table_type import TableType
+from .process_table import *
+from .file_table import *
 
 PROCESS_CLASSES = {
     TableType.TRANSACTIONS: TransactionsProcessRow,

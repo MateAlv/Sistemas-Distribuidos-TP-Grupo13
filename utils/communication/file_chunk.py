@@ -1,15 +1,5 @@
-"""
-Protocolo (socket persistente):
-    I:H <id>\n           → I:O
-    Por cada archivo CSV:
-    F:\n
-    CLI_ID: <id>\n
-    FILENAME: <rel_path>\n
-    SIZE: <size>\n
-    \n
-    <size bytes>        → I:O
-    I:F\n                 → I:O
-"""
+import socket
+from .socket_utils import recv_exact
 
 class FileChunkHeader:
     
@@ -50,6 +40,21 @@ class FileChunkHeader:
 
         return FileChunkHeader(rel_path, client_id, size, last)
 
+    def recv(socket: socket.socket) -> 'FileChunkHeader':
+        # Leer header fijo
+        data = recv_exact(socket, FileChunkHeader.HEADER_SIZE)
+        
+        client_id = int.from_bytes(data[0:4], byteorder='big')
+        size = int.from_bytes(data[4:8], byteorder='big')
+        last = data[8:9] == b'1'
+        var_header_size = int.from_bytes(data[9:13], byteorder='big')
+
+        # Leer header variable
+        var_header_bytes = recv_exact(socket, var_header_size)
+        header.var_header = var_header_bytes
+
+        return FileChunkHeader(rel_path, client_id, size, last)
+
 class FileChunk:
     """
     Representa un fragmento (chunk) de un archivo dentro de un directorio.
@@ -64,7 +69,19 @@ class FileChunk:
         header = FileChunkHeader(rel_path, client_id, len(data), last)
         self.header = header
         self.data = data
-        
+    
+    def path(self) -> str:
+        return self.header.rel_path
+    
+    def client_id(self) -> int:
+        return self.header.client_id
+    
+    def payload_size(self) -> int:
+        return self.header.payload_size
+    
+    def payload(self) -> bytes:
+        return self.data
+    
     def is_last_file_chunk(self) -> bool:
         return self.header.last
     
@@ -79,4 +96,14 @@ class FileChunk:
             raise ValueError("Datos insuficientes para el payload")
 
         payload = data[FileChunkHeader.HEADER_SIZE + header.var_header_size:FileChunkHeader.HEADER_SIZE + header.var_header_size + header.payload_size]
+        return FileChunk(header.rel_path, header.client_id, header.last, payload)
+    
+    def recv(socket: socket.socket) -> 'FileChunk':
+    
+        # Leer header
+        header = FileChunkHeader.recv(socket)
+
+        # Leer payload
+        payload = recv_exact(socket, header.payload_size)
+        
         return FileChunk(header.rel_path, header.client_id, header.last, payload)

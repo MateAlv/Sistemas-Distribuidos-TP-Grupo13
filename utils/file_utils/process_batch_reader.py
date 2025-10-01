@@ -1,6 +1,6 @@
-from process_chunk import ProcessChunk, ProcessChunkHeader
-from table_type import TableType
-from table_row_registry import TableRowRegistry
+from .process_chunk import ProcessChunk, ProcessChunkHeader
+from .table_type import TableType
+from .table_row_registry import TableRowRegistry
 
 import socket
 

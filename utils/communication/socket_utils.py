@@ -14,21 +14,19 @@ def sendall(socket: socket.socket, data: bytes) -> None:
         data = data[sent:]
         data_len -= sent
 
-def recv_exact(sock: socket.socket, nbytes: int, *, sink=None) -> int:
+def recv_exact(sock: socket.socket, nbytes: int, *, sink=None) -> bytes:
     """
-    Lee exactamente nbytes del socket. Si 'sink' es una función (p. ej. f.write),
-    envía cada chunk allí; si no, descarta. Devuelve bytes recibidos.
+    Lee exactamente `nbytes` del socket.
+    Si la conexión se cierra antes, lanza OSError.
     """
     remaining = nbytes
-    total = 0
-    CHUNK = 64 * 1024
+    parts = []
     while remaining > 0:
-        to_read = CHUNK if remaining > CHUNK else remaining
-        data = sock.recv(to_read)
+        data = sock.recv(remaining)   # read only what’s left
         if not data:
             raise OSError(f"connection closed early; remaining={remaining}")
-        total += len(data)
+        parts.append(data)
         remaining -= len(data)
         if sink:
             sink(data)
-    return total
+    return b"".join(parts)

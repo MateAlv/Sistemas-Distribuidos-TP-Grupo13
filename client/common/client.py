@@ -3,8 +3,8 @@ import os
 import logging
 from typing import Dict, Tuple
 
-from common.directory_reader import DirectoryReader
-from common.batch_reader import BatchReader
+from utils.communication.directory_reader import DirectoryReader
+from utils.communication.batch_reader import BatchReader
 from common.sender import Sender
 
 
@@ -31,7 +31,14 @@ class Client:
 
         # Directorio de datos
         self.data_dir: str = str(config.get("data_dir", default_data_dir))
-
+        
+        # Lector de batches
+        self.reader = BatchReader(
+            client_id=int(self.id),
+            root=self.data_dir,
+            max_batch_size=self.batch_size,
+        )
+            
         logging.debug(
             "client_init | id=%s host=%s port=%s data_dir=%s batch_size=%s",
             self.id, self.server_host, self.server_port, self.data_dir, self.batch_size
@@ -53,31 +60,29 @@ class Client:
             connect_timeout=CONNECT_TIMEOUT_S,
             io_timeout=IO_TIMEOUT_S,
         ) as sender:
-        
-        
-            # Handshake SIEMPRE encendido
-            sender.send_hello(self.id)
-            logging.info("Cliente %s: handshake OK con %s:%s", self.id, self.server_host, self.server_port)
-            # Lector de batches
-            reader = BatchReader(
-                client_id=int(self.id),
-                root=self.data_dir,
-                max_batch_size=self.batch_size,
-            )
-            logging.info("Cliente %s: comenzando envío de datos a %s:%s", self.id, self.server_host, self.server_port)
-            
-            # Stream de archivos
-            for chunk in reader.iter():
-                if chunk.data:
-                    sender.send_batch(chunk.data)
-                if chunk.is_last_file_chunk():
-                    sender.end_file_and_wait_ack()
+            try:
+                logging.info("Cliente %s: conectando a %s:%s", self.id, self.server_host, self.server_port)
+                # Handshake SIEMPRE encendido
+                sender.send_handshake_request(self.id)
+                
+                logging.info("Cliente %s: handshake OK con %s:%s", self.id, self.server_host, self.server_port)
+                
+                logging.info("Cliente %s: comenzando envío de datos a %s:%s", self.id, self.server_host, self.server_port)
+                
+                # Envío de batches (iterativo)
+                for chunk in self.reader.iter():
+                    sender.send_file_chunk(chunk.data)
+                    if chunk.is_last_file_chunk():
+                        # Espera ACK de fin de archivo
+                        sender.wait_end_file_ack()
 
-            # Señal de fin
-            sender.send_finished()
+                # Señal de fin - Todos los archivos enviados
+                sender.send_finished()
 
-        logging.info("Cliente %s: envío completado (single).", self.id)
-
+                logging.info("Cliente %s: envío completado (single).", self.id)
+            except Exception as e:
+                logging.error("Cliente %s: error en el envío: %s", self.id, e)
+                raise
     # ---------------------------
     # Helpers
     # ---------------------------
