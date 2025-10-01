@@ -1,5 +1,5 @@
 import socket
-from socket_utils import recv_exact
+from .socket_utils import recv_exact
 
 class FileChunkHeader:
     
@@ -69,7 +69,19 @@ class FileChunk:
         header = FileChunkHeader(rel_path, client_id, len(data), last)
         self.header = header
         self.data = data
-        
+    
+    def path(self) -> str:
+        return self.header.rel_path
+    
+    def client_id(self) -> int:
+        return self.header.client_id
+    
+    def payload_size(self) -> int:
+        return self.header.payload_size
+    
+    def payload(self) -> bytes:
+        return self.data
+    
     def is_last_file_chunk(self) -> bool:
         return self.header.last
     

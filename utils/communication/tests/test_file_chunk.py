@@ -1,4 +1,4 @@
-from file_chunk import FileChunk, FileChunkHeader
+from ..file_chunk import FileChunk, FileChunkHeader
 
 def test_header_creation():
     header = FileChunkHeader("path/to/file.txt", 123, 456, True)

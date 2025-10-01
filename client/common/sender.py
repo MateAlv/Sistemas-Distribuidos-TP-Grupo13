@@ -1,7 +1,8 @@
 # common/sender.py
-from __future__ import annotations
+from logging import log
 
 import socket
+from utils.communication.socket_utils import ensure_socket, sendall, recv_exact
 import logging
 from typing import Optional
 
@@ -10,12 +11,12 @@ from typing import Optional
 # ============================
 
 # Identificadores de control
-HELLO_HEADER   = "I:H"   # Handshake HELLO
-FINISHED_HEADER = "I:F"  # Finished
-OK_HEADER       = "I:O"  # OK genérico
-
-# Archivos
-FILE_HEADER     = "F:"   # Inicio de archivo (seguido de metadatos en líneas)
+H_ID_HANDSHAKE: int = 1  # Handshake HELLO
+H_ID_DATA: int = 2    # File header
+H_ID_FINISH: int = 3  # Finished
+H_ID_OK: int = 4      # OK genérico
+# ----------------------------
+# Delimitador de mensajes
 MESSAGE_DELIM   = b"\n"
 
 
@@ -73,67 +74,82 @@ class Sender:
         self.close()
 
     # -------- Handshake --------
-
-    def send_hello(self, client_id: str) -> None:
+    
+    def send_handshake_request(self, client_id: str) -> None:
         """
-        Envía 'I:H <id>\\n'. Espera 'I:O\\n'.
+        Envía 'H'. Espera 'O'.
         """
-        self._ensure_socket()
-        msg = f"{HELLO_HEADER} {client_id}\n".encode("utf-8")
-        self._sendall(msg)
-        line = self._recv_line()
-        if line != OK_HEADER.encode("utf-8"):
-            raise RuntimeError(f"Handshake inválido, esperaba {OK_HEADER}, recibí {line!r}")
+        ensure_socket(self._sock)
+        
+        logging.debug("send_handshake_request | id=%s", client_id)
+        hello = self.header_id_to_bytes(H_ID_HANDSHAKE)
+        sendall(self._sock, hello)
+        logging.debug("handshake_sent | id=%s | size=%d", client_id, len(hello))
+        header = self._recv_header_id(self._sock)
+        logging.debug("handshake_recv | id=%s", client_id)
+        
+        
+        if header != H_ID_OK:
+            raise RuntimeError(f"Handshake inválido, esperaba {H_ID_OK}, recibí {header!r}")
+        
         logging.debug("handshake_ok | id=%s", client_id)
     
     # -------- Envío de batches --------
-    def send_batch(self, data: bytes) -> None:
+    def send_file_chunk(self, data: bytes) -> None:
         """Envía un chunk del cuerpo binario del archivo."""
-        self._ensure_socket()
+        ensure_socket(self._sock)
         if not data:
             return
-        self._sendall(data)
+        logging.debug("send_file_chunk | size=%s", len(data))
+        data = self.header_id_to_bytes(H_ID_DATA) + data
+        sendall(self._sock, data)
 
-    def end_file_and_wait_ack(self) -> None:
+    def wait_end_file_ack(self) -> None:
         """
-        Espera 'I:O\\n' tras enviar el archivo completo.
+        Espera un ACK H_ID_OK tras enviar el archivo completo.
         """
-        self._ensure_socket()
-        line = self._recv_line()
-        if line != OK_HEADER.encode("utf-8"):
-            raise RuntimeError(f"ACK inválido, esperaba {OK_HEADER}, recibí {line!r}")
+        ensure_socket(self._sock)
+        
+        header = self._recv_header_id(self._sock)
+        
+        if header != H_ID_OK:
+            raise RuntimeError(f"ACK inválido, esperaba {H_ID_OK}, recibí {header!r}")
         logging.debug("file_ack_ok")
 
     # -------- Fin de directorio --------
 
     def send_finished(self) -> None:
-        """Envía 'I:F\\n' y espera 'I:O\\n' (si llega)."""
-        self._ensure_socket()
-        msg = f"{FINISHED_HEADER}\n".encode("utf-8")
-        self._sendall(msg)
+        """Envía H_ID_FINISH y espera un H_ID_OK (si llega)."""
+        ensure_socket(self._sock)
+        sendall(self._sock, self.header_id_to_bytes(H_ID_FINISH))
         logging.debug("finished_sent")
         try:
-            line = self._recv_line()
-            if line == OK_HEADER.encode("utf-8"):
+            header = self._recv_header_id(self._sock)
+            if header == H_ID_OK:
                 logging.debug("finished_ack_ok")
             else:
-                logging.warning("finished_ack_unexpected | recv=%r", line)
+                logging.warning("finished_ack_unexpected | recv=%r", header)
         except Exception as e:
             logging.debug("finished_no_response | err=%r", e)
 
     # ---------------- Internos ----------------
 
-    def _recv_line(self) -> bytes:
+    def _recv_header_id(self, sock: socket.socket) -> int:
         """
-        Lee hasta '\\n'. Devuelve línea sin \\r\\n final.
+        Lee exactamente un byte de cabecera.
+        Devuelve None si EOF limpio sin datos.
         """
-        assert self._sock is not None
-        buf = bytearray()
-        while True:
-            b = self._sock.recv(1)
-            if not b:
-                break
-            buf += b
-            if buf.endswith(MESSAGE_DELIM):
-                break
-        return bytes(buf).rstrip(b"\r\n")
+        ensure_socket(sock)
+        b = recv_exact(sock, 1)
+        header_int = self.header_id_from_bytes(b)
+        return header_int
+
+    def header_id_to_bytes(self, header: int) -> bytes:
+        if not isinstance(header, int):
+            raise TypeError(f"header debe ser int, no {type(header).__name__}")
+        if not (0 <= header <= 255):
+            raise ValueError(f"header fuera de rango [0,255]: {header}")
+        return header.to_bytes(1, byteorder='big')
+    
+    def header_id_from_bytes(self, data: bytes) -> int:
+        return int.from_bytes(data, byteorder='big')

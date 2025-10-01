@@ -1,8 +1,8 @@
 # client/common/tests/test_batch_reader.py
 import os
 import pytest
-from batch_reader import BatchReader
-from file_chunk import FileChunk
+from ..batch_reader import BatchReader
+from ..file_chunk import FileChunk
 
 TEST_PATH = "./utils/communication/tests/test_data"
 MAX_BATCH_SIZE = 8 * 1024  # 8KB

@@ -6,7 +6,7 @@ if [[ "${1:-}" == "" ]]; then
   exit 1
 fi
 
-OUTPUT_FILE="docker-compose.yaml"
+OUTPUT_FILE="docker-compose-dev.yaml"
 CLIENT_NUMBER="$1"
 
 echo "Nombre del archivo de salida: $OUTPUT_FILE"

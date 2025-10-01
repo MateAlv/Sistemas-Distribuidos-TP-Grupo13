@@ -4,8 +4,8 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from typing import Iterable, Optional, Generator, List, Tuple
-from file_chunk import FileChunk
-from directory_reader import DirectoryReader
+from .file_chunk import FileChunk
+from .directory_reader import DirectoryReader
 
 
 class BatchReader:

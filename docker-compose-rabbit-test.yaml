@@ -1,0 +1,26 @@
+services:
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: rabbitmq_tests
+    hostname: rabbitmq
+    ports:
+      - "5673:5672"
+      - "15673:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmqctl", "status"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build:
+      context: .
+      dockerfile: middleware/middleware.dockerfile
+    container_name: middleware_tests
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    volumes:
+      - ./middleware:/app/middleware
+    working_dir: /app
+    command: ["pytest", "-s", "middleware/middleware_tests.py"]

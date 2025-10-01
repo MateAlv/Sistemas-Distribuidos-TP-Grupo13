@@ -1,4 +1,4 @@
-from directory_reader import DirectoryReader
+from ..directory_reader import DirectoryReader
 
 TEST_PATH = "./utils/communication/tests/test_data"
 
