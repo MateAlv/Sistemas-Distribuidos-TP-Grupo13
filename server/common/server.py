@@ -10,6 +10,7 @@ from utils.communication.socket_utils import ensure_socket, recv_exact, sendall
 from utils.file_utils.process_batch_reader import ProcessBatchReader
 from utils.communication.file_chunk import FileChunk, FileChunkHeader
 from utils.file_utils.table_type import TableType
+from middleware.middleware_interface import MessageMiddlewareExchange, MessageMiddlewareQueue
 
 
 # Delimitadores / framing
@@ -56,6 +57,13 @@ class Server:
         self.port = int(port)
         self.listen_backlog = int(listen_backlog)
         self.host = DEFAULT_BIND_IP
+        self.middleware_exchange = MessageMiddlewareExchange("rabbitmq", "FIRST_END_MESSAGE", [""], "fanout")
+        self.middleware_queue_senders = {}
+        self.middleware_queue_senders["to_filter_1"] = MessageMiddlewareQueue("rabbitmq", "to_filter_1")
+        self.middleware_queue_senders["to_join_stores"] = MessageMiddlewareQueue("rabbitmq", "to_join_stores")
+        self.middleware_queue_senders["to_join_users"] = MessageMiddlewareQueue("rabbitmq", "to_join_users")
+        self.middleware_queue_senders["to_join_menu_items"] = MessageMiddlewareQueue("rabbitmq", "to_join_menu_items")
+        self.middleware_queue_senders["to_top3"] = MessageMiddlewareQueue("rabbitmq", "to_top3")
 
         self._running = True
         self._server_socket: Optional[socket.socket] = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -131,7 +139,7 @@ class Server:
 
                 if header == H_ID_FINISH:
                     logging.info("action: recv_finished | peer:%s", peer)
-                    # ACK final
+                    self.middleware_exchange.send("END")
                     sendall(sock, self.header_id_to_bytes(H_ID_OK))
                     break
     
@@ -186,29 +194,33 @@ class Server:
         # Deserializa el batch recibido para convertirlo en objeto ProcessBatch
         process_chunk = ProcessBatchReader.from_file_rows(chunk.payload(), chunk.path(), chunk.client_id())
         # Aquí puedes procesar el objeto process_chunk según sea necesario
-        if process_chunk.table_type() == TableType.TRANSACTIONS or process_batch.table_type() == TableType.TRANSACTIONS_ITEMS:
+        if process_chunk.table_type() == TableType.TRANSACTIONS or process_chunk.table_type() == TableType.TRANSACTIONS_ITEMS:
             # Envia al filtro 1
             logging.info("action: send_to_filter1 | peer:%s | cli_id:%s | file:%s | bytes:%s",
                          peer, chunk.client_id(), chunk.path(), chunk.payload_size())
-            pass
+            self.middleware_queue_senders["to_filter_1"].send(process_chunk.serialize())
+
         elif process_chunk.table_type() == TableType.STORES:
             # Envia al join Stores 
             logging.info("action: send_to_join_stores | peer:%s | cli_id:%s | file:%s | bytes:%s",
                          peer, chunk.client_id(), chunk.path(), chunk.payload_size())
+            self.middleware_queue_senders["to_join_stores"].send(process_chunk.serialize())
             # Envia al TOP 3
             logging.info("action: send_to_top3 | peer:%s | cli_id:%s | file:%s | bytes:%s",
                          peer, chunk.client_id(), chunk.path(), chunk.payload_size())
-            pass
+            self.middleware_queue_senders["to_top3"].send(process_chunk.serialize())
+
         elif process_chunk.table_type() == TableType.USERS:
             # Envia al join Users
             logging.info("action: send_to_join_users | peer:%s | cli_id:%s | file:%s | bytes:%s",
                          peer, chunk.client_id(), chunk.path(), chunk.payload_size())
-            pass
+            self.middleware_queue_senders["to_join_users"].send(process_chunk.serialize())
+
         elif process_chunk.table_type() == TableType.MENU_ITEMS:
             # Envia al join MenuItems
             logging.info("action: send_to_join_menu_items | peer:%s | cli_id:%s | file:%s | bytes:%s",
                          peer, chunk.client_id(), chunk.path(), chunk.payload_size())
-            pass
+            self.middleware_queue_senders["to_join_menu_items"].send(process_chunk.serialize())
     
     # ---------------- Internos ----------------
     
