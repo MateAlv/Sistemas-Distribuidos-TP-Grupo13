@@ -4,8 +4,7 @@ import os
 import logging
 import argparse
 from configparser import ConfigParser
-from datetime import datetime
-
+from common import Filter
 
 def initialize_config(file_name):
     """Parsea archivo .ini y devuelve la configuración"""
@@ -53,12 +52,17 @@ def main():
     )
     args = parser.parse_args()
 
-    config_file = f"config_{args.filter}.ini"
+    config_file = f"config/config_{args.filter}.ini"
     (logging_level, cfg) = initialize_config(config_file)
     initialize_log(logging_level)
 
     logging.debug(f"Config cargada desde {config_file}: {cfg}")
 
+    filter = Filter(cfg)
+
+    logging.debug(f"filter: ", str(filter))
+
+    filter.run()
 
 
 if __name__ == "__main__":

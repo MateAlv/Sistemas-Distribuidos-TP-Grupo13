@@ -51,7 +51,8 @@ class FileChunkHeader:
 
         # Leer header variable
         var_header_bytes = recv_exact(socket, var_header_size)
-        header.var_header = var_header_bytes
+
+        rel_path = var_header_bytes.decode('utf-8')
 
         return FileChunkHeader(rel_path, client_id, size, last)
 

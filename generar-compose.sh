@@ -19,7 +19,7 @@ name: tp-distribuidos-grupo13
 services:
   rabbitmq:
     image: rabbitmq:3-management
-    container_name: rabbitmq_tests
+    container_name: rabbitmq
     hostname: rabbitmq
     ports:
       - "5673:5672"
@@ -27,20 +27,75 @@ services:
 
   server:
     container_name: server
-    build: ./server
-    entrypoint: ["python3", "/main.py"]
+    build:
+      context: .             # project root
+      dockerfile: server/Dockerfile
+    entrypoint: ["python3", "main.py"]
     environment:
       - PYTHONUNBUFFERED=1
       - CLI_CLIENTS=${CLIENT_NUMBER}
-    networks: [testing_net]
+    networks: [net]
     volumes:
       - ./server/config.ini:/config.ini:ro
+      - ./utils:/server/utils:ro
+      - ./middleware:/server/middleware:ro
+    depends_on:
+      rabbitmq:
+        condition: service_started
 
+  # -------------------------
+  # FILTERS
+  # -------------------------
+
+  filter_year:
+    build:
+      context: .             # project root
+      dockerfile: workers/filter/Dockerfile
+    container_name: filter_service
+    command: ["python", "main.py", "--filter", "year"]
+    volumes:
+      - ./workers/filters/config_year.ini:/workers/filters/config_year.ini
+      - ./utils:/server/utils:ro
+      - ./middleware:/server/middleware:ro
+    depends_on:
+      rabbitmq:
+        condition: service_started
+
+  filter_hour:
+    build:
+      context: .             # project root
+      dockerfile: workers/filter/Dockerfile
+    container_name: filter_service
+    command: ["python", "main.py", "--filter", "hour"]
+    volumes:
+      - ./workers/filters/config_hour.ini:/workers/filters/config_hour.ini
+      - ./utils:/server/utils:ro
+      - ./middleware:/server/middleware:ro
+    depends_on:
+      rabbitmq:
+        condition: service_started
+
+  filter_amount:
+    build:
+      context: .             # project root
+      dockerfile: workers/filter/Dockerfile
+    container_name: filter_service
+    command: ["python", "main.py", "--filter", "amount"]
+    volumes:
+      - ./workers/filters/config_amount.ini:/workers/filters/config_amount.ini
+      - ./utils:/server/utils:ro
+      - ./middleware:/server/middleware:ro
+    depends_on:
+      rabbitmq:
+        condition: service_started
+      
   # -------------------------
   # JOINERS
   # -------------------------
   joiner_birthdates:
-    build: ./workers/joiners
+    build:
+      context: .             # project root
+      dockerfile: workers/joiners/Dockerfile
     container_name: joiner_birthdates
     command: ["/workers/joiners/join_birthdates.py"]
     environment:
@@ -49,13 +104,17 @@ services:
       - RABBIT_HOST=rabbitmq
     volumes:
       - ./workers/joiners/config.ini:/workers/joiners/config.ini:ro
+      - ./utils:/server/utils:ro
+      - ./middleware:/server/middleware:ro
     depends_on:
       rabbitmq:
         condition: service_started
-    networks: [testing_net]
+    networks: [net]
 
   joiner_items:
-    build: ./workers/joiners
+    build:
+      context: .             # project root
+      dockerfile: workers/joiners/Dockerfile
     container_name: joiner_items
     command: ["/workers/joiners/join_items.py"]
     environment:
@@ -64,16 +123,20 @@ services:
       - RABBIT_HOST=rabbitmq
     volumes:
       - ./workers/joiners/config.ini:/workers/joiners/config.ini:ro
+      - ./utils:/server/utils:ro
+      - ./middleware:/server/middleware:ro
     depends_on:
       rabbitmq:
         condition: service_started
-    networks: [testing_net]
+    networks: [net]
 
   # -------------------------
   # AGGREGATORS
   # -------------------------
   agg_products_qty_by_month:
-    build: ./workers/aggregators
+    build:
+      context: .             # project root
+      dockerfile: workers/aggregators/Dockerfile
     container_name: agg_products_qty_by_month
     command: ["/workers/aggregators/agg_products_qty_by_month.py"]
     environment:
@@ -82,13 +145,17 @@ services:
       - RABBIT_HOST=rabbitmq
     volumes:
       - ./workers/aggregators/config.ini:/workers/aggregators/config.ini:ro
+      - ./utils:/server/utils:ro
+      - ./middleware:/server/middleware:ro
     depends_on:
       rabbitmq:
         condition: service_started
-    networks: [testing_net]
+    networks: [net]
 
   agg_products_revenue_by_month:
-    build: ./workers/aggregators
+    build:
+      context: .             # project root
+      dockerfile: workers/aggregators/Dockerfile
     container_name: agg_products_revenue_by_month
     command: ["/workers/aggregators/agg_products_revenue_by_month.py"]
     environment:
@@ -97,13 +164,17 @@ services:
       - RABBIT_HOST=rabbitmq
     volumes:
       - ./workers/aggregators/config.ini:/workers/aggregators/config.ini:ro
+      - ./utils:/server/utils:ro
+      - ./middleware:/server/middleware:ro
     depends_on:
       rabbitmq:
         condition: service_started
-    networks: [testing_net]
+    networks: [net]
 
   agg_tpv_by_store_semester:
-    build: ./workers/aggregators
+    build:
+      context: .             # project root
+      dockerfile: workers/aggregators/Dockerfile
     container_name: agg_tpv_by_store_semester
     command: ["/workers/aggregators/agg_tpv_by_store_semester.py"]
     environment:
@@ -112,13 +183,17 @@ services:
       - RABBIT_HOST=rabbitmq
     volumes:
       - ./workers/aggregators/config.ini:/workers/aggregators/config.ini:ro
+      - ./utils:/server/utils:ro
+      - ./middleware:/server/middleware:ro
     depends_on:
       rabbitmq:
         condition: service_started
-    networks: [testing_net]
+    networks: [net]
 
   agg_purchases_by_client_store:
-    build: ./workers/aggregators
+    build:
+      context: .             # project root
+      dockerfile: workers/aggregators/Dockerfile
     container_name: agg_purchases_by_client_store
     command: ["/workers/aggregators/agg_purchases_by_client_store.py"]
     environment:
@@ -127,10 +202,12 @@ services:
       - RABBIT_HOST=rabbitmq
     volumes:
       - ./workers/aggregators/config.ini:/workers/aggregators/config.ini:ro
+      - ./utils:/server/utils:ro
+      - ./middleware:/server/middleware:ro
     depends_on:
       rabbitmq:
         condition: service_started
-    networks: [testing_net]
+    networks: [net]
 YAML
 
 # Clients
@@ -145,26 +222,31 @@ for ((i=1; i<=CLIENT_NUMBER; i++)); do
   cat >> "$OUTPUT_FILE" <<YAML
   client${i}:
     container_name: client${i}
-    build: ./client
+    build:
+      context: .             # project root
+      dockerfile: client/Dockerfile
     environment:
       - CLI_ID=${i}
       - CLI_DATA_DIR=/data
       - DATA_MODE=tree
       - SERVER_ADDRESS=server:12345
-    networks: [testing_net]
+    networks: [net]
     depends_on:
-      server:
+      - rabbitmq
+      - server:
         condition: service_started
     volumes:
       - ${MOUNT_PATH}:/data:ro
       - ./client/config.ini:/config.ini:ro
+      - ./utils:/server/utils:ro
+      - ./middleware:/server/middleware:ro
 YAML
 done
 
 # Redes
 cat >> "$OUTPUT_FILE" <<'YAML'
 networks:
-  testing_net:
+  net:
     ipam:
       driver: default
       config:

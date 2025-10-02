@@ -37,6 +37,9 @@ class ProcessChunk:
         self.header = header
         self.header.size = sum(len(r.serialize()) for r in rows)
 
+    def client_id(self) -> int:
+        return self.header.client_id
+    
     def table_type(self) -> TableType:
         return self.header.table_type
     

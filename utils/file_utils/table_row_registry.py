@@ -4,7 +4,7 @@ from .file_table import *
 
 PROCESS_CLASSES = {
     TableType.TRANSACTIONS: TransactionsProcessRow,
-    TableType.TRANSACTIONS_ITEMS: TransactionsItemsProcessRow,
+    TableType.TRANSACTION_ITEMS: TransactionsItemsProcessRow,
     TableType.MENU_ITEMS: MenuItemsProcessRow,
     TableType.STORES: StoresProcessRow,
     TableType.USERS: UsersProcessRow,
@@ -12,7 +12,7 @@ PROCESS_CLASSES = {
 
 FILE_CLASSES = {
     TableType.TRANSACTIONS: TransactionsFileRow,
-    TableType.TRANSACTIONS_ITEMS: TransactionsItemsFileRow,
+    TableType.TRANSACTION_ITEMS: TransactionsItemsFileRow,
     TableType.MENU_ITEMS: MenuItemsFileRow,
     TableType.STORES: StoresFileRow,
     TableType.USERS: UsersFileRow,

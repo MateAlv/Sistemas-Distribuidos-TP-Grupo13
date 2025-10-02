@@ -94,7 +94,7 @@ def test_menu_items_process_row_serialize_deserialize():
     assert consumed == len(serialized)
     
 def test_stores_process_row_from_file_row():
-    file_row = StoresFileRow(1, "Shop", "Street", "City", "State", 10.0, 20.0)
+    file_row = StoresFileRow(1, "Shop", "Street", "12345", "City", "State", 10.0, 20.0)
     process_row = StoresProcessRow.from_file_row(file_row)
     assert process_row.store_name == "Shop"
     assert process_row.store_id == 1
