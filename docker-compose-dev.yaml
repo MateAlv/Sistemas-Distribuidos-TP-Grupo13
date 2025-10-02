@@ -40,7 +40,8 @@ services:
       - ./middleware:/server/middleware:ro
     working_dir: /app
     depends_on:
-      - rabbitmq
+      rabbitmq:
+        condition: service_healthy
     networks: [net]
 
   filter_hour:
