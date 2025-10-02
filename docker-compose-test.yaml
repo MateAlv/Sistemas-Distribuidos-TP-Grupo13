@@ -18,7 +18,7 @@ services:
   server:
     container_name: server
     build:
-      context: .             # project root
+      context: .             
       dockerfile: server/Dockerfile
     entrypoint: ["python3", "main.py"]
     environment:
