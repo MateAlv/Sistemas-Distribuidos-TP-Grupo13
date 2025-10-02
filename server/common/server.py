@@ -64,7 +64,6 @@ class Server:
         self.middleware_queue_senders["to_join_users"] = MessageMiddlewareQueue("rabbitmq", "to_join_users")
         self.middleware_queue_senders["to_join_menu_items"] = MessageMiddlewareQueue("rabbitmq", "to_join_menu_items")
         self.middleware_queue_senders["to_top3"] = MessageMiddlewareQueue("rabbitmq", "to_top3")
-
         self._running = True
         self._server_socket: Optional[socket.socket] = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -130,9 +129,9 @@ class Server:
                     break
 
                 if header == H_ID_DATA:
-                    logging.debug("action: recv_file_chunk_header | peer:%s", peer)
+                    logging.info("action: recv_file_chunk | peer:%s", peer)
                     # Recibe y procesa el chunk
-                    self._handle_file_chunks(sock)
+                    self._handle_file_chunks(sock, peer)
                     # ACK por chunk
                     sendall(sock, self.header_id_to_bytes(H_ID_OK))
                     continue
@@ -186,7 +185,7 @@ class Server:
         logging.debug("action: handshake_ok | byte:%r", header)
         sendall(sock, self.header_id_to_bytes(H_ID_OK))
 
-    def _handle_file_chunks(self, sock: socket.socket) -> None:
+    def _handle_file_chunks(self, sock: socket.socket, peer) -> None:
         # Recive el tamaño del batch (int) y luego los datos del batch
         chunk = FileChunk.recv(sock)
         logging.info("action: recv_file_chunk | peer:%s | cli_id:%s | file:%s | bytes:%s",
@@ -194,7 +193,7 @@ class Server:
         # Deserializa el batch recibido para convertirlo en objeto ProcessBatch
         process_chunk = ProcessBatchReader.from_file_rows(chunk.payload(), chunk.path(), chunk.client_id())
         # Aquí puedes procesar el objeto process_chunk según sea necesario
-        if process_chunk.table_type() == TableType.TRANSACTIONS or process_chunk.table_type() == TableType.TRANSACTIONS_ITEMS:
+        if process_chunk.table_type() == TableType.TRANSACTIONS or process_chunk.table_type() == TableType.TRANSACTION_ITEMS:
             # Envia al filtro 1
             logging.info("action: send_to_filter1 | peer:%s | cli_id:%s | file:%s | bytes:%s",
                          peer, chunk.client_id(), chunk.path(), chunk.payload_size())
