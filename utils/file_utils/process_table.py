@@ -68,7 +68,7 @@ class TransactionsProcessRow(TableProcessRow):
         created_at_str = str(self.created_at) if self.created_at is not None else ""
         year_half_created_at_str = str(self.year_half_created_at) if self.year_half_created_at is not None else ""
 
-        return f"{transaction_id_str};{store_id_str};{user_id_str};{final_amount_str};{created_at_str};{year_half_created_at_str}\n".encode("utf-8")
+        return f"{transaction_id_str},{store_id_str},{user_id_str},{final_amount_str},{created_at_str},{year_half_created_at_str}\n".encode("utf-8")
 
     def from_file_row(file_row: TransactionsFileRow):
         return TransactionsProcessRow(
@@ -82,11 +82,11 @@ class TransactionsProcessRow(TableProcessRow):
     @staticmethod
     def deserialize(data: bytes):
         line = data.split(b"\n", 1)[0].decode("utf-8")
-        parts = line.split(";")
+        parts = line.split(CSV_DELIMITER)
         
         trans_id = parts[0] if len(parts[0]) > 0 else None
-        store_id = int(parts[1]) if len(parts[1]) > 0 else None
-        user_id = int(parts[2]) if len(parts[2]) > 0 else None
+        store_id = int(float(parts[1])) if len(parts[1]) > 0 else None
+        user_id = int(float(parts[2])) if len(parts[2]) > 0 else None
         final_amount = float(parts[3]) if len(parts[3]) > 0 else None
         created_at = DateTime.from_string(parts[4]) if len(parts[4]) > 0 else None
 
@@ -124,7 +124,7 @@ class TransactionsItemsProcessRow(TableProcessRow):
         created_at_str = str(self.created_at) if self.created_at is not None else ""
         month_year_created_at_str = str(self.month_year_created_at) if self.month_year_created_at is not None else ""
 
-        return f"{transaction_id_str};{item_id_str};{quantity_str};{subtotal_str};{created_at_str};{month_year_created_at_str}\n".encode("utf-8")
+        return f"{transaction_id_str},{item_id_str},{quantity_str},{subtotal_str},{created_at_str},{month_year_created_at_str}\n".encode("utf-8")
 
     def from_file_row(file_row: TransactionsItemsFileRow):
         return TransactionsItemsProcessRow(
@@ -138,11 +138,11 @@ class TransactionsItemsProcessRow(TableProcessRow):
     @staticmethod
     def deserialize(data: bytes):
         line = data.split(b"\n", 1)[0].decode("utf-8")
-        parts = line.split(";")
+        parts = line.split(CSV_DELIMITER)
 
         transaction_id = parts[0] if len(parts[0]) > 0 else None
-        item_id = int(parts[1]) if len(parts[1]) > 0 else None
-        quantity = int(parts[2]) if len(parts[2]) > 0 else None
+        item_id = int(float(parts[1])) if len(parts[1]) > 0 else None
+        quantity = int(float(parts[2])) if len(parts[2]) > 0 else None
         subtotal = float(parts[3]) if len(parts[3]) > 0 else None
         created_at = DateTime.from_string(parts[4]) if len(parts[4]) > 0 else None
 
@@ -168,7 +168,7 @@ class MenuItemsProcessRow(TableProcessRow):
         item_id_str = str(self.item_id) if self.item_id is not None else ""
         item_name_str = self.item_name if self.item_name is not None else ""
         
-        return f"{item_id_str};{item_name_str}\n".encode("utf-8")
+        return f"{item_id_str},{item_name_str}\n".encode("utf-8")
 
     def from_file_row(file_row: MenuItemsFileRow):
         return MenuItemsProcessRow(
@@ -179,9 +179,9 @@ class MenuItemsProcessRow(TableProcessRow):
     @staticmethod
     def deserialize(data: bytes):
         line = data.split(b"\n", 1)[0].decode("utf-8")
-        parts = line.split(";")
+        parts = line.split(CSV_DELIMITER)
 
-        item_id = int(parts[0]) if len(parts[0]) > 0 else None
+        item_id = int(float(parts[0])) if len(parts[0]) > 0 else None
         item_name = parts[1] if len(parts[1]) > 0 else None
 
         row = MenuItemsProcessRow(item_id, item_name)
@@ -205,7 +205,7 @@ class StoresProcessRow(TableProcessRow):
         store_id_str = str(self.store_id) if self.store_id is not None else ""
         store_name_str = self.store_name if self.store_name is not None else ""
         
-        return f"{store_id_str};{store_name_str}\n".encode("utf-8")
+        return f"{store_id_str},{store_name_str}\n".encode("utf-8")
 
     def from_file_row(file_row: StoresFileRow):
         return StoresProcessRow(
@@ -216,9 +216,9 @@ class StoresProcessRow(TableProcessRow):
     @staticmethod
     def deserialize(data: bytes):
         line = data.split(b"\n", 1)[0].decode("utf-8")
-        parts = line.split(";")
+        parts = line.split(CSV_DELIMITER)
 
-        store_id = int(parts[0]) if len(parts[0]) > 0 else None
+        store_id = int(float(parts[0])) if len(parts[0]) > 0 else None
         store_name = parts[1] if len(parts[1]) > 0 else None
         
         row = StoresProcessRow(store_id, store_name)
@@ -243,7 +243,7 @@ class UsersProcessRow(TableProcessRow):
         user_id_str = str(self.user_id) if self.user_id is not None else ""
         birthdate_str = self.birthdate.isoformat() if self.birthdate is not None else ""
 
-        return f"{user_id_str};{birthdate_str}\n".encode("utf-8")
+        return f"{user_id_str},{birthdate_str}\n".encode("utf-8")
 
     def from_file_row(file_row: UsersFileRow):
         return UsersProcessRow(
@@ -254,9 +254,9 @@ class UsersProcessRow(TableProcessRow):
     @staticmethod
     def deserialize(data: bytes):
         line = data.split(b"\n", 1)[0].decode("utf-8")
-        parts = line.split(";")
+        parts = line.split(CSV_DELIMITER)
 
-        user_id = int(parts[0]) if len(parts[0]) > 0 else None
+        user_id = int(float(parts[0])) if len(parts[0]) > 0 else None
         birthdate = datetime.date.fromisoformat(parts[1]) if len(parts[1]) > 0 else None
 
         row = UsersProcessRow(user_id, birthdate)

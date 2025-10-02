@@ -1,5 +1,7 @@
 import datetime
 
+CSV_DELIMITER: str = ","
+
 # =========================================
 # BASE FILE ROW
 # =========================================
@@ -77,18 +79,18 @@ class TransactionsFileRow(TableFileRow):
         final_amount_str = str(self.final_amount) if self.final_amount is not None else ""
         created_at_str = str(self.created_at) if self.created_at is not None else ""
 
-        return f"{transaction_id_str};{store_id_str};{payment_method_id_str};{voucher_id_str};{user_id_str};{original_amount_str};{discount_applied_str};{final_amount_str};{created_at_str}\n".encode("utf-8")
+        return f"{transaction_id_str},{store_id_str},{payment_method_id_str},{voucher_id_str},{user_id_str},{original_amount_str},{discount_applied_str},{final_amount_str},{created_at_str}\n".encode("utf-8")
 
     @staticmethod
     def deserialize(data: bytes):
         line = data.split(b"\n", 1)[0].decode("utf-8")
-        parts = line.split(";")
+        parts = line.split(CSV_DELIMITER)
 
         transaction_id = parts[0] if len(parts[0]) > 0 else None
-        store_id = int(parts[1]) if len(parts[1]) > 0 else None
-        payment_method_id = int(parts[2]) if len(parts[2]) > 0 else None
-        voucher_id = int(parts[3]) if len(parts[3]) > 0 else None
-        user_id = int(parts[4]) if len(parts[4]) > 0 else None
+        store_id = int(float(parts[1])) if len(parts[1]) > 0 else None
+        payment_method_id = int(float(parts[2])) if len(parts[2]) > 0 else None
+        voucher_id = int(float(parts[3]) )if len(parts[3]) > 0 else None
+        user_id = int(float(parts[4])) if len(parts[4]) > 0 else None
         original_amount = float(parts[5]) if len(parts[5]) > 0 else None
         discount_applied = float(parts[6]) if len(parts[6]) > 0 else None
         final_amount = float(parts[7]) if len(parts[7]) > 0 else None
@@ -143,16 +145,16 @@ class TransactionsItemsFileRow(TableFileRow):
         subtotal_str = str(self.subtotal) if self.subtotal is not None else ""
         created_at_str = str(self.created_at) if self.created_at is not None else ""
 
-        return f"{transaction_id_str};{item_id_str};{quantity_str};{unit_price_str};{subtotal_str};{created_at_str}\n".encode("utf-8")
+        return f"{transaction_id_str},{item_id_str},{quantity_str},{unit_price_str},{subtotal_str},{created_at_str}\n".encode("utf-8")
 
     @staticmethod
     def deserialize(data: bytes):
         line = data.split(b"\n", 1)[0].decode("utf-8")
-        parts = line.split(";")
+        parts = line.split(CSV_DELIMITER)
         
         trans_id = parts[0] if len(parts[0]) > 0 else None
-        item_id = int(parts[1]) if len(parts[1]) > 0 else None
-        quantity = int(parts[2]) if len(parts[2]) > 0 else None
+        item_id = int(float(parts[1])) if len(parts[1]) > 0 else None
+        quantity = int(float(parts[2])) if len(parts[2]) > 0 else None
         unit_price = float(parts[3]) if len(parts[3]) > 0 else None
         subtotal = float(parts[4]) if len(parts[4]) > 0 else None
         created_at = DateTime.from_string(parts[5]) if len(parts[5]) > 0 else None
@@ -206,14 +208,14 @@ class MenuItemsFileRow(TableFileRow):
         available_from_str = str(self.available_from) if self.available_from is not None else ""
         available_to_str = str(self.available_to) if self.available_to is not None else ""
 
-        return f"{item_id_str};{item_name_str};{category_str};{price_str};{is_seasonal_str};{available_from_str};{available_to_str}\n".encode("utf-8")
+        return f"{item_id_str},{item_name_str},{category_str},{price_str},{is_seasonal_str},{available_from_str},{available_to_str}\n".encode("utf-8")
 
     @staticmethod
     def deserialize(data: bytes):
         line = data.split(b"\n", 1)[0].decode("utf-8")
-        parts = line.split(";")
+        parts = line.split(CSV_DELIMITER)
         
-        item_id = int(parts[0]) if len(parts[0]) > 0 else None
+        item_id = int(float(parts[0])) if len(parts[0]) > 0 else None
         item_name = parts[1] if len(parts[1]) > 0 else None
         category = parts[2] if len(parts[2]) > 0 else None
         price = float(parts[3]) if len(parts[3]) > 0 else None
@@ -251,6 +253,7 @@ class StoresFileRow(TableFileRow):
                  store_id: int, 
                  store_name: str, 
                  street: str, 
+                 postal_code: str,
                  city: str, 
                  state: str, 
                  latitude: float, 
@@ -258,6 +261,7 @@ class StoresFileRow(TableFileRow):
         self.store_id = store_id
         self.store_name = store_name
         self.street = street
+        self.postal_code = postal_code
         self.city = city
         self.state = state
         self.latitude = latitude
@@ -267,30 +271,33 @@ class StoresFileRow(TableFileRow):
         store_id_str = str(self.store_id) if self.store_id is not None else ""
         store_name_str = self.store_name if self.store_name is not None else ""
         street_str = self.street if self.street is not None else ""
+        postal_code_str = self.postal_code if self.postal_code is not None else ""
         city_str = self.city if self.city is not None else ""
         state_str = self.state if self.state is not None else ""
         latitude_str = str(self.latitude) if self.latitude is not None else ""
         longitude_str = str(self.longitude) if self.longitude is not None else ""
 
-        return f"{store_id_str};{store_name_str};{street_str};{city_str};{state_str};{latitude_str};{longitude_str}\n".encode("utf-8")
+        return f"{store_id_str},{store_name_str},{street_str},{postal_code_str},{city_str},{state_str},{latitude_str},{longitude_str}\n".encode("utf-8")
 
     @staticmethod
     def deserialize(data: bytes):
         line = data.split(b"\n", 1)[0].decode("utf-8")
-        parts = line.split(";")
+        parts = line.split(CSV_DELIMITER)
 
-        store_id = int(parts[0]) if len(parts[0]) > 0 else None
+        store_id = int(float(parts[0])) if len(parts[0]) > 0 else None
         store_name = parts[1] if len(parts[1]) > 0 else None
         street = parts[2] if len(parts[2]) > 0 else None
-        city = parts[3] if len(parts[3]) > 0 else None
-        state = parts[4] if len(parts[4]) > 0 else None
-        latitude = float(parts[5]) if len(parts[5]) > 0 else None
-        longitude = float(parts[6]) if len(parts[6]) > 0 else None
+        postal_code = parts[3] if len(parts[3]) > 0 else None
+        city = parts[4] if len(parts[4]) > 0 else None
+        state = parts[5] if len(parts[5]) > 0 else None
+        latitude = float(parts[6]) if len(parts[6]) > 0 else None
+        longitude = float(parts[7]) if len(parts[7]) > 0 else None
 
         row = StoresFileRow(
             store_id,
             store_name,
             street,
+            postal_code,
             city,
             state,
             latitude,
@@ -329,14 +336,14 @@ class UsersFileRow(TableFileRow):
         birthdate_str = self.birthdate.isoformat() if self.birthdate is not None else ""
         registration_at_str = str(self.registration_at) if self.registration_at is not None else ""
 
-        return f"{user_id_str};{gender_str};{birthdate_str};{registration_at_str}\n".encode("utf-8")
+        return f"{user_id_str},{gender_str},{birthdate_str},{registration_at_str}\n".encode("utf-8")
 
     @staticmethod
     def deserialize(data: bytes):
         line = data.split(b"\n", 1)[0].decode("utf-8")
-        parts = line.split(";")
+        parts = line.split(CSV_DELIMITER)
 
-        user_id = int(parts[0]) if len(parts[0]) > 0 else None
+        user_id = int(float(parts[0])) if len(parts[0]) > 0 else None
         gender = parts[1] if len(parts[1]) > 0 else None
         birthdate = datetime.date.fromisoformat(parts[2]) if len(parts[2]) > 0 else None
         registration_at = DateTime.from_string(parts[3]) if len(parts[3]) > 0 else None
