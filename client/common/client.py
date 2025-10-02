@@ -71,7 +71,7 @@ class Client:
                 
                 # Envío de batches (iterativo)
                 for chunk in self.reader.iter():
-                    sender.send_file_chunk(chunk.data)
+                    sender.send_file_chunk(chunk.serialize())
                     if chunk.is_last_file_chunk():
                         # Espera ACK de fin de archivo
                         sender.wait_end_file_ack()
