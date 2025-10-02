@@ -4,7 +4,10 @@ import os
 import logging
 import argparse
 from configparser import ConfigParser
-from common import Filter
+
+# Configurar logging de pika MUY temprano y de forma agresiva
+logging.getLogger('pika').setLevel(logging.CRITICAL)
+logging.getLogger('pika').disabled = True
 
 def initialize_config(file_name):
     """Parsea archivo .ini y devuelve la configuración"""
@@ -37,11 +40,20 @@ def initialize_config(file_name):
 
 def initialize_log(logging_level):
     """Inicializa logging"""
+    # Convertir string a constante de logging
+    if isinstance(logging_level, str):
+        logging_level = getattr(logging, logging_level.upper())
+    
     logging.basicConfig(
         format="%(asctime)s %(levelname)-8s %(message)s",
         level=logging_level,
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+    
+    # Silenciar logs de pika completamente si el nivel es INFO o superior
+    logging.getLogger('pika').setLevel(logging.ERROR)
+    # También silenciar otros loggers verbosos
+    logging.getLogger('urllib3').setLevel(logging.WARNING)
 
 
 def main():
@@ -55,6 +67,9 @@ def main():
     config_file = f"config/config_{args.filter}.ini"
     (logging_level, cfg) = initialize_config(config_file)
     initialize_log(logging_level)
+
+    # Importar Filter después de configurar logging
+    from common import Filter
 
     logging.debug(f"Config cargada desde {config_file}: {cfg}")
 

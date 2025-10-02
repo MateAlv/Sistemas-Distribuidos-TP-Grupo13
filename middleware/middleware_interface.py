@@ -1,5 +1,9 @@
 import pika
+import logging
 from abc import ABC, abstractmethod
+
+logging.getLogger('pika').setLevel(logging.CRITICAL)
+
 TIMEOUT = 3
 
 class MessageMiddlewareMessageError(Exception):
@@ -65,7 +69,7 @@ class MessageMiddlewareExchange(MessageMiddleware):
 
             def callback(ch, method, properties, body):
                 try:
-                    on_message_callback(body.decode())
+                    on_message_callback(body)
                 except Exception as e:
                     raise MessageMiddlewareMessageError(f"Error procesando mensaje: {e}")
 
@@ -124,7 +128,7 @@ class MessageMiddlewareQueue(MessageMiddleware):
         try:
             def callback(ch, method, properties, body):
                 try:
-                    on_message_callback(body.decode())
+                    on_message_callback(body)
                 except Exception as e:
                     raise MessageMiddlewareMessageError(f"Error procesando mensaje: {e}")
 

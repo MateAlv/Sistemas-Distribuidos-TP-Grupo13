@@ -15,11 +15,16 @@ class TableType(Enum):
         Se considera que los archivos de un tipo de tabla se encuentran dentro de una carpeta
         que contiene el nombre de la tabla (case insensitive).
         Ejemplo: transactions/transactions_2023.csv → TableType.TRANSACTIONS
+        Ejemplo: client-1/menu_items/menu_items.csv → TableType.MENU_ITEMS
         """
         path = path.lower()
-        main_folder = path.split("/")[0]
-        for table_type in TableType:
-            if main_folder == table_type.name.lower():
-                return table_type
+        path_parts = path.split("/")
+        
+        # Buscar en todos los segmentos del path, no solo el primero
+        for part in path_parts:
+            for table_type in TableType:
+                if part == table_type.name.lower():
+                    return table_type
+                    
         raise ValueError(f"No se pudo determinar el tipo de tabla para el path: {path}")
 # =========================================
