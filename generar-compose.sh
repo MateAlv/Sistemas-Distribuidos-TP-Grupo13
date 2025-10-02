@@ -14,7 +14,6 @@ echo "Cantidad de clientes: $CLIENT_NUMBER"
 
 mkdir -p ./.data/dataset
 
-# Cabecera + server
 cat > "$OUTPUT_FILE" <<YAML
 name: tp-distribuidos-grupo13
 services:
@@ -25,6 +24,7 @@ services:
     ports:
       - "5673:5672"
       - "15673:15672"
+
   server:
     container_name: server
     build: ./server
@@ -35,6 +35,102 @@ services:
     networks: [testing_net]
     volumes:
       - ./server/config.ini:/config.ini:ro
+
+  # -------------------------
+  # JOINERS
+  # -------------------------
+  joiner_birthdates:
+    build: ./workers/joiners
+    container_name: joiner_birthdates
+    command: ["/workers/joiners/join_birthdates.py"]
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOGGING_LEVEL=INFO
+      - RABBIT_HOST=rabbitmq
+    volumes:
+      - ./workers/joiners/config.ini:/workers/joiners/config.ini:ro
+    depends_on:
+      rabbitmq:
+        condition: service_started
+    networks: [testing_net]
+
+  joiner_items:
+    build: ./workers/joiners
+    container_name: joiner_items
+    command: ["/workers/joiners/join_items.py"]
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOGGING_LEVEL=INFO
+      - RABBIT_HOST=rabbitmq
+    volumes:
+      - ./workers/joiners/config.ini:/workers/joiners/config.ini:ro
+    depends_on:
+      rabbitmq:
+        condition: service_started
+    networks: [testing_net]
+
+  # -------------------------
+  # AGGREGATORS
+  # -------------------------
+  agg_products_qty_by_month:
+    build: ./workers/aggregators
+    container_name: agg_products_qty_by_month
+    command: ["/workers/aggregators/agg_products_qty_by_month.py"]
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOGGING_LEVEL=INFO
+      - RABBIT_HOST=rabbitmq
+    volumes:
+      - ./workers/aggregators/config.ini:/workers/aggregators/config.ini:ro
+    depends_on:
+      rabbitmq:
+        condition: service_started
+    networks: [testing_net]
+
+  agg_products_revenue_by_month:
+    build: ./workers/aggregators
+    container_name: agg_products_revenue_by_month
+    command: ["/workers/aggregators/agg_products_revenue_by_month.py"]
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOGGING_LEVEL=INFO
+      - RABBIT_HOST=rabbitmq
+    volumes:
+      - ./workers/aggregators/config.ini:/workers/aggregators/config.ini:ro
+    depends_on:
+      rabbitmq:
+        condition: service_started
+    networks: [testing_net]
+
+  agg_tpv_by_store_semester:
+    build: ./workers/aggregators
+    container_name: agg_tpv_by_store_semester
+    command: ["/workers/aggregators/agg_tpv_by_store_semester.py"]
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOGGING_LEVEL=INFO
+      - RABBIT_HOST=rabbitmq
+    volumes:
+      - ./workers/aggregators/config.ini:/workers/aggregators/config.ini:ro
+    depends_on:
+      rabbitmq:
+        condition: service_started
+    networks: [testing_net]
+
+  agg_purchases_by_client_store:
+    build: ./workers/aggregators
+    container_name: agg_purchases_by_client_store
+    command: ["/workers/aggregators/agg_purchases_by_client_store.py"]
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOGGING_LEVEL=INFO
+      - RABBIT_HOST=rabbitmq
+    volumes:
+      - ./workers/aggregators/config.ini:/workers/aggregators/config.ini:ro
+    depends_on:
+      rabbitmq:
+        condition: service_started
+    networks: [testing_net]
 YAML
 
 # Clients
