@@ -37,11 +37,19 @@ def initialize_config(file_name):
 
 def initialize_log(logging_level):
     """Inicializa logging"""
+    # Convertir string a constante de logging
+    if isinstance(logging_level, str):
+        logging_level = getattr(logging, logging_level.upper())
+    
     logging.basicConfig(
         format="%(asctime)s %(levelname)-8s %(message)s",
         level=logging_level,
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+    
+    # Silenciar logs de pika si el nivel es INFO o superior
+    if logging_level >= logging.INFO:
+        logging.getLogger('pika').setLevel(logging.WARNING)
 
 
 def main():
