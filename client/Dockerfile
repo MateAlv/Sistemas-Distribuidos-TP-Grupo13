@@ -5,9 +5,9 @@ WORKDIR /client
 # Copy client code
 COPY client/ .
 
-# Copy shared utils and install it
-# COPY utils/ ./utils
-# RUN pip install ./utils
+# Copy requirements and install
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/client

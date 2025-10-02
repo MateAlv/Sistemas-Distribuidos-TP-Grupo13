@@ -1,5 +1,9 @@
 import pika
+import logging
 from abc import ABC, abstractmethod
+
+logging.getLogger('pika').setLevel(logging.CRITICAL)
+
 TIMEOUT = 3
 
 class MessageMiddlewareMessageError(Exception):

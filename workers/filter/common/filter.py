@@ -6,6 +6,8 @@ TIMEOUT = 3
 
 class Filter:
     def __init__(self, cfg: dict):
+        logging.getLogger('pika').setLevel(logging.CRITICAL)
+        
         self.cfg = cfg
         self.filter_type = cfg["filter_type"]
         self.middleware_queue_sender = {}

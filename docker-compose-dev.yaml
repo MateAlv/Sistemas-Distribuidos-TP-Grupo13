@@ -23,7 +23,8 @@ services:
       - ./utils:/server/utils:ro
       - ./middleware:/server/middleware:ro
     depends_on:
-      - rabbitmq
+      rabbitmq:
+        condition: service_healthy
   # -------------------------
   # FILTERS
   # -------------------------
@@ -40,39 +41,38 @@ services:
       - ./middleware:/server/middleware:ro
     working_dir: /app
     depends_on:
-      rabbitmq:
-        condition: service_healthy
+      - server
     networks: [net]
 
-  filter_hour:
-    build:
-      context: .             # project root
-      dockerfile: workers/filter/Dockerfile
-    container_name: filter_service
-    command: ["python", "main.py", "--filter", "hour"]
-    volumes:
-      - ./workers/filters/config_hour.ini:/workers/filters/config_hour.ini
-      - ./utils:/server/utils:ro
-      - ./middleware:/server/middleware:ro
-    working_dir: /app
-    depends_on:
-      - rabbitmq
-    networks: [net]
+  # filter_hour:
+  #   build:
+  #     context: .             # project root
+  #     dockerfile: workers/filter/Dockerfile
+  #   container_name: filter_service
+  #   command: ["python", "main.py", "--filter", "hour"]
+  #   volumes:
+  #     - ./workers/filters/config_hour.ini:/workers/filters/config_hour.ini
+  #     - ./utils:/server/utils:ro
+  #     - ./middleware:/server/middleware:ro
+  #   working_dir: /app
+  #   depends_on:
+  #     - rabbitmq
+  #   networks: [net]
 
-  filter_amount:
-    build:
-      context: .             # project root
-      dockerfile: workers/filter/Dockerfile
-    container_name: filter_service
-    command: ["python", "main.py", "--filter", "amount"]
-    volumes:
-      - ./workers/filters/config_amount.ini:/workers/filters/config_amount.ini
-      - ./utils:/server/utils:ro
-      - ./middleware:/server/middleware:ro
-    working_dir: /app
-    depends_on:
-      - rabbitmq
-    networks: [net]
+  # filter_amount:
+  #   build:
+  #     context: .             # project root
+  #     dockerfile: workers/filter/Dockerfile
+  #   container_name: filter_service
+  #   command: ["python", "main.py", "--filter", "amount"]
+  #   volumes:
+  #     - ./workers/filters/config_amount.ini:/workers/filters/config_amount.ini
+  #     - ./utils:/server/utils:ro
+  #     - ./middleware:/server/middleware:ro
+  #   working_dir: /app
+  #   depends_on:
+  #     - rabbitmq
+  #   networks: [net]
       
   # -------------------------
   # JOINERS

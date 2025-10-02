@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import logging
 from dataclasses import dataclass
 from typing import Iterable, Optional, Generator, List, Tuple
 from .file_chunk import FileChunk
@@ -39,6 +40,16 @@ class BatchReader:
     def iter(self) -> Generator[FileChunk, None, None]:
         # Recorre todos los archivos del directorio
         for abs_path, rel_path, _ in self.directory_reader.iter():
+            # Verificar si el archivo es reconocido por el sistema antes de procesarlo
+            try:
+                from utils.file_utils.table_type import TableType
+                TableType.from_path(rel_path)  # Verifica si es un tipo válido
+            except ValueError as e:
+                # Archivo no reconocido (ej: payment_methods.csv) - ignorar silenciosamente
+                logging.info("action: skip_unsupported_file | client_id:%s | file:%s | reason:%s", 
+                           self.client_id, rel_path, str(e))
+                continue  # Salta al siguiente archivo
+            
             # Itera por batches del archivo actual
             for batch_payload in self.__iter_batch_payload__(abs_path):
                 # Determina si es el último chunk (si el batch < max_batch_size)
