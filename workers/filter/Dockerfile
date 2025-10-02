@@ -1,10 +1,12 @@
 FROM python:3.12-slim
 
-WORKDIR /workers
-COPY workers/filter/ .
+WORKDIR /workers/
+COPY workers/filter/ ./filter/
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r /tmp/requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
 ENV PYTHONUNBUFFERED=1
-ENV PYTHONPATH=/workers
+ENV PYTHONPATH=/workers/
+
+WORKDIR /workers/filter

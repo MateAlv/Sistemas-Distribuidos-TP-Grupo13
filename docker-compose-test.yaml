@@ -2,17 +2,16 @@ name: tp-distribuidos-grupo13
 services:
   filter_year:
     build:
-      context: .          
+      context: .   
       dockerfile: workers/filter/Dockerfile
     container_name: filter_service
     command: ["python", "main.py", "--filter", "year"]
     volumes:
-      - ./workers/filter/config_year.ini:/workers/filter/config_year.ini
-      - ./utils:/utils:ro
-      - ./middleware:/middleware:ro
-
-    networks: [testing_net] 
-
+      - ./workers/filter/config/config_year.ini:/workers/filter/config/config_year.ini
+      - ./utils:/workers/utils:ro
+      - ./middleware:/workers/middleware:ro
+    networks: [testing_net]
+    
 networks:
   testing_net:
     ipam:

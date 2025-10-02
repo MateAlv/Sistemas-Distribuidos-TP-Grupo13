@@ -4,8 +4,7 @@ import os
 import logging
 import argparse
 from configparser import ConfigParser
-from Filter import Filter
-
+from common import Filter
 
 def initialize_config(file_name):
     """Parsea archivo .ini y devuelve la configuración"""
