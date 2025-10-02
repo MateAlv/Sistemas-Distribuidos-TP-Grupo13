@@ -1,37 +1,18 @@
 name: tp-distribuidos-grupo13
 services:
-  server:
-    container_name: server
+  filter_year:
     build:
-      context: .             # project root
-      dockerfile: server/Dockerfile
-    entrypoint: ["python3", "main.py"]
-    environment:
-      - PYTHONUNBUFFERED=1
-      - CLI_CLIENTS=1
-    networks: [testing_net]
+      context: .          
+      dockerfile: workers/filter/Dockerfile
+    container_name: filter_service
+    command: ["python", "main.py", "--filter", "year"]
     volumes:
-      - ./server/config.ini:/config.ini:ro
-      - ./utils:/server/utils:ro
-  client:
-    container_name: client1
-    build:
-      context: .             # project root
-      dockerfile: client/Dockerfile
-    entrypoint: ["python3", "main.py"]
-    environment:
-      - CLI_ID=1
-      - CLI_DATA_DIR=/data
-      - DATA_MODE=tree
-      - SERVER_ADDRESS=server:12345
-    networks: [testing_net]
-    depends_on:
-      server:
-        condition: service_started
-    volumes:
-      - ./utils/communication/tests/test_data:/data:ro
-      - ./client/config.ini:/config.ini:ro
-      - ./utils:/client/utils:ro
+      - ./workers/filter/config_year.ini:/workers/filter/config_year.ini
+      - ./utils:/utils:ro
+      - ./middleware:/middleware:ro
+
+    networks: [testing_net] 
+
 networks:
   testing_net:
     ipam:

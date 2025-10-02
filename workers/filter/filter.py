@@ -31,6 +31,8 @@ class Filter:
         else:
             raise ValueError(f"Tipo de filtro inválido: {self.filter_type}")
 
+        logging.info(f"Filtro iniciado. Tipo: {self.filter_type}")
+
 
     def run(self):
         logging.info(f"Filtro iniciado. Tipo: {self.filter_type}")
@@ -44,6 +46,7 @@ class Filter:
             self.middleware_queue_receiver.start_consuming(callback)
             for msg in results:
                 chunk = ProcessChunk.deserialize(*msg)
+                logging.info(f"action: filter | type:{self.filter_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()} | rows_in:{len(chunk.rows)}")
                 filtered_rows = [tx for tx in chunk.rows if self.apply(tx)]
                 if filtered_rows:
                     for queue in self.middleware_queue_sender.values():
