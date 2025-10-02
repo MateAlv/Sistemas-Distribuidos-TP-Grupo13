@@ -22,7 +22,7 @@ class Filter:
             self.middleware_exchange_sender = MessageMiddlewareExchange("rabbitmq", "SECOND_END_MESSAGE", [""], exchange_type="fanout")
         elif self.filter_type == "hour":
             self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", "to_filter_2")
-            self.middleware_queue_sender["to_filter_3"] = MessageMiddlewareQueue("rabbitmq", "to_filter_3")
+            self.middleware_queue_sender["to_filter_3"] = MessageMiddlewareQueue("rabbitmq", "to_filter_amount")
             self.middleware_queue_sender["to_agg_3"] = MessageMiddlewareQueue("rabbitmq", "to_agg_3")
             self.middleware_exchange_receiver = MessageMiddlewareExchange("rabbitmq", "SECOND_END_MESSAGE", [""], exchange_type="fanout")
             self.middleware_exchange_sender = MessageMiddlewareExchange("rabbitmq", "THIRD_END_MESSAGE", [""], exchange_type="fanout")

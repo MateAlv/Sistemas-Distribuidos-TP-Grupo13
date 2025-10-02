@@ -71,7 +71,26 @@ services:
     networks:
       - testing_net
     depends_on:
-      filter_year:
+      server:
+        condition: service_started
+
+  filter_amount:
+    build:
+      context: .   
+      dockerfile: workers/filter/Dockerfile
+    container_name: filter_amount_service
+    command: ["python", "main.py", "--filter", "amount"]
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOGGING_LEVEL=INFO
+    volumes:
+      - ./workers/filter/config/config_amount.ini:/workers/filter/config/config_amount.ini
+      - ./utils:/workers/utils:ro
+      - ./middleware:/workers/middleware:ro
+    networks:
+      - testing_net
+    depends_on:
+      server:
         condition: service_started
     
   client1:
