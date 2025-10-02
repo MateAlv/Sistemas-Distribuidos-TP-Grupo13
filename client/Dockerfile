@@ -2,12 +2,12 @@ FROM python:3.12-slim
 
 WORKDIR /client
 
-# Copy client code
-COPY client/ .
-
-# Copy requirements and install
+# Copiar y instalar dependencias primero (para mejor caching)
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Copiar el código fuente después
+COPY client/ .
 
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/client

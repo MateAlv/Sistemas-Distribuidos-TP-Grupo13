@@ -2,11 +2,12 @@ FROM python:3.12-slim
 
 WORKDIR /server
 
-# Copy server code
-COPY server/ .
-
+# Copiar y instalar dependencias primero (para mejor caching)
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Copiar el código fuente después
+COPY server/ .
 
 # Copy shared utils and install it
 # COPY utils/ ./utils
