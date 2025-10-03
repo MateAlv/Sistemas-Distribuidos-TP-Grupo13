@@ -64,3 +64,65 @@ Cuando el cliente termina de enviar todos los archivos:
 - Timeouts: fijos (connect_timeout=10s, io_timeout=30s).
 - Archivos válidos: únicamente con extensión .csv.
 - Handshake: siempre obligatorio.
+
+## Canales de Comunicacion RabbitMQ
+- Server:
+  - Envia a Filter 1, Join Items, Join Users, Top 3, Join Stores
+  - Recibe de Join Items, Join Users, Merge Q1, Join Stores
+- Filter 1:
+  - Envia a Filter 2, Agg 1+2, Agg 4
+  - Recibe de Server
+- Filter 2:
+  - Envia a Filter 3, Agg 3
+  - Recibe de Filter 1
+- Filter 3:
+  - Envia a Merge Q1
+  - Recibe de Filter 2
+- Agg 1+2:
+  - Envia a Max 1-3, Max 4-6, Max 7-8
+  - Recibe de Filter 1
+- Agg 3:
+  - Envia a Merge Q3
+  - Recibe de Filter 2
+- Agg 4:
+  - Envia a Top3 1-3, Top3  4-6, Top3 7-10
+  - Recibe de Filter 1
+- Max 1-3:
+  - Envia a Max
+  - Recibe de Agg 1+2
+- Max 4-6:
+  - Envia a Max
+  - Recibe de Agg 1+2
+- Max 7-8:
+  - Envia a Max
+  - Recibe de Agg 1+2
+- Max:
+  - Envia a Join Items
+  - Recibe de Max 1-3, Max 4-6, Max 7-8
+- Top3 1-3:
+  - Envia a Top3 + Join Stores
+  - Recibe de Agg 4
+- Top3 4-6:
+  - Envia a Top3 + Join Stores
+  - Recibe de Agg 4
+- Top3 7-10:
+  - Envia a Top3 + Join Stores
+  - Recibe de Agg 4
+- Top3 + Join Stores:
+  - Envia a Join Users
+  - Recibe de Top3 1-3, Top3  4-6, Top3 7-10, Server
+- Join Items:
+  - Envia a Server
+  - Recibe de Max
+- Join Stores:
+  - Envia a Server
+  - Recibe de Merge Q3, Server
+- Join Users:
+  - Envia a Server
+  - Recibe de Top3 + Join Stores, Server
+- Merge Q1:
+  - Envia a Server
+  - Recibe de Filtro 3
+- Merge Q3:
+  - Envia a Join Stores
+  - Recibe de Agg 3
