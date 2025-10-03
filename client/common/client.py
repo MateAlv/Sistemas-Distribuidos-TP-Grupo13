@@ -77,11 +77,16 @@ class Client:
                     if chunk.is_last_file_chunk():
                         # Espera ACK de fin de archivo
                         sender.wait_end_file_ack()
+                        logging.info("Cliente %s: archivo completado: %s", self.id, chunk.path())
 
                 # Señal de fin - Todos los archivos enviados
                 sender.send_finished()
+                logging.info("Cliente %s: todos los archivos enviados, esperando resultados...", self.id)
 
-                logging.info("Cliente %s: envío completado (single).", self.id)
+                # Mantener socket abierto y esperar resultados
+                self._wait_for_results(sender)
+
+                logging.info("Cliente %s: envío y recepción completados.", self.id)
             except Exception as e:
                 logging.error("Cliente %s: error en el envío: %s", self.id, e)
                 raise
@@ -97,3 +102,51 @@ class Client:
         except ValueError:
             logging.warning("Puerto inválido en %s; uso 5000", s)
             return host, 5000
+
+    def _wait_for_results(self, sender: Sender) -> None:
+        """
+        Espera resultados del servidor después de enviar todos los datos.
+        """
+        logging.info("Cliente %s: esperando resultados del servidor...", self.id)
+        
+        try:
+            # Configurar timeout más largo para esperar resultados
+            sender._sock.settimeout(300.0)  # 5 minutos
+            
+            results_received = 0
+            total_bytes = 0
+            
+            while True:
+                try:
+                    # Leer header del resultado
+                    header = sender._recv_header_id(sender._sock)
+                    
+                    if header == 2:  # H_ID_DATA - son resultados
+                        # Leer el FileChunk con los resultados
+                        from utils.communication.file_chunk import FileChunk
+                        result_chunk = FileChunk.recv(sender._sock)
+                        
+                        results_received += 1
+                        total_bytes += result_chunk.payload_size()
+                        
+                        logging.info("Cliente %s: resultado recibido #%d: file=%s bytes=%s", 
+                                   self.id, results_received, result_chunk.path(), result_chunk.payload_size())
+                        
+                        # Opcional: procesar o guardar los resultados aquí
+                        # result_data = result_chunk.payload()
+                        
+                    else:
+                        # Otro tipo de mensaje, terminar
+                        logging.info("Cliente %s: mensaje no reconocido como resultado: %d", self.id, header)
+                        break
+                        
+                except Exception as e:
+                    # Timeout o error de conexión - asumir que terminaron los resultados
+                    logging.info("Cliente %s: fin de resultados: %s", self.id, e)
+                    break
+            
+            logging.info("Cliente %s: recibí respuesta completa - %d resultados, %d bytes total", 
+                        self.id, results_received, total_bytes)
+                        
+        except Exception as e:
+            logging.error("Cliente %s: error esperando resultados: %s", self.id, e)

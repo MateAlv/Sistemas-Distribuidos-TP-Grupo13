@@ -64,6 +64,12 @@ class Server:
         self.middleware_queue_senders["to_join_users"] = MessageMiddlewareQueue("rabbitmq", "to_join_users")
         self.middleware_queue_senders["to_join_menu_items"] = MessageMiddlewareQueue("rabbitmq", "to_join_menu_items")
         self.middleware_queue_senders["to_top3"] = MessageMiddlewareQueue("rabbitmq", "to_top3")
+        
+        # Diccionario para mantener threads activos de clientes  
+        self.client_threads = {}  # client_id -> thread
+        # Lock para acceso seguro a estructuras compartidas
+        self.clients_lock = threading.Lock()
+        
         self._running = True
         self._server_socket: Optional[socket.socket] = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -88,6 +94,7 @@ class Server:
     def run(self) -> None:
         logging.info("action: accept_loop | result: start | ip:%s | port:%s | backlog:%s",
                      self.host, self.port, self.listen_backlog)
+        
         try:
             while self._running:
                 try:
@@ -104,6 +111,7 @@ class Server:
                 logging.debug("action: fd_open | result: success | kind: client_socket | fd:%s | peer:%s:%s",
                               client_sock.fileno(), addr[0], addr[1])
 
+                # Crear thread dedicado para cada cliente
                 t = threading.Thread(target=self._handle_client, args=(client_sock, addr), daemon=True)
                 t.start()
                 self._threads.append(t)
@@ -114,44 +122,62 @@ class Server:
     # ---------------------------------------------------------------------
 
     def _handle_client(self, sock: socket.socket, addr: Tuple[str, int]) -> None:
+        """
+        Thread dedicado para manejar un cliente específico.
+        Mantiene el socket abierto y escucha resultados después del finish.
+        """
         peer = f"{addr[0]}:{addr[1]}"
+        client_id = None
+        
         try:
             sock.settimeout(DEFAULT_IO_TIMEOUT)
             logging.info("action: client_connected | peer:%s", peer)
 
-            # -------- Handshake obligatorio según protocolo --------
+            # -------- Handshake obligatorio --------
             self._do_handshake(sock)
 
-            # -------- Loop de recepción de archivos / fin --------
+            # -------- Recepción de archivos --------
+            files_received = 0
             while True:
                 header = self._recv_header_id(sock)
                 if header is None:
                     break
 
                 if header == H_ID_DATA:
-                    logging.info("action: recv_file_chunk | peer:%s", peer)
-                    # Recibe y procesa el chunk
-                    self._handle_file_chunks(sock, peer)
+                    # Recibe y procesa chunk
+                    client_id = self._handle_file_chunks(sock, peer)
+                    files_received += 1
                     # ACK por chunk
                     sendall(sock, self.header_id_to_bytes(H_ID_OK))
                     continue
 
-                if header == H_ID_FINISH:
-                    logging.info("action: recv_finished | peer:%s", peer)
+                elif header == H_ID_FINISH:
+                    logging.info("action: recv_finished | peer:%s | client_id:%s | files:%d", 
+                               peer, client_id, files_received)
+                    
+                    # Señal de fin a la pipeline
                     self.middleware_exchange.send("END")
                     sendall(sock, self.header_id_to_bytes(H_ID_OK))
-                    break
-    
                     
-                logging.info("action: recv_file_end | peer:%s | cli_id:%s | file:%s | bytes:%s",
-                             peer, cli_id, fname, received)
-
-                # ACK por archivo (protocolo I:O)
-                sendall(sock, self.header_id_to_bytes(H_ID_OK))
+                    # Si tenemos client_id, escuchar resultados
+                    if client_id is not None:
+                        logging.info("action: waiting_for_results | peer:%s | client_id:%s", peer, client_id)
+                        self._listen_and_send_results(sock, client_id, peer)
+                    break
+                
+                else:
+                    logging.warning("action: unknown_header | peer:%s | header:%s", peer, header)
+                    break
 
         except Exception as e:
-            logging.error("action: client_handler_error | peer:%s | error:%r", peer, e)
+            logging.error("action: client_handler_error | peer:%s | client_id:%s | error:%r", peer, client_id, e)
         finally:
+            # Cleanup
+            with self.clients_lock:
+                if client_id is not None and client_id in self.client_threads:
+                    del self.client_threads[client_id]
+                    logging.info("action: client_thread_cleanup | peer:%s | client_id:%s", peer, client_id)
+            
             try:
                 fd = sock.fileno()
             except Exception:
@@ -185,41 +211,53 @@ class Server:
         logging.debug("action: handshake_ok | byte:%r", header)
         sendall(sock, self.header_id_to_bytes(H_ID_OK))
 
-    def _handle_file_chunks(self, sock: socket.socket, peer) -> None:
-        # Recive el tamaño del batch (int) y luego los datos del batch
+    def _handle_file_chunks(self, sock: socket.socket, peer: str) -> int:
+        """
+        Recibe y procesa un FileChunk del cliente.
+        Retorna el client_id.
+        """
+        # Recibir el FileChunk
         chunk = FileChunk.recv(sock)
-        logging.info("action: recv_file_chunk | peer:%s | cli_id:%s | file:%s | bytes:%s",
-                     peer, chunk.client_id(), chunk.path(), chunk.payload_size())
-        # Deserializa el batch recibido para convertirlo en objeto ProcessBatch
-        process_chunk = ProcessBatchReader.from_file_rows(chunk.payload(), chunk.path(), chunk.client_id())
-        # Aquí puedes procesar el objeto process_chunk según sea necesario
-        if process_chunk.table_type() == TableType.TRANSACTIONS or process_chunk.table_type() == TableType.TRANSACTION_ITEMS:
-            # Envia al filtro 1
-            logging.info("action: send_to_filter1 | peer:%s | cli_id:%s | file:%s | bytes:%s",
-                         peer, chunk.client_id(), chunk.path(), chunk.payload_size())
+        client_id = chunk.client_id()
+        
+        logging.info("action: recv_file_chunk | peer:%s | cli_id:%s | file:%s | bytes:%s | is_last:%s",
+                     peer, client_id, chunk.path(), chunk.payload_size(), chunk.is_last_file_chunk())
+        
+        # Deserializar el batch para convertirlo en ProcessChunk
+        process_chunk = ProcessBatchReader.from_file_rows(chunk.payload(), chunk.path(), client_id)
+        
+        # Enrutar según el tipo de tabla
+        table_type = process_chunk.table_type()
+        
+        if table_type == TableType.TRANSACTIONS or table_type == TableType.TRANSACTION_ITEMS:
+            logging.info("action: send_to_filter1 | peer:%s | cli_id:%s | file:%s | table:%s",
+                         peer, client_id, chunk.path(), table_type)
             self.middleware_queue_senders["to_filter_1"].send(process_chunk.serialize())
 
-        elif process_chunk.table_type() == TableType.STORES:
-            # Envia al join Stores 
-            logging.info("action: send_to_join_stores | peer:%s | cli_id:%s | file:%s | bytes:%s",
-                         peer, chunk.client_id(), chunk.path(), chunk.payload_size())
+        elif table_type == TableType.STORES:
+            logging.info("action: send_to_join_stores | peer:%s | cli_id:%s | file:%s | table:%s",
+                         peer, client_id, chunk.path(), table_type)
             self.middleware_queue_senders["to_join_stores"].send(process_chunk.serialize())
-            # Envia al TOP 3
-            logging.info("action: send_to_top3 | peer:%s | cli_id:%s | file:%s | bytes:%s",
-                         peer, chunk.client_id(), chunk.path(), chunk.payload_size())
+            
+            logging.info("action: send_to_top3 | peer:%s | cli_id:%s | file:%s | table:%s",
+                         peer, client_id, chunk.path(), table_type)
             self.middleware_queue_senders["to_top3"].send(process_chunk.serialize())
 
-        elif process_chunk.table_type() == TableType.USERS:
-            # Envia al join Users
-            logging.info("action: send_to_join_users | peer:%s | cli_id:%s | file:%s | bytes:%s",
-                         peer, chunk.client_id(), chunk.path(), chunk.payload_size())
+        elif table_type == TableType.USERS:
+            logging.info("action: send_to_join_users | peer:%s | cli_id:%s | file:%s | table:%s",
+                         peer, client_id, chunk.path(), table_type)
             self.middleware_queue_senders["to_join_users"].send(process_chunk.serialize())
 
-        elif process_chunk.table_type() == TableType.MENU_ITEMS:
-            # Envia al join MenuItems
-            logging.info("action: send_to_join_menu_items | peer:%s | cli_id:%s | file:%s | bytes:%s",
-                         peer, chunk.client_id(), chunk.path(), chunk.payload_size())
+        elif table_type == TableType.MENU_ITEMS:
+            logging.info("action: send_to_join_menu_items | peer:%s | cli_id:%s | file:%s | table:%s",
+                         peer, client_id, chunk.path(), table_type)
             self.middleware_queue_senders["to_join_menu_items"].send(process_chunk.serialize())
+        
+        else:
+            logging.warning("action: unknown_table_type | peer:%s | cli_id:%s | file:%s | table:%s",
+                           peer, client_id, chunk.path(), table_type)
+        
+        return client_id
     
     # ---------------- Internos ----------------
     
@@ -245,6 +283,109 @@ class Server:
 
     # ---------------------------------------------------------------------
 
+    def _listen_and_send_results(self, sock: socket.socket, client_id: int, peer: str) -> None:
+        """
+        Escucha resultados de la cola to_merge_data para este cliente específico.
+        Timeout de 3 segundos para detectar fin de resultados.
+        """
+        # Crear middleware queue específico para este cliente
+        middleware_queue = MessageMiddlewareQueue("rabbitmq", "to_merge_data")
+        
+        results_for_client = []
+        
+        def callback(msg):
+            logging.info("action: received_message_in_to_merge_data | size:%d", len(msg))
+            try:
+                # Deserializar y verificar si es para este cliente
+                result_chunk = ProcessBatchReader.from_bytes(msg)
+                logging.info("action: parsed_result_chunk | client_id:%s | expected_client_id:%s | rows:%s | table_type:%s", 
+                           result_chunk.client_id(), client_id, len(result_chunk.rows), result_chunk.table_type())
+                if result_chunk.client_id() == client_id:
+                    results_for_client.append(result_chunk)
+                    logging.info("action: result_collected | client_id:%s | rows:%s | table_type:%s", 
+                               client_id, len(result_chunk.rows), result_chunk.table_type())
+                else:
+                    logging.info("action: result_ignored | expected_client_id:%s | actual_client_id:%s", 
+                               client_id, result_chunk.client_id())
+                # Si no es para este cliente, ignorar (otro thread lo procesará)
+            except Exception as e:
+                logging.error("action: result_parse_error | client_id:%s | error:%r", client_id, e)
+
+        def stop():
+            middleware_queue.stop_consuming()
+
+        try:
+            # Registrar este thread como activo para el cliente
+            with self.clients_lock:
+                self.client_threads[client_id] = threading.current_thread()
+
+            no_results_count = 0
+            max_no_results = 100  # 10 timeouts consecutivos = fin (30 segundos total)
+
+            while no_results_count < max_no_results:
+                try:
+                    # Timeout de 3 segundos
+                    middleware_queue.connection.call_later(3, stop)
+                    middleware_queue.start_consuming(callback)
+                    
+                    # Si recibimos resultados, resetear contador
+                    if results_for_client:
+                        no_results_count = 0
+                        # Enviar resultados acumulados
+                        self._send_batch_results_to_client(sock, client_id, results_for_client)
+                        results_for_client.clear()
+                    else:
+                        no_results_count += 1
+                        logging.debug("action: no_results_timeout | client_id:%s | count:%d", 
+                                    client_id, no_results_count)
+
+                except Exception as e:
+                    logging.error("action: results_listen_error | client_id:%s | error:%r", client_id, e)
+                    break
+
+            # Enviar resultados finales si quedan
+            if results_for_client:
+                self._send_batch_results_to_client(sock, client_id, results_for_client)
+
+            logging.info("action: results_finished | client_id:%s | peer:%s", client_id, peer)
+
+        except Exception as e:
+            logging.error("action: results_listener_error | client_id:%s | error:%r", client_id, e)
+        finally:
+            try:
+                middleware_queue.close()
+            except:
+                pass
+
+    def _send_batch_results_to_client(self, sock: socket.socket, client_id: int, results: list) -> None:
+        """
+        Envía los resultados al cliente en formato similar al BatchReader.
+        Cada resultado se envía como un FileChunk individual.
+        """
+        try:
+            for i, result_chunk in enumerate(results):
+                # Serializar el ProcessChunk 
+                results_data = result_chunk.serialize()
+                
+                # Crear FileChunk con path descriptivo
+                result_file_chunk = FileChunk(
+                    rel_path=f"result_{result_chunk.table_type().name.lower()}_{i}.processed",
+                    client_id=client_id,
+                    last=(i == len(results) - 1),  # Marcar el último
+                    data=results_data
+                )
+                
+                # Enviar header + chunk
+                sendall(sock, self.header_id_to_bytes(H_ID_DATA))
+                sendall(sock, result_file_chunk.serialize())
+                
+                logging.info("action: result_chunk_sent | client_id:%s | chunk:%d/%d | bytes:%s | table:%s", 
+                           client_id, i+1, len(results), len(results_data), result_chunk.table_type())
+
+        except Exception as e:
+            logging.error("action: send_batch_results_error | client_id:%s | error:%r", client_id, e)
+            raise
+
     def _begin_shutdown(self, signum, frame) -> None:
         logging.info("action: sigterm_received | result: success")
         self._running = False
@@ -262,6 +403,8 @@ class Server:
     def __graceful_shutdown(self) -> None:
         logging.info("action: shutdown | result: in_progress")
         self._running = False
+        
+        # Cerrar server socket
         try:
             if self._server_socket:
                 try:
@@ -273,7 +416,17 @@ class Server:
         except Exception:
             pass
 
+        # Esperar a que terminen los threads de cliente
+        with self.clients_lock:
+            active_threads = list(self.client_threads.values())
+        
+        for thread in active_threads:
+            if thread.is_alive():
+                thread.join(timeout=5)
+        
+        # Esperar threads generales
         alive = [t for t in self._threads if t.is_alive()]
         for t in alive:
             t.join(timeout=30)
+            
         logging.info("action: server_shutdown | result: success")

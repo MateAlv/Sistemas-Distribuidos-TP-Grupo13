@@ -50,8 +50,10 @@ class Filter:
                 chunk = ProcessBatchReader.from_bytes(msg)
                 logging.info(f"action: filter | type:{self.filter_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()} | rows_in:{len(chunk.rows)}")
                 filtered_rows = [tx for tx in chunk.rows if self.apply(tx)]
+                logging.info(f"action: filter_result | type:{self.filter_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()} | rows_out:{len(filtered_rows)}")
                 if filtered_rows:
-                    for queue in self.middleware_queue_sender.values():
+                    for queue_name, queue in self.middleware_queue_sender.items():
+                        logging.info(f"action: sending_to_queue | type:{self.filter_type} | queue:{queue_name} | rows:{len(filtered_rows)}")
                         queue.send(ProcessChunk(chunk.header, filtered_rows).serialize())
                 results.remove(msg)
             
@@ -66,7 +68,24 @@ class Filter:
             return self.cfg["hour_start"] <= tx.created_at.time.hour <= self.cfg["hour_end"]
 
         elif self.filter_type == "amount":
-            return tx.final_amount >= self.cfg["min_amount"]
+            # Verificar el tipo de fila para acceder al atributo correcto
+            if hasattr(tx, 'final_amount'):
+                # TransactionsProcessRow - usar final_amount (monto final)
+                amount = tx.final_amount
+                result = amount >= self.cfg["min_amount"]
+                if not result:
+                    logging.debug(f"FILTERED OUT: TransactionsProcessRow final_amount={amount} < min_amount={self.cfg['min_amount']}")
+                return result
+            elif hasattr(tx, 'subtotal'):
+                # TransactionsItemsProcessRow - usar subtotal (monto por item)
+                amount = tx.subtotal
+                result = amount >= self.cfg["min_amount"]
+                if not result:
+                    logging.debug(f"FILTERED OUT: TransactionsItemsProcessRow subtotal={amount} < min_amount={self.cfg['min_amount']}")
+                return result
+            else:
+                logging.warning(f"Tipo de fila no reconocido para filtro amount: {type(tx)}")
+                return False
 
         logging.error(f"Filtro desconocido: {self.filter_type}")
         return False
