@@ -30,7 +30,7 @@ docker-compose-logs:
 .PHONY: docker-compose-logs
 
 test:
-	docker compose -f docker-compose-test.yaml up
+	docker compose -f docker-compose-test.yaml up --build
 .PHONY: test
 
 test-clean:
@@ -38,3 +38,11 @@ test-clean:
 	docker compose -f docker-compose-test.yaml down
 	
 .PHONY: test-clean
+
+test-rebuild:
+	docker compose -f docker-compose-test.yaml stop -t 1
+	docker compose -f docker-compose-test.yaml down
+	docker compose -f docker-compose-test.yaml build --no-cache
+	docker compose -f docker-compose-test.yaml up
+	
+.PHONY: test-rebuild
