@@ -208,7 +208,7 @@ services:
       server:
         condition: service_started
     volumes:
-      - ./.data/:/data:ro
+      - ./.data/:/data
       - ./client/config.ini:/config.ini:ro
       - ./utils:/server/utils:ro
       - ./middleware:/server/middleware:ro

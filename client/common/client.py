@@ -1,6 +1,7 @@
 # common/client.py
 import os
 import logging
+from datetime import datetime
 from typing import Dict, Tuple
 
 from utils.communication.directory_reader import DirectoryReader
@@ -106,6 +107,7 @@ class Client:
     def _wait_for_results(self, sender: Sender) -> None:
         """
         Espera resultados del servidor después de enviar todos los datos.
+        Guarda los resultados en archivos de salida en el directorio de datos.
         """
         logging.info("Cliente %s: esperando resultados del servidor...", self.id)
         
@@ -115,6 +117,7 @@ class Client:
             
             results_received = 0
             total_bytes = 0
+            output_dir = None  # Se creará cuando sea necesario
             
             while True:
                 try:
@@ -132,8 +135,21 @@ class Client:
                         logging.info("Cliente %s: resultado recibido #%d: file=%s bytes=%s", 
                                    self.id, results_received, result_chunk.path(), result_chunk.payload_size())
                         
-                        # Opcional: procesar o guardar los resultados aquí
-                        # result_data = result_chunk.payload()
+                        # Crear directorio de salida solo cuando recibamos el primer resultado
+                        if output_dir is None:
+                            output_dir = os.path.join(self.data_dir, "output")
+                            os.makedirs(output_dir, exist_ok=True)
+                            logging.info("Cliente %s: directorio de salida creado: %s", self.id, output_dir)
+                        
+                        # Guardar resultado en archivo
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        output_filename = f"Output_Query1_Result_{results_received}_{timestamp}.processed"
+                        output_path = os.path.join(output_dir, output_filename)
+                        
+                        with open(output_path, 'wb') as f:
+                            f.write(result_chunk.payload())
+                        
+                        logging.info("Cliente %s: resultado guardado en: %s", self.id, output_path)
                         
                     else:
                         # Otro tipo de mensaje, terminar
@@ -147,6 +163,11 @@ class Client:
             
             logging.info("Cliente %s: recibí respuesta completa - %d resultados, %d bytes total", 
                         self.id, results_received, total_bytes)
+            
+            if results_received > 0 and output_dir is not None:
+                logging.info("Cliente %s: resultados guardados en directorio: %s", self.id, output_dir)
+            elif results_received == 0:
+                logging.info("Cliente %s: no se recibieron resultados", self.id)
                         
         except Exception as e:
             logging.error("Cliente %s: error esperando resultados: %s", self.id, e)
