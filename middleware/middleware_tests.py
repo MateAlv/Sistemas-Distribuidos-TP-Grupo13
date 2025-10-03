@@ -41,7 +41,7 @@ def test_working_queue_1_to_1():
     producer.close()
     t.join()
 
-    assert "mensaje unico" in results
+    assert "mensaje unico".encode() in results
 
 
 def test_working_queue_1_to_n():
@@ -92,7 +92,7 @@ def test_exchange_1_to_1():
     producer.close()
     t.join()
 
-    assert "direct message" in results
+    assert "direct message".encode() in results
 
 
 def test_exchange_1_to_n():
@@ -116,5 +116,5 @@ def test_exchange_1_to_n():
 
     t1.join(); t2.join()
 
-    assert "broadcast" in results_1
-    assert "broadcast" in results_2
+    assert "broadcast".encode() in results_1
+    assert "broadcast".encode() in results_2
