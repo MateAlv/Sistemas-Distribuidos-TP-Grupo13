@@ -22,6 +22,7 @@ def initialize_config():
             "server_address": os.getenv("SERVER_ADDRESS", config["DEFAULT"]["SERVER_ADDRESS"]),
             "log_level": os.getenv("LOGGING_LEVEL", config["DEFAULT"]["LOGGING_LEVEL"]),
             "data_dir": os.getenv("DATA_DIR", config["DEFAULT"]["DATA_DIR"]),
+            "output_dir": os.getenv("CLI_OUTPUT_DIR", config["DEFAULT"]["OUTPUT_DIR"]),
             "batch_max": int(os.getenv("BATCH_MAX_AMOUNT", config["DEFAULT"]["BATCH_MAX_AMOUNT"])),
         }
     except KeyError as e:
@@ -46,20 +47,21 @@ def main():
     initialize_log(cfg["log_level"])
 
     logging.debug(
-        "action: config | result: success | client_id:%s | server_address:%s | data_dir:%s | log_level:%s | batch_max:%s",
-        cfg["id"], cfg["server_address"], cfg["data_dir"], cfg["log_level"], cfg["batch_max"]
+        "action: config | result: success | client_id:%s | server_address:%s | data_dir:%s | output_dir:%s | log_level:%s | batch_max:%s",
+        cfg["id"], cfg["server_address"], cfg["data_dir"], cfg["output_dir"], cfg["log_level"], cfg["batch_max"]
     )
 
     client_config = {
         "id": cfg["id"],
         "server_address": cfg["server_address"],
         "data_dir": cfg["data_dir"],
+        "output_dir": cfg["output_dir"],
         "message_protocol": {
             "batch_size": cfg["batch_max"],
         },
     }
 
-    client = Client(client_config, cfg["data_dir"])
+    client = Client(client_config, cfg["data_dir"], cfg["output_dir"])
 
     def shutdown_handler(signum, frame):
         logging.info("SIGTERM recibido, cerrando cliente")

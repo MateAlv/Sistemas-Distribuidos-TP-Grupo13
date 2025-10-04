@@ -18,7 +18,7 @@ IO_TIMEOUT_S: float = 30.0
 
 class Client:
    
-    def __init__(self, config: Dict, default_data_dir: str = "/data") -> None:
+    def __init__(self, config: Dict, default_data_dir: str = "/data", default_output_dir: str = "/output") -> None:
         # Identidad del cliente
         self.id: str = str(config.get("id", ""))
 
@@ -30,8 +30,11 @@ class Client:
         self.server_address_str: str = str(config.get("server_address", "server:5000"))
         self.server_host, self.server_port = self._parse_host_port(self.server_address_str)
 
-        # Directorio de datos
+        # Directorio de datos de entrada
         self.data_dir: str = str(config.get("data_dir", default_data_dir))
+        
+        # Directorio de salida para resultados
+        self.output_dir: str = str(config.get("output_dir", default_output_dir))
         
         # Lector de batches
         self.reader = BatchReader(
@@ -41,8 +44,8 @@ class Client:
         )
             
         logging.debug(
-            "client_init | id=%s host=%s port=%s data_dir=%s batch_size=%s",
-            self.id, self.server_host, self.server_port, self.data_dir, self.batch_size
+            "client_init | id=%s host=%s port=%s data_dir=%s output_dir=%s batch_size=%s",
+            self.id, self.server_host, self.server_port, self.data_dir, self.output_dir, self.batch_size
         )
 
     # ---------------------------
@@ -108,7 +111,7 @@ class Client:
         """
         Espera resultados del servidor después de enviar todos los datos.
         Los resultados vienen como ProcessChunk serializado directamente.
-        Guarda los resultados en archivos de salida en /output/.
+        Guarda los resultados en archivos de salida en el directorio configurado.
         """
         logging.info("Cliente %s: esperando resultados del servidor...", self.id)
         
@@ -118,11 +121,10 @@ class Client:
             
             results_received = 0
             total_bytes = 0
-            output_dir = "/output"  # Usar el directorio mapeado en Docker para salida
             
-            # Crear directorio de salida
-            os.makedirs(output_dir, exist_ok=True)
-            logging.info("Cliente %s: directorio de salida: %s", self.id, output_dir)
+            # Crear directorio de salida usando la configuración
+            os.makedirs(self.output_dir, exist_ok=True)
+            logging.info("Cliente %s: directorio de salida: %s", self.id, self.output_dir)
             
             while True:
                 try:
@@ -156,7 +158,7 @@ class Client:
                         # Guardar resultado en archivo con nombre descriptivo
                         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                         output_filename = f"result_{result_chunk.table_type().name.lower()}_{results_received}_{timestamp}.csv"
-                        output_path = os.path.join(output_dir, output_filename)
+                        output_path = os.path.join(self.output_dir, output_filename)
                         
                         # Convertir ProcessChunk de vuelta a formato CSV para el cliente
                         self._save_process_chunk_as_csv(result_chunk, output_path)
@@ -181,7 +183,7 @@ class Client:
                         self.id, results_received, total_bytes)
             
             if results_received > 0:
-                logging.info("Cliente %s: resultados guardados en directorio: %s", self.id, output_dir)
+                logging.info("Cliente %s: resultados guardados en directorio: %s", self.id, self.output_dir)
             else:
                 logging.info("Cliente %s: no se recibieron resultados", self.id)
                         

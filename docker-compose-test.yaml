@@ -101,6 +101,7 @@ services:
     environment:
       - CLI_ID=1
       - CLI_DATA_DIR=/data
+      - CLI_OUTPUT_DIR=/output/client-1
       - DATA_MODE=tree
       - SERVER_ADDRESS=server:12345
     networks:
