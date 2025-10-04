@@ -96,11 +96,12 @@ services:
   client1:
     container_name: client1
     build:
-      context: .             # project root
+      context: .      
       dockerfile: client/Dockerfile
     environment:
       - CLI_ID=1
       - CLI_DATA_DIR=/data
+      - CLI_OUTPUT_DIR=/data/output
       - DATA_MODE=tree
       - SERVER_ADDRESS=server:12345
     networks:
@@ -109,14 +110,11 @@ services:
       server:
         condition: service_started
     volumes:
-      - ./.data/:/data:ro
+      - ./.data/:/data:rw
       - ./client/config.ini:/config.ini:ro
       - ./utils:/client/utils:ro
       - ./middleware:/client/middleware:ro
     
 networks:
   testing_net:
-    ipam:
-      driver: default
-      config:
-        - subnet: 172.25.125.0/24
+    driver: bridge
