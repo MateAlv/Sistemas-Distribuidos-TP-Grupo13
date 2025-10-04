@@ -10,7 +10,8 @@ from utils.communication.socket_utils import ensure_socket, recv_exact, sendall
 from utils.file_utils.process_batch_reader import ProcessBatchReader
 from utils.communication.file_chunk import FileChunk, FileChunkHeader
 from utils.file_utils.table_type import TableType
-from middleware.middleware_interface import MessageMiddlewareExchange, MessageMiddlewareQueue
+from utils.file_utils.end_message import MessageEnd
+from middleware.middleware_interface import MessageMiddlewareQueue
 
 
 # Delimitadores / framing
@@ -57,7 +58,7 @@ class Server:
         self.port = int(port)
         self.listen_backlog = int(listen_backlog)
         self.host = DEFAULT_BIND_IP
-        self.middleware_exchange = MessageMiddlewareExchange("rabbitmq", "FIRST_END_MESSAGE", [""], "fanout")
+        self.number_of_chunks_per_file_per_client = {}
         self.middleware_queue_senders = {}
         self.middleware_queue_senders["to_filter_1"] = MessageMiddlewareQueue("rabbitmq", "to_filter_1")
         self.middleware_queue_senders["to_join_stores"] = MessageMiddlewareQueue("rabbitmq", "to_join_stores")
@@ -154,9 +155,20 @@ class Server:
                 elif header == H_ID_FINISH:
                     logging.info("action: recv_finished | peer:%s | client_id:%s | files:%d", 
                                peer, client_id, files_received)
-                    
-                    # Señal de fin a la pipeline
-                    self.middleware_exchange.send("END")
+                    for table_type, count in self.number_of_chunks_per_file_per_client[client_id].items():
+                        message = MessageEnd(client_id, table_type=table_type, count=count).encode()
+                        logging.info("action: sending_end_message | peer:%s | client_id:%s | table_type:%s | count:%d", 
+                                   peer, client_id, table_type.name, count)
+                        if table_type == TableType.TRANSACTIONS or table_type == TableType.TRANSACTION_ITEMS:
+                            self.middleware_queue_senders["to_filter_1"].send(message)
+                        elif table_type == TableType.STORES:
+                            self.middleware_queue_senders["to_join_stores"].send(message)
+                            self.middleware_queue_senders["to_top3"].send(message)
+                        elif table_type == TableType.USERS:
+                            self.middleware_queue_senders["to_join_users"].send(message)
+                        elif table_type == TableType.MENU_ITEMS:
+                            self.middleware_queue_senders["to_join_menu_items"].send(message)
+                        
                     sendall(sock, self.header_id_to_bytes(H_ID_OK))
                     
                     # Si tenemos client_id, escuchar resultados
@@ -229,7 +241,7 @@ class Server:
         # Enrutar según el tipo de tabla
         table_type = process_chunk.table_type()
         
-        if table_type == TableType.TRANSACTIONS:
+        if table_type == TableType.TRANSACTIONS: #TODO: Agregar TransactionItems
             logging.info("action: send_to_filter1 | peer:%s | cli_id:%s | file:%s | table:%s",
                          peer, client_id, chunk.path(), table_type)
             self.middleware_queue_senders["to_filter_1"].send(process_chunk.serialize())
@@ -257,6 +269,13 @@ class Server:
             logging.warning("action: unknown_table_type | peer:%s | cli_id:%s | file:%s | table:%s",
                            peer, client_id, chunk.path(), table_type)
         
+        if table_type in (TableType.TRANSACTIONS, TableType.TRANSACTION_ITEMS, TableType.STORES, TableType.USERS, TableType.MENU_ITEMS):
+            if client_id not in self.number_of_chunks_per_file_per_client:
+                self.number_of_chunks_per_file_per_client[client_id] = {}
+            if table_type not in self.number_of_chunks_per_file_per_client[client_id]:
+                self.number_of_chunks_per_file_per_client[client_id][table_type] = 0
+            self.number_of_chunks_per_file_per_client[client_id][table_type] += 1
+
         return client_id
     
     # ---------------- Internos ----------------
