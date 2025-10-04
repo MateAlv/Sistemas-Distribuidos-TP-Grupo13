@@ -107,7 +107,8 @@ class Client:
     def _wait_for_results(self, sender: Sender) -> None:
         """
         Espera resultados del servidor después de enviar todos los datos.
-        Guarda los resultados en archivos de salida en el directorio de datos.
+        Los resultados vienen como ProcessChunk serializado directamente.
+        Guarda los resultados en archivos de salida en /output/.
         """
         logging.info("Cliente %s: esperando resultados del servidor...", self.id)
         
@@ -117,39 +118,54 @@ class Client:
             
             results_received = 0
             total_bytes = 0
-            output_dir = None  # Se creará cuando sea necesario
+            output_dir = "/output"  # Usar el directorio mapeado en Docker para salida
+            
+            # Crear directorio de salida
+            os.makedirs(output_dir, exist_ok=True)
+            logging.info("Cliente %s: directorio de salida: %s", self.id, output_dir)
             
             while True:
                 try:
                     # Leer header del resultado
                     header = sender._recv_header_id(sender._sock)
                     
-                    if header == 2:  # H_ID_DATA - son resultados
-                        # Leer el FileChunk con los resultados
-                        from utils.communication.file_chunk import FileChunk
-                        result_chunk = FileChunk.recv(sender._sock)
+                    if header == 2:  # H_ID_DATA - son resultados como ProcessChunk
+                        # Leer el ProcessChunk serializado
+                        from utils.file_utils.process_batch_reader import ProcessBatchReader
+                        from utils.communication.socket_utils import recv_exact
+                        from utils.file_utils.process_chunk import ProcessChunkHeader
+                        
+                        # Leer header del ProcessChunk para saber el tamaño
+                        header_data = recv_exact(sender._sock, ProcessChunkHeader.HEADER_SIZE)
+                        process_header = ProcessChunkHeader.deserialize(header_data)
+                        
+                        # Leer el payload
+                        payload_data = recv_exact(sender._sock, process_header.size)
+                        
+                        # Reconstruir el chunk completo
+                        full_chunk_data = header_data + payload_data
+                        result_chunk = ProcessBatchReader.from_bytes(full_chunk_data)
                         
                         results_received += 1
-                        total_bytes += result_chunk.payload_size()
+                        total_bytes += len(full_chunk_data)
                         
-                        logging.info("Cliente %s: resultado recibido #%d: file=%s bytes=%s", 
-                                   self.id, results_received, result_chunk.path(), result_chunk.payload_size())
+                        logging.info("Cliente %s: resultado recibido #%d: table=%s rows=%s bytes=%s", 
+                                   self.id, results_received, result_chunk.table_type().name, 
+                                   len(result_chunk.rows), len(full_chunk_data))
                         
-                        # Crear directorio de salida solo cuando recibamos el primer resultado
-                        if output_dir is None:
-                            output_dir = os.path.join(self.data_dir, "output")
-                            os.makedirs(output_dir, exist_ok=True)
-                            logging.info("Cliente %s: directorio de salida creado: %s", self.id, output_dir)
-                        
-                        # Guardar resultado en archivo
+                        # Guardar resultado en archivo con nombre descriptivo
                         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                        output_filename = f"Output_Query1_Result_{results_received}_{timestamp}.processed"
+                        output_filename = f"result_{result_chunk.table_type().name.lower()}_{results_received}_{timestamp}.csv"
                         output_path = os.path.join(output_dir, output_filename)
                         
-                        with open(output_path, 'wb') as f:
-                            f.write(result_chunk.payload())
+                        # Convertir ProcessChunk de vuelta a formato CSV para el cliente
+                        self._save_process_chunk_as_csv(result_chunk, output_path)
                         
                         logging.info("Cliente %s: resultado guardado en: %s", self.id, output_path)
+                        
+                    elif header == 3:  # H_ID_FINISH - fin de resultados
+                        logging.info("Cliente %s: señal FINISHED recibida, terminando recepción", self.id)
+                        break
                         
                     else:
                         # Otro tipo de mensaje, terminar
@@ -164,10 +180,25 @@ class Client:
             logging.info("Cliente %s: recibí respuesta completa - %d resultados, %d bytes total", 
                         self.id, results_received, total_bytes)
             
-            if results_received > 0 and output_dir is not None:
+            if results_received > 0:
                 logging.info("Cliente %s: resultados guardados en directorio: %s", self.id, output_dir)
-            elif results_received == 0:
+            else:
                 logging.info("Cliente %s: no se recibieron resultados", self.id)
                         
         except Exception as e:
             logging.error("Cliente %s: error esperando resultados: %s", self.id, e)
+
+    def _save_process_chunk_as_csv(self, process_chunk, output_path: str) -> None:
+        """
+        Convierte un ProcessChunk de vuelta a formato CSV y lo guarda.
+        """
+        try:
+            with open(output_path, 'wb') as f:
+                # Cada row ya tiene un método serialize() que devuelve CSV en bytes
+                for row in process_chunk.rows:
+                    f.write(row.serialize())
+        except Exception as e:
+            logging.error("Cliente %s: error guardando CSV: %s", self.id, e)
+            # Fallback: guardar como binario
+            with open(output_path + '.bin', 'wb') as f:
+                f.write(process_chunk.serialize())

@@ -96,7 +96,7 @@ services:
   client1:
     container_name: client1
     build:
-      context: .             # project root
+      context: .      
       dockerfile: client/Dockerfile
     environment:
       - CLI_ID=1
@@ -110,13 +110,11 @@ services:
         condition: service_started
     volumes:
       - ./.data/:/data:ro
+      - ./output:/output:rw
       - ./client/config.ini:/config.ini:ro
       - ./utils:/client/utils:ro
       - ./middleware:/client/middleware:ro
     
 networks:
   testing_net:
-    ipam:
-      driver: default
-      config:
-        - subnet: 172.25.125.0/24
+    driver: bridge

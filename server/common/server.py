@@ -286,14 +286,16 @@ class Server:
     def _listen_and_send_results(self, sock: socket.socket, client_id: int, peer: str) -> None:
         """
         Escucha resultados de la cola to_merge_data para este cliente específico.
-        Timeout de 3 segundos para detectar fin de resultados.
+        Envía resultados en lotes y detecta fin automáticamente.
         """
         # Crear middleware queue específico para este cliente
         middleware_queue = MessageMiddlewareQueue("rabbitmq", "to_merge_data")
         
         results_for_client = []
+        results_sent = False
         
         def callback(msg):
+            nonlocal results_sent
             logging.info("action: received_message_in_to_merge_data | size:%d", len(msg))
             try:
                 # Deserializar y verificar si es para este cliente
@@ -304,6 +306,13 @@ class Server:
                     results_for_client.append(result_chunk)
                     logging.info("action: result_collected | client_id:%s | rows:%s | table_type:%s", 
                                client_id, len(result_chunk.rows), result_chunk.table_type())
+                    
+                    # Enviar inmediatamente cuando tengamos resultados
+                    if results_for_client and not results_sent:
+                        self._send_batch_results_to_client(sock, client_id, results_for_client)
+                        results_for_client.clear()
+                        results_sent = True
+                        
                 else:
                     logging.info("action: result_ignored | expected_client_id:%s | actual_client_id:%s", 
                                client_id, result_chunk.client_id())
@@ -320,7 +329,7 @@ class Server:
                 self.client_threads[client_id] = threading.current_thread()
 
             no_results_count = 0
-            max_no_results = 100  # 10 timeouts consecutivos = fin (30 segundos total)
+            max_no_results = 10  # Reducido para detectar fin más rápido
 
             while no_results_count < max_no_results:
                 try:
@@ -328,23 +337,21 @@ class Server:
                     middleware_queue.connection.call_later(3, stop)
                     middleware_queue.start_consuming(callback)
                     
-                    # Si recibimos resultados, resetear contador
-                    if results_for_client:
-                        no_results_count = 0
-                        # Enviar resultados acumulados
-                        self._send_batch_results_to_client(sock, client_id, results_for_client)
-                        results_for_client.clear()
-                    else:
+                    # Si ya enviamos resultados y no hay más, terminar
+                    if results_sent and not results_for_client:
                         no_results_count += 1
                         logging.debug("action: no_results_timeout | client_id:%s | count:%d", 
                                     client_id, no_results_count)
+                    elif results_for_client:
+                        # Hay resultados pendientes, resetear contador
+                        no_results_count = 0
 
                 except Exception as e:
                     logging.error("action: results_listen_error | client_id:%s | error:%r", client_id, e)
                     break
 
             # Enviar resultados finales si quedan
-            if results_for_client:
+            if results_for_client and not results_sent:
                 self._send_batch_results_to_client(sock, client_id, results_for_client)
 
             logging.info("action: results_finished | client_id:%s | peer:%s", client_id, peer)
@@ -359,28 +366,24 @@ class Server:
 
     def _send_batch_results_to_client(self, sock: socket.socket, client_id: int, results: list) -> None:
         """
-        Envía los resultados al cliente en formato similar al BatchReader.
-        Cada resultado se envía como un FileChunk individual.
+        Envía los resultados al cliente como ProcessChunk directamente.
+        Cada resultado se envía como el chunk completo serializado.
         """
         try:
             for i, result_chunk in enumerate(results):
-                # Serializar el ProcessChunk 
+                # Enviar el ProcessChunk serializado directamente
                 results_data = result_chunk.serialize()
                 
-                # Crear FileChunk con path descriptivo
-                result_file_chunk = FileChunk(
-                    rel_path=f"result_{result_chunk.table_type().name.lower()}_{i}.processed",
-                    client_id=client_id,
-                    last=(i == len(results) - 1),  # Marcar el último
-                    data=results_data
-                )
-                
-                # Enviar header + chunk
+                # Enviar header + datos del chunk
                 sendall(sock, self.header_id_to_bytes(H_ID_DATA))
-                sendall(sock, result_file_chunk.serialize())
+                sendall(sock, results_data)
                 
                 logging.info("action: result_chunk_sent | client_id:%s | chunk:%d/%d | bytes:%s | table:%s", 
                            client_id, i+1, len(results), len(results_data), result_chunk.table_type())
+
+            # Enviar señal de finalización después de todos los chunks
+            sendall(sock, self.header_id_to_bytes(H_ID_FINISH))
+            logging.info("action: results_finished_signal_sent | client_id:%s", client_id)
 
         except Exception as e:
             logging.error("action: send_batch_results_error | client_id:%s | error:%r", client_id, e)
