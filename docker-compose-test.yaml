@@ -101,7 +101,7 @@ services:
     environment:
       - CLI_ID=1
       - CLI_DATA_DIR=/data
-      - CLI_OUTPUT_DIR=/output/client-1
+      - CLI_OUTPUT_DIR=/data/output
       - DATA_MODE=tree
       - SERVER_ADDRESS=server:12345
     networks:
@@ -110,8 +110,7 @@ services:
       server:
         condition: service_started
     volumes:
-      - ./.data/:/data:ro
-      - ./output:/output:rw
+      - ./.data/:/data:rw
       - ./client/config.ini:/config.ini:ro
       - ./utils:/client/utils:ro
       - ./middleware:/client/middleware:ro

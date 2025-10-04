@@ -18,7 +18,7 @@ IO_TIMEOUT_S: float = 30.0
 
 class Client:
    
-    def __init__(self, config: Dict, default_data_dir: str = "/data", default_output_dir: str = "/output") -> None:
+    def __init__(self, config: Dict, default_data_dir: str = "/data", default_output_dir: str = None) -> None:
         # Identidad del cliente
         self.id: str = str(config.get("id", ""))
 
@@ -33,7 +33,9 @@ class Client:
         # Directorio de datos de entrada
         self.data_dir: str = str(config.get("data_dir", default_data_dir))
         
-        # Directorio de salida para resultados
+        # Directorio de salida para resultados - por defecto usar data_dir/output
+        if default_output_dir is None:
+            default_output_dir = os.path.join(self.data_dir, "output")
         self.output_dir: str = str(config.get("output_dir", default_output_dir))
         
         # Lector de batches
@@ -126,12 +128,20 @@ class Client:
             os.makedirs(self.output_dir, exist_ok=True)
             logging.info("Cliente %s: directorio de salida: %s", self.id, self.output_dir)
             
+            # Variables para rastrear el tipo de query
+            current_query = None
+            
             while True:
                 try:
                     # Leer header del resultado
                     header = sender._recv_header_id(sender._sock)
                     
-                    if header == 2:  # H_ID_DATA - son resultados como ProcessChunk
+                    if header == 5:  # H_ID_Q1_RESULT - Identificador de Q1
+                        current_query = "q1"
+                        logging.info("Cliente %s: recibiendo resultados de Query 1", self.id)
+                        continue
+                        
+                    elif header == 2:  # H_ID_DATA - son resultados como ProcessChunk
                         # Leer el ProcessChunk serializado
                         from utils.file_utils.process_batch_reader import ProcessBatchReader
                         from utils.communication.socket_utils import recv_exact
@@ -155,9 +165,12 @@ class Client:
                                    self.id, results_received, result_chunk.table_type().name, 
                                    len(result_chunk.rows), len(full_chunk_data))
                         
-                        # Guardar resultado en archivo con nombre descriptivo
+                        # Guardar resultado en archivo con nombre según el tipo de query
                         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                        output_filename = f"result_{result_chunk.table_type().name.lower()}_{results_received}_{timestamp}.csv"
+                        if current_query == "q1":
+                            output_filename = f"q1_results_{timestamp}.csv"
+                        else:
+                            output_filename = f"result_{result_chunk.table_type().name.lower()}_{results_received}_{timestamp}.csv"
                         output_path = os.path.join(self.output_dir, output_filename)
                         
                         # Convertir ProcessChunk de vuelta a formato CSV para el cliente

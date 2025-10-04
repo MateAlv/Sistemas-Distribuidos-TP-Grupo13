@@ -34,6 +34,7 @@ H_ID_HANDSHAKE: int = 1   # Handshake HELLO
 H_ID_DATA: int = 2    # File header
 H_ID_FINISH: int = 3  # Finished
 H_ID_OK: int = 4       # OK genérico
+H_ID_Q1_RESULT: int = 5 # Resultado de Query 1
 # ----------------------------
 class Server:
     """
@@ -173,6 +174,7 @@ class Server:
             logging.error("action: client_handler_error | peer:%s | client_id:%s | error:%r", peer, client_id, e)
         finally:
             # Cleanup
+            current_thread = threading.current_thread()
             with self.clients_lock:
                 if client_id is not None and client_id in self.client_threads:
                     del self.client_threads[client_id]
@@ -187,6 +189,9 @@ class Server:
                 logging.debug("action: fd_close | result: success | kind: client_socket | fd:%s", fd)
             except Exception:
                 pass
+            
+            logging.info("action: client_thread_finished | peer:%s | client_id:%s | thread:%s", 
+                        peer, client_id, current_thread.name)
 
     # ---------------------------------------------------------------------
     # Handshake / Lectura / Escritura
@@ -354,7 +359,8 @@ class Server:
             if results_for_client and not results_sent:
                 self._send_batch_results_to_client(sock, client_id, results_for_client)
 
-            logging.info("action: results_finished | client_id:%s | peer:%s", client_id, peer)
+            logging.info("action: results_finished | client_id:%s | peer:%s | results_sent:%s", 
+                        client_id, peer, results_sent)
 
         except Exception as e:
             logging.error("action: results_listener_error | client_id:%s | error:%r", client_id, e)
@@ -363,6 +369,7 @@ class Server:
                 middleware_queue.close()
             except:
                 pass
+            logging.info("action: results_thread_completed | client_id:%s | peer:%s", client_id, peer)
 
     def _send_batch_results_to_client(self, sock: socket.socket, client_id: int, results: list) -> None:
         """
@@ -370,6 +377,10 @@ class Server:
         Cada resultado se envía como el chunk completo serializado.
         """
         try:
+            # Enviar header para indicar que vienen resultados de Q1
+            sendall(sock, self.header_id_to_bytes(H_ID_Q1_RESULT))
+            logging.info("action: q1_results_header_sent | client_id:%s", client_id)
+            
             for i, result_chunk in enumerate(results):
                 # Enviar el ProcessChunk serializado directamente
                 results_data = result_chunk.serialize()

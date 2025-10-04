@@ -61,7 +61,7 @@ def main():
         },
     }
 
-    client = Client(client_config, cfg["data_dir"], cfg["output_dir"])
+    client = Client(client_config, cfg["data_dir"])
 
     def shutdown_handler(signum, frame):
         logging.info("SIGTERM recibido, cerrando cliente")
