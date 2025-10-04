@@ -9,7 +9,11 @@ services:
       - "15673:15672"
 
   server:
-    container_name: server
+    conta    volumes:
+      - ./.data/:/data
+      - ./client/config.ini:/config.ini:ro
+      - ./utils:/server/utils:ro
+      - ./middleware:/server/middleware:roame: server
     build:
       context: .             # project root
       dockerfile: server/Dockerfile
@@ -201,6 +205,7 @@ services:
     environment:
       - CLI_ID=1
       - CLI_DATA_DIR=/data
+            - CLI_OUTPUT_DIR=/data/output
       - DATA_MODE=tree
       - SERVER_ADDRESS=server:12345
     networks: [net]
@@ -209,6 +214,7 @@ services:
         condition: service_started
     volumes:
       - ./.data/:/data
+      - ./client-1/output:/output:rw
       - ./client/config.ini:/config.ini:ro
       - ./utils:/server/utils:ro
       - ./middleware:/server/middleware:ro
