@@ -11,20 +11,16 @@ class TableType(Enum):
     
     def from_path(path: str):
         """
-        Clase para determinar el tipo de tabla basado en el nombre del archivo.
-        Se considera que los archivos de un tipo de tabla se encuentran dentro de una carpeta
-        que contiene el nombre de la tabla (case insensitive).
+        Clase para determinar el tipo de tabla basado en el nombre del último archivo en el path.
         Ejemplo: transactions/transactions_2023.csv → TableType.TRANSACTIONS
         Ejemplo: client-1/menu_items/menu_items.csv → TableType.MENU_ITEMS
         """
         path = path.lower()
-        path_parts = path.split("/")
-        
-        # Buscar en todos los segmentos del path, no solo el primero
-        for part in path_parts:
-            for table_type in TableType:
-                if part == table_type.name.lower():
-                    return table_type
-                    
+        filename = path.split("/")[-1]  # tomar solo el último segmento (archivo)
+
+        for table_type in TableType:
+            if table_type.name.lower() in filename:
+                return table_type
+
         raise ValueError(f"No se pudo determinar el tipo de tabla para el path: {path}")
 # =========================================

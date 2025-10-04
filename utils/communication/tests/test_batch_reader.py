@@ -4,7 +4,7 @@ import pytest
 from ..batch_reader import BatchReader
 from ..file_chunk import FileChunk
 
-TEST_PATH = "./utils/communication/tests/test_data"
+TEST_PATH = "./.data-test-mini"  # Directorio con datos de prueba generados
 MAX_BATCH_SIZE = 8 * 1024  # 8KB
 
 @pytest.mark.parametrize("folder", ["menu_items", "stores"])
@@ -14,7 +14,7 @@ def test_batch_reader_batches_no_data_loss(folder):
     reader = BatchReader(client_id, abs_dir, max_batch_size=MAX_BATCH_SIZE)  # tamaño chico para forzar varios batches
 
     chunks = list(reader.iter())
-    assert len(chunks) > 0, f"No se generaron batches para {folder}"
+    assert len(chunks) > 0, f"No se generaron batches para {abs_dir}"
 
     # Verificar que todos son FileChunk
     for chunk in chunks:
@@ -34,7 +34,7 @@ def test_batch_reader_batches_no_data_loss(folder):
         lines = f.readlines()
     expected = "".join(lines[1:])  # quitar header
 
-    assert reconstructed == expected, f"Contenido no coincide para {folder}"
+    assert reconstructed == expected, f"Contenido no coincide para {abs_dir}"
 
 def test_batch_reader_stats_updates():
     abs_dir = os.path.join(TEST_PATH, "menu_items")
