@@ -3,7 +3,8 @@ from utils.file_utils.process_table import TableProcessRow
 from utils.file_utils.process_chunk import ProcessChunk
 from utils.file_utils.process_batch_reader import ProcessBatchReader
 from utils.file_utils.end_message import MessageEnd
-from middleware.middleware_interface import MessageMiddlewareQueue
+from utils.file_utils.table_type import TableType
+from middleware.middleware_interface import MessageMiddlewareQueue, MessageMiddlewareExchange
 
 TIMEOUT = 3
 
@@ -18,6 +19,8 @@ class Filter:
         self.number_of_chunks_received_per_client = {}
         self.number_of_chunks_not_sent_per_client = {}
         self.middleware_queue_sender = {}
+        self.number_of_chunks_to_receive = {}
+        self.middleware_end_exchange = MessageMiddlewareExchange("rabbitmq", f"end_exchange_filter_{self.filter_type}", [""], "fanout")
         
         if self.filter_type == "year":
             self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", "to_filter_1")
@@ -47,42 +50,68 @@ class Filter:
             self.middleware_queue_receiver.connection.call_later(TIMEOUT, stop)
             self.middleware_queue_receiver.start_consuming(callback)
             for msg in results:
-                chunk = None
                 try:
                     chunk = ProcessBatchReader.from_bytes(msg)
                     client_id = chunk.client_id()
                     table_type = chunk.table_type()
-
                     logging.info(f"action: filter | type:{self.filter_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()} | rows_in:{len(chunk.rows)}")
                     filtered_rows = [tx for tx in chunk.rows if self.apply(tx)]
                     logging.info(f"action: filter_result | type:{self.filter_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()} | rows_out:{len(filtered_rows)}")
                     if filtered_rows:
                         for queue_name, queue in self.middleware_queue_sender.items():
                             logging.info(f"action: sending_to_queue | type:{self.filter_type} | queue:{queue_name} | rows:{len(filtered_rows)}")
+                            if table_type == TableType.TRANSACTION_ITEMS and queue_name in ["to_filter_2", "to_agg_4"]:
+                                continue
+                            elif table_type == TableType.TRANSACTIONS and queue_name in ["to_agg_1"]:
+                                continue
                             queue.send(ProcessChunk(chunk.header, filtered_rows).serialize())
                     else:
                         logging.info(f"action: no_rows_to_send | type:{self.filter_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()}")
-                        if client_id not in self.number_of_chunks_not_sent_per_client:
-                            self.number_of_chunks_not_sent_per_client[client_id] = 0
-                        self.number_of_chunks_not_sent_per_client[client_id] += 1
+                        self._ensure_dict_entry(self.number_of_chunks_not_sent_per_client, client_id, table_type)
+                        self.number_of_chunks_not_sent_per_client[client_id][table_type] += 1
                     
-                    if client_id not in self.number_of_chunks_received_per_client:
-                        self.number_of_chunks_received_per_client[client_id] = 0
-                    self.number_of_chunks_received_per_client[client_id] += 1
-                except:
-                    chunk = MessageEnd.decode(msg)
-                    client_id = chunk.client_id()
-                    table_type = chunk.table_type()
-                    self.end_message_received = True
-                    logging.info(f"action: end_message_received | type:{self.filter_type} | cli_id:{client_id} | file_type:{table_type} | total_chunks_received:{self.number_of_chunks_received_per_client.get(client_id, 0)} | total_chunks_not_sent:{self.number_of_chunks_not_sent_per_client.get(client_id, 0)}")
-                    if client_id not in self.number_of_chunks_received_per_client:
-                        self.number_of_chunks_received_per_client[client_id] = 0
-                    if chunk.count() == self.number_of_chunks_received_per_client[client_id]:
-                        logging.info(f"action: sending_end_message | type:{self.filter_type} | cli_id:{client_id} | file_type:{table_type} | total_chunks:{chunk.count()}")
-                        for queue_name, queue in self.middleware_queue_sender.items():
-                            logging.info(f"action: sending_end_to_queue | type:{self.filter_type} | queue:{queue_name} | total_chunks:{chunk.count()}")
-                            queue.send(chunk.encode())
+                    self._ensure_dict_entry(self.number_of_chunks_received_per_client, client_id, table_type)
+                    self.number_of_chunks_received_per_client[client_id][table_type] += 1
+                    
+                    if self.end_message_received:
+                        total_expected = self.number_of_chunks_to_receive[client_id][table_type]
+                        self._ensure_dict_entry(self.number_of_chunks_received_per_client, client_id, table_type)
+                        self._ensure_dict_entry(self.number_of_chunks_not_sent_per_client, client_id, table_type)
+                        total_not_sent = self.number_of_chunks_not_sent_per_client[client_id][table_type]
 
+                        if total_expected == self.number_of_chunks_received_per_client[client_id][table_type]:
+                            logging.info(f"action: sending_end_message | type:{self.filter_type} | cli_id:{client_id} | file_type:{table_type} | total_chunks:{chunk.count()}")
+                            for queue_name, queue in self.middleware_queue_sender.items():
+                                logging.info(f"action: sending_end_to_queue | type:{self.filter_type} | queue:{queue_name} | total_chunks:{chunk.count()}")
+                                if table_type == TableType.TRANSACTION_ITEMS and queue_name in ["to_filter_2", "to_agg_4"]:
+                                    continue
+                                elif table_type == TableType.TRANSACTIONS and queue_name in ["to_agg_1"]:
+                                    continue
+                                msg_to_send = MessageEnd(client_id, table_type, total_expected - total_not_sent)
+                                queue.send(msg_to_send.encode())
+                        
+                except:
+                    end_message = MessageEnd.decode(msg)
+                    client_id = end_message.client_id()
+                    table_type = end_message.table_type()
+                    self.end_message_received = True
+                    total_expected = end_message.total_chunks()
+                    logging.info(f"action: end_message_received | type:{self.filter_type} | cli_id:{client_id} | file_type:{table_type} | total_chunks_received:{self.number_of_chunks_received_per_client.get(client_id, 0)}")
+                    
+                    self._ensure_dict_entry(self.number_of_chunks_received_per_client, client_id, table_type)
+                    self._ensure_dict_entry(self.number_of_chunks_not_sent_per_client, client_id, table_type)
+                    self.number_of_chunks_to_receive[client_id] = {table_type: total_expected}
+
+                    if total_expected == self.number_of_chunks_received_per_client[client_id][table_type]:
+                        logging.info(f"action: sending_end_message | type:{self.filter_type} | cli_id:{client_id} | file_type:{table_type} | total_chunks:{total_expected}")
+                        for queue_name, queue in self.middleware_queue_sender.items():
+                            logging.info(f"action: sending_end_to_queue | type:{self.filter_type} | queue:{queue_name} | total_chunks:{total_expected}")
+                            if table_type == TableType.TRANSACTION_ITEMS and queue_name in ["to_filter_2", "to_agg_4"]:
+                                    continue
+                            elif table_type == TableType.TRANSACTIONS and queue_name in ["to_agg_1"]:
+                                continue
+                            msg_to_send = MessageEnd(client_id, table_type, total_expected - self.number_of_chunks_not_sent_per_client[client_id][table_type])
+                            queue.send(msg_to_send.encode())
 
                 results.remove(msg)
             
@@ -97,24 +126,13 @@ class Filter:
             return self.cfg["hour_start"] <= tx.created_at.time.hour <= self.cfg["hour_end"]
 
         elif self.filter_type == "amount":
-            # Verificar el tipo de fila para acceder al atributo correcto
-            if hasattr(tx, 'final_amount'):
-                # TransactionsProcessRow - usar final_amount (monto final)
-                amount = tx.final_amount
-                result = amount >= self.cfg["min_amount"]
-                if not result:
-                    logging.debug(f"FILTERED OUT: TransactionsProcessRow final_amount={amount} < min_amount={self.cfg['min_amount']}")
-                return result
-            elif hasattr(tx, 'subtotal'):
-                # TransactionsItemsProcessRow - usar subtotal (monto por item)
-                amount = tx.subtotal
-                result = amount >= self.cfg["min_amount"]
-                if not result:
-                    logging.debug(f"FILTERED OUT: TransactionsItemsProcessRow subtotal={amount} < min_amount={self.cfg['min_amount']}")
-                return result
-            else:
-                logging.warning(f"Tipo de fila no reconocido para filtro amount: {type(tx)}")
-                return False
+            return tx.total_amount >= self.cfg["min_amount"]
 
         logging.error(f"Filtro desconocido: {self.filter_type}")
         return False
+    
+    def _ensure_dict_entry(self, dictionary, client_id, table_type):
+        if client_id not in dictionary:
+            dictionary[client_id] = {}
+        if table_type not in dictionary[client_id]:
+            dictionary[client_id][table_type] = 0

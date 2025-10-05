@@ -2,16 +2,16 @@ from .table_type import TableType
 
 class MessageEnd:
     def __init__(self, client_id: int, table_type: TableType, count: int):
-        self.client_id = client_id
-        self.table_type = table_type
-        self.count = count
+        self._client_id = client_id
+        self._table_type = table_type
+        self._count = count
 
     def encode(self) -> bytes:
         """
         Serializa el objeto a bytes con el formato:
         b"END;{client_id};{table_type.value};{count}"
         """
-        return f"END;{self.client_id};{self.table_type.value};{self.count}".encode("utf-8")
+        return f"END;{self._client_id};{self._table_type.value};{self._count}".encode("utf-8")
 
     @classmethod
     def decode(cls, message: bytes) -> "MessageEnd":
@@ -30,13 +30,13 @@ class MessageEnd:
         except KeyError:
             raise ValueError(f"TableType inválido: {table_type_value}")
 
-        return cls(client_id, table_type, int(count))
+        return cls(int(client_id), table_type, int(count))
     
     def client_id(self) -> int:
-        return self.client_id
+        return self._client_id
     
     def table_type(self) -> TableType:
-        return self.table_type
+        return self._table_type
     
     def total_chunks(self) -> int:
-        return self.count
+        return self._count

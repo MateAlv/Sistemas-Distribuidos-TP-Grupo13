@@ -36,7 +36,7 @@ services:
   # -------------------------
   # FILTERS
   # -------------------------
-  filter_year:
+  filter_year_1:
     build:
       context: .   
       dockerfile: workers/filter/Dockerfile
@@ -45,46 +45,9 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - LOGGING_LEVEL=INFO
+      - WORKER_ID=1
     volumes:
       - ./workers/filter/config/config_year.ini:/workers/filter/config/config_year.ini
-      - ./utils:/workers/utils:ro
-      - ./middleware:/workers/middleware:ro
-    networks:
-      - testing_net
-    depends_on:
-      server:
-        condition: service_started
- 
-  filter_hour:
-    build:
-      context: .   
-      dockerfile: workers/filter/Dockerfile
-    container_name: filter_hour_service
-    command: ["python", "main.py", "--filter", "hour"]
-    environment:
-      - PYTHONUNBUFFERED=1
-      - LOGGING_LEVEL=INFO
-    volumes:
-      - ./workers/filter/config/config_hour.ini:/workers/filter/config/config_hour.ini
-      - ./utils:/workers/utils:ro
-      - ./middleware:/workers/middleware:ro
-    networks:
-      - testing_net
-    depends_on:
-      server:
-        condition: service_started
-
-  filter_amount:
-    build:
-      context: .   
-      dockerfile: workers/filter/Dockerfile
-    container_name: filter_amount_service
-    command: ["python", "main.py", "--filter", "amount"]
-    environment:
-      - PYTHONUNBUFFERED=1
-      - LOGGING_LEVEL=INFO
-    volumes:
-      - ./workers/filter/config/config_amount.ini:/workers/filter/config/config_amount.ini
       - ./utils:/workers/utils:ro
       - ./middleware:/workers/middleware:ro
     networks:
@@ -101,7 +64,7 @@ services:
     environment:
       - CLI_ID=1
       - CLI_DATA_DIR=/data
-      - CLI_OUTPUT_DIR=/data/output
+      - OUTPUT_DIR=/data/output
       - DATA_MODE=tree
       - SERVER_ADDRESS=server:12345
     networks:
