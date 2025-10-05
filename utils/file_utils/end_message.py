@@ -9,7 +9,7 @@ class MessageEnd:
     def encode(self) -> bytes:
         """
         Serializa el objeto a bytes con el formato:
-        b"END;{client_id};{table_type.name};{count}"
+        b"END;{client_id};{table_type.value};{count}"
         """
         return f"END;{self.client_id};{self.table_type.value};{self.count}".encode("utf-8")
 
@@ -31,3 +31,12 @@ class MessageEnd:
             raise ValueError(f"TableType inválido: {table_type_value}")
 
         return cls(client_id, table_type, int(count))
+    
+    def client_id(self) -> int:
+        return self.client_id
+    
+    def table_type(self) -> TableType:
+        return self.table_type
+    
+    def total_chunks(self) -> int:
+        return self.count

@@ -17,6 +17,7 @@ def initialize_config(file_name):
     cfg = {}
     try:
         logging_level = os.getenv("LOGGING_LEVEL", config["DEFAULT"]["LOGGING_LEVEL"])
+        cfg["id"] = int(os.getenv("WORKER_ID", config["DEFAULT"]["WORKER_ID"]))
         cfg["filter_type"] = os.getenv("FILTER_TYPE", config["DEFAULT"]["FILTER_TYPE"])
 
         if cfg["filter_type"] == "year":
