@@ -40,7 +40,7 @@ services:
     build:
       context: .   
       dockerfile: workers/filter/Dockerfile
-    container_name: filter_year_service
+    container_name: filter_year_1
     command: ["python", "main.py", "--filter", "year"]
     environment:
       - PYTHONUNBUFFERED=1
@@ -56,6 +56,26 @@ services:
       server:
         condition: service_started
     
+  filter_year_2:
+    build:
+      context: .   
+      dockerfile: workers/filter/Dockerfile
+    container_name: filter_year_2
+    command: ["python", "main.py", "--filter", "year"]
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOGGING_LEVEL=INFO
+      - WORKER_ID=2
+    volumes:
+      - ./workers/filter/config/config_year.ini:/workers/filter/config/config_year.ini
+      - ./utils:/workers/utils:ro
+      - ./middleware:/workers/middleware:ro
+    networks:
+      - testing_net
+    depends_on:
+      server:
+        condition: service_started
+      
   client1:
     container_name: client1
     build:
