@@ -65,7 +65,7 @@ services:
     command: ["python", "main.py"]
     environment:
       - PYTHONUNBUFFERED=1
-      - LOGGING_LEVEL=INFO
+      - LOGGING_LEVEL=DEBUG
       - AGGREGATOR_TYPE=PRODUCTS
     volumes:
       - ./utils:/workers/utils:ro
@@ -75,7 +75,85 @@ services:
     depends_on:
       server:
         condition: service_started
-    
+  # -------------------------
+  # MAXIMIZERS
+  # -------------------------
+  maximizer_products_1:
+    build:
+      context: .   
+      dockerfile: workers/maximizers/Dockerfile
+    container_name: maximizer_products_1_service
+    command: ["python", "main.py"]
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOGGING_LEVEL=DEBUG
+      - MAXIMIZER_TYPE=MAX
+      - MAXIMIZER_RANGE=1
+    volumes:
+      - ./utils:/workers/utils:ro
+      - ./middleware:/workers/middleware:ro
+    networks:
+      - testing_net
+    depends_on:
+      server:
+        condition: service_started
+  
+  maximizer_products_2:
+    build:
+      context: .   
+      dockerfile: workers/maximizers/Dockerfile
+    container_name: maximizer_products_2_service
+    command: ["python", "main.py"]
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOGGING_LEVEL=DEBUG
+      - MAXIMIZER_TYPE=MAX
+      - MAXIMIZER_RANGE=2
+    volumes:
+      - ./utils:/workers/utils:ro
+      - ./middleware:/workers/middleware:ro
+    networks:
+      - testing_net
+    depends_on:
+      server:
+        condition: service_started
+  
+  maximizer_products_3:
+    build:
+      context: .   
+      dockerfile: workers/maximizers/Dockerfile
+    container_name: maximizer_products_3_service
+    command: ["python", "main.py"]
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOGGING_LEVEL=DEBUG
+      - MAXIMIZER_TYPE=MAX
+      - MAXIMIZER_RANGE=3
+    volumes:
+      - ./utils:/workers/utils:ro
+      - ./middleware:/workers/middleware:ro
+    networks:
+      - testing_net
+    depends_on:
+      server:
+        condition: service_started
+
+  maximizer_absolute:
+    build:
+      context: .
+      dockerfile: workers/maximizers/Dockerfile
+    container_name: maximizer_absolute_service
+    command: ["python", "main.py"]
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOGGING_LEVEL=INFO
+      - MAXIMIZER_TYPE=MAX
+      - MAXIMIZER_RANGE=0
+    volumes:
+      - ./utils:/workers/utils:ro
+      - ./middleware:/workers/middleware:ro
+    networks:
+      - testing_net
   client1:
     container_name: client1
     build:

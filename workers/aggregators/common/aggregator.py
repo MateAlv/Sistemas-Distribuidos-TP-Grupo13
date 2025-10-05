@@ -93,18 +93,18 @@ class Aggregator:
     
     def publish_results_1_3(self, chunk, aggregated_rows: list[TableProcessRow]):
         # Enviar los resultados a la cola correspondiente
-        queue = MessageMiddlewareQueue("rabbitmq", "to_max_products_1_3")
+        queue = MessageMiddlewareQueue("rabbitmq", "to_max_1_3")
         logging.info(f"action: sending_to_queue | type:{self.aggregator_type} | queue:to_max_products_1_3 | rows:{len(aggregated_rows)}")
         queue.send(ProcessChunk(chunk.header, aggregated_rows).serialize())
 
     def publish_results_4_6(self, chunk, aggregated_rows: list[TableProcessRow]):
         # Enviar los resultados a la cola correspondiente
-        queue = MessageMiddlewareQueue("rabbitmq", "to_max_products_4_6")
+        queue = MessageMiddlewareQueue("rabbitmq", "to_max_4_6")
         logging.info(f"action: sending_to_queue | type:{self.aggregator_type} | queue:to_max_products_4_6 | rows:{len(aggregated_rows)}")
         queue.send(ProcessChunk(chunk.header, aggregated_rows).serialize())
     
     def publish_results_7_8(self, chunk, aggregated_rows: list[TableProcessRow]):
         # Enviar los resultados a la cola correspondiente
-        queue = MessageMiddlewareQueue("rabbitmq", "to_max_products_7_8")
+        queue = MessageMiddlewareQueue("rabbitmq", "to_max_7_8")
         logging.info(f"action: sending_to_queue | type:{self.aggregator_type} | queue:to_max_products_7_8 | rows:{len(aggregated_rows)}")
         queue.send(ProcessChunk(chunk.header, aggregated_rows).serialize())
