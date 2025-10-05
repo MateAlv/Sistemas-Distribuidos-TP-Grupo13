@@ -76,7 +76,7 @@ class Filter:
                     self.number_of_chunks_not_sent_per_client[stats.client_id][stats.table_type] += stats.chunks_not_sent
                     self._ensure_dict_entry(self.number_of_chunks_to_receive, stats.client_id, stats.table_type)
 
-                    if self._cand_send_end_message(total_expected, stats.client_id, stats.table_type):
+                    if self._can_send_end_message(total_expected, stats.client_id, stats.table_type):
                         self._send_end_message(chunk, stats.client_id, stats.table_type, total_expected, self.number_of_chunks_not_sent_per_client[stats.client_id][stats.table_type])
 
                 except:
@@ -127,7 +127,7 @@ class Filter:
                         else:
                             stats_msg = FilterStatsMessage(self.id, client_id, table_type, 1, 0 if filtered_rows else 1)
 
-                        if self._cand_send_end_message(total_expected, client_id, table_type):
+                        if self._can_send_end_message(total_expected, client_id, table_type):
                             self._send_end_message(chunk, client_id, table_type, total_expected, total_not_sent)
                         
                 except:
@@ -149,7 +149,7 @@ class Filter:
                                 self.number_of_chunks_not_sent_per_client[client_id][table_type])
                     self.middleware_end_exchange.send(stats_msg.encode())
 
-                    if total_expected == self.number_of_chunks_received_per_client[client_id][table_type] and self.id == 1:
+                    if self._can_send_end_message(total_expected, client_id, table_type):
                         self._send_end_message(chunk, client_id, table_type, total_expected, self.number_of_chunks_not_sent_per_client[client_id][table_type])
 
                 results.remove(msg)
@@ -170,7 +170,7 @@ class Filter:
         if self.number_of_chunks_to_receive[stats_end.client_id] == {}:
             del self.number_of_chunks_to_receive[stats_end.client_id]
 
-    def _cand_send_end_message(self, total_expected, client_id, table_type):
+    def _can_send_end_message(self, total_expected, client_id, table_type):
         return total_expected == self.number_of_chunks_received_per_client[client_id][table_type] and self.id == 1
 
     def _send_end_message(self, chunk, client_id, table_type, total_expected, total_not_sent):
