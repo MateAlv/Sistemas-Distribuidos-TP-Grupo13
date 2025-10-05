@@ -78,11 +78,11 @@ class Maximizer:
         Actualiza los máximos relativos o absolutos.
         """
         for row in rows:
-            key = row.item_id
+            key = (row.item_id, row.month_year)  # month_year es un objeto MonthYear
             if key not in self.sellings_max or row.quantity > self.sellings_max[key][0]:
-                self.sellings_max[key] = (row.quantity, row.month_year_created_at)
+                self.sellings_max[key] = row.quantity
             if key not in self.profit_max or row.subtotal > self.profit_max[key][0]:
-                self.profit_max[key] = (row.subtotal, row.month_year_created_at)
+                self.profit_max[key] = row.subtotal
     
     def apply(self, rows: list[TableProcessRow]) -> bool:
         """
@@ -105,7 +105,7 @@ class Maximizer:
         
         if self.maximizer_type == "MAX":
             for result in self.sellings_max.items():
-                item_id, (max_quantity, month_year) = result
+                (item_id, month_year), max_quantity = result
                 new_row = TransactionItemsProcessRow(
                     transaction_id="",
                     item_id=item_id,
