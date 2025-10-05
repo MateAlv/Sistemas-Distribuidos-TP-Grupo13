@@ -51,7 +51,7 @@ def initialize_log(logging_level):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Procesador de transacciones con agregación.")
+    parser = argparse.ArgumentParser(description="Procesador de transacciones con maximizador.")
     args = parser.parse_args()
 
     (logging_level, max_type, max_range) = initialize_config()

@@ -25,7 +25,7 @@ class Maximizer:
 
             if self.is_absolute_max():
                 # Maximo absoluto
-                self.data_sender = MessageMiddlewareQueue("rabbitmq", "to_joun_menu_items")
+                self.data_sender = MessageMiddlewareQueue("rabbitmq", "to_transaction_items_to_join")
                 self.data_receiver = MessageMiddlewareQueue("rabbitmq", "to_absolute_max")
             else:
                 self.data_sender = MessageMiddlewareQueue("rabbitmq", "to_absolute_max")
@@ -59,8 +59,8 @@ class Maximizer:
             self.data_receiver.connection.call_later(TIMEOUT, stop_max)
             self.data_receiver.start_consuming(callback_max)
 
-            for max_data in max_results:
-                chunk = ProcessBatchReader.from_bytes(max_data)
+            for data in results:
+                chunk = ProcessBatchReader.from_bytes(data)
                 logging.info(f"action: maximize | type:{self.maximizer_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()} | rows_in:{len(chunk.rows)}")
                 
                 self.apply(chunk.rows)
@@ -71,7 +71,7 @@ class Maximizer:
                 
                 self.publish_results(chunk, partial_results)
                 
-                results.remove(max_data)
+                results.remove(data)
 
     def update_max(self, rows: list[TableProcessRow]) -> bool:
         """
