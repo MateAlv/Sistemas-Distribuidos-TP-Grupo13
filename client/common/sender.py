@@ -15,6 +15,7 @@ H_ID_HANDSHAKE: int = 1  # Handshake HELLO
 H_ID_DATA: int = 2    # File header
 H_ID_FINISH: int = 3  # Finished
 H_ID_OK: int = 4      # OK genérico
+H_ID_Q1_RESULT: int = 5 # Resultado de Query 1
 # ----------------------------
 # Delimitador de mensajes
 MESSAGE_DELIM   = b"\n"
