@@ -5,7 +5,7 @@ from utils.file_utils.process_batch_reader import ProcessBatchReader
 from utils.file_utils.end_message import MessageEnd
 from utils.file_utils.table_type import TableType
 from middleware.middleware_interface import MessageMiddlewareQueue, MessageMiddlewareExchange
-from .filter_stats_message import FilterStatsMessage
+from .filter_stats_messages import FilterStatsMessage, FilterStatsEndMessage
 
 TIMEOUT = 3
 
@@ -19,9 +19,10 @@ class Filter:
         self.end_message_received = {}
         self.number_of_chunks_received_per_client = {}
         self.number_of_chunks_not_sent_per_client = {}
-        self.middleware_queue_sender = {}
         self.number_of_chunks_to_receive = {}
+        self.middleware_queue_sender = {}
         self.already_sent_stats = {}
+
         self.middleware_end_exchange = MessageMiddlewareExchange("rabbitmq", f"end_exchange_filter_{self.filter_type}", [""], "fanout")
         
         if self.filter_type == "year":
@@ -73,10 +74,21 @@ class Filter:
                     self._ensure_dict_entry(self.number_of_chunks_not_sent_per_client, stats.client_id, stats.table_type)
                     self.number_of_chunks_received_per_client[stats.client_id][stats.table_type] += stats.chunks_received
                     self.number_of_chunks_not_sent_per_client[stats.client_id][stats.table_type] += stats.chunks_not_sent
-                    
-                except Exception as e:
-                    logging.error(f"Error decoding stats message: {e}")
-                stats_results.remove(stats_msg)
+                    self._ensure_dict_entry(self.number_of_chunks_to_receive, stats.client_id, stats.table_type)
+
+                    if self._cand_send_end_message(total_expected, stats.client_id, stats.table_type):
+                        self._send_end_message(chunk, stats.client_id, stats.table_type, total_expected, self.number_of_chunks_not_sent_per_client[stats.client_id][stats.table_type])
+
+                except:
+                    stats_end = FilterStatsEndMessage.decode(stats_msg)
+                    if stats_end.filter_id == self.id:
+                        stats_results.remove(stats_msg)
+                        continue
+                    logging.info(f"action: stats_end_received | type:{self.filter_type} | filter_id:{stats_end.filter_id} | cli_id:{stats_end.client_id}")
+                    self.delete_client_data(stats_end)
+
+
+                    stats_results.remove(stats_msg)
 
             for msg in results:
                 try:
@@ -115,14 +127,8 @@ class Filter:
                         else:
                             stats_msg = FilterStatsMessage(self.id, client_id, table_type, 1, 0 if filtered_rows else 1)
 
-                        if total_expected == self.number_of_chunks_received_per_client[client_id][table_type] and self.id == 1:
-                            logging.info(f"action: sending_end_message | type:{self.filter_type} | cli_id:{client_id} | file_type:{table_type} | total_chunks:{chunk.count()}")
-                            for queue_name, queue in self.middleware_queue_sender.items():
-                                logging.info(f"action: sending_end_to_queue | type:{self.filter_type} | queue:{queue_name} | total_chunks:{chunk.count()}")
-                                if self._should_skip_queue(table_type, queue_name):
-                                    continue
-                                msg_to_send = MessageEnd(client_id, table_type, total_expected - total_not_sent)
-                                queue.send(msg_to_send.encode())
+                        if self._cand_send_end_message(total_expected, client_id, table_type):
+                            self._send_end_message(chunk, client_id, table_type, total_expected, total_not_sent)
                         
                 except:
                     end_message = MessageEnd.decode(msg)
@@ -143,17 +149,41 @@ class Filter:
                                 self.number_of_chunks_not_sent_per_client[client_id][table_type])
                     self.middleware_end_exchange.send(stats_msg.encode())
 
-                    if total_expected == self.number_of_chunks_received_per_client[client_id][table_type]:
-                        logging.info(f"action: sending_end_message | type:{self.filter_type} | cli_id:{client_id} | file_type:{table_type} | total_chunks:{total_expected}")
-
-                        for queue_name, queue in self.middleware_queue_sender.items():
-                            logging.info(f"action: sending_end_to_queue | type:{self.filter_type} | queue:{queue_name} | total_chunks:{total_expected}")
-                            if self._should_skip_queue(table_type, queue_name):
-                                continue
-                            msg_to_send = MessageEnd(client_id, table_type, total_expected - self.number_of_chunks_not_sent_per_client[client_id][table_type])
-                            queue.send(msg_to_send.encode())
+                    if total_expected == self.number_of_chunks_received_per_client[client_id][table_type] and self.id == 1:
+                        self._send_end_message(chunk, client_id, table_type, total_expected, self.number_of_chunks_not_sent_per_client[client_id][table_type])
 
                 results.remove(msg)
+
+    def delete_client_data(self, stats_end):
+        del self.end_message_received[stats_end.client_id][stats_end.filter_id]
+        del self.already_sent_stats[(stats_end.client_id, stats_end.filter_id)]
+        del self.number_of_chunks_received_per_client[stats_end.client_id][stats_end.filter_id]
+        del self.number_of_chunks_not_sent_per_client[stats_end.client_id][stats_end.filter_id]
+        del self.number_of_chunks_to_receive[stats_end.client_id][stats_end.filter_id]
+
+        if self.end_message_received[stats_end.client_id] == {}:
+            del self.end_message_received[stats_end.client_id]
+        if self.number_of_chunks_received_per_client[stats_end.client_id] == {}:
+            del self.number_of_chunks_received_per_client[stats_end.client_id]
+        if self.number_of_chunks_not_sent_per_client[stats_end.client_id] == {}:
+            del self.number_of_chunks_not_sent_per_client[stats_end.client_id]
+        if self.number_of_chunks_to_receive[stats_end.client_id] == {}:
+            del self.number_of_chunks_to_receive[stats_end.client_id]
+
+    def _cand_send_end_message(self, total_expected, client_id, table_type):
+        return total_expected == self.number_of_chunks_received_per_client[client_id][table_type] and self.id == 1
+
+    def _send_end_message(self, chunk, client_id, table_type, total_expected, total_not_sent):
+        logging.info(f"action: sending_end_message | type:{self.filter_type} | cli_id:{client_id} | file_type:{table_type} | total_chunks:{chunk.count()}")
+        
+        for queue_name, queue in self.middleware_queue_sender.items():
+            logging.info(f"action: sending_end_to_queue | type:{self.filter_type} | queue:{queue_name} | total_chunks:{chunk.count()}")
+            if self._should_skip_queue(table_type, queue_name):
+                continue
+            msg_to_send = MessageEnd(client_id, table_type, total_expected - total_not_sent)
+            queue.send(msg_to_send.encode())
+        end_msg = FilterStatsEndMessage(self.id, client_id)
+        self.middleware_end_exchange.send(end_msg.encode())
             
     def apply(self, tx: TableProcessRow) -> bool:
         """
@@ -171,11 +201,11 @@ class Filter:
         logging.error(f"Filtro desconocido: {self.filter_type}")
         return False
     
-    def _ensure_dict_entry(self, dictionary, client_id, table_type):
+    def _ensure_dict_entry(self, dictionary, client_id, table_type, default=0):
         if client_id not in dictionary:
             dictionary[client_id] = {}
         if table_type not in dictionary[client_id]:
-            dictionary[client_id][table_type] = 0
+            dictionary[client_id][table_type] = default
 
     def _should_skip_queue(self, table_type: TableType, queue_name: str) -> bool:
         if table_type == TableType.TRANSACTION_ITEMS and queue_name in ["to_filter_2", "to_agg_4"]:
