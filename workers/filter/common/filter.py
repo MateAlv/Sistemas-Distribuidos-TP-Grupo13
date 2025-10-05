@@ -1,6 +1,7 @@
 import logging
 from utils.file_utils.process_table import TableProcessRow
 from utils.file_utils.process_chunk import ProcessChunk
+from utils.file_utils.table_type import TableType
 from utils.file_utils.process_batch_reader import ProcessBatchReader
 from middleware.middleware_interface import MessageMiddlewareQueue, MessageMiddlewareExchange
 TIMEOUT = 3
@@ -16,7 +17,7 @@ class Filter:
         if self.filter_type == "year":
             self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", "to_filter_1")
             self.middleware_queue_sender["to_filter_2"] = MessageMiddlewareQueue("rabbitmq", "to_filter_2")
-            self.middleware_queue_sender["to_agg_1"] = MessageMiddlewareQueue("rabbitmq", "to_agg_1")
+            self.middleware_queue_sender["to_agg_1"] = MessageMiddlewareQueue("rabbitmq", "to_agg_1") # Pasa solo transaction items
             self.middleware_queue_sender["to_agg_4"] = MessageMiddlewareQueue("rabbitmq", "to_agg_4")
             self.middleware_exchange_receiver = MessageMiddlewareExchange("rabbitmq", "FIRST_END_MESSAGE", [""], exchange_type="fanout")
             self.middleware_exchange_sender = MessageMiddlewareExchange("rabbitmq", "SECOND_END_MESSAGE", [""], exchange_type="fanout")
@@ -53,8 +54,13 @@ class Filter:
                 logging.info(f"action: filter_result | type:{self.filter_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()} | rows_out:{len(filtered_rows)}")
                 if filtered_rows:
                     for queue_name, queue in self.middleware_queue_sender.items():
-                        logging.info(f"action: sending_to_queue | type:{self.filter_type} | queue:{queue_name} | rows:{len(filtered_rows)}")
-                        queue.send(ProcessChunk(chunk.header, filtered_rows).serialize())
+                        if queue_name == "to_agg_1":
+                            if chunk.table_type() == TableType.TRANSACTION_ITEMS:
+                                logging.info(f"action: sending_to_queue | type:{self.filter_type} | queue:{queue_name} | rows:{len(filtered_rows)} | table_type: {chunk.table_type()}")
+                                queue.send(ProcessChunk(chunk.header, filtered_rows).serialize())
+                        else:
+                            logging.info(f"action: sending_to_queue | type:{self.filter_type} | queue:{queue_name} | rows:{len(filtered_rows)} | table_type: {chunk.table_type()}")
+                            queue.send(ProcessChunk(chunk.header, filtered_rows).serialize())
                 results.remove(msg)
             
     def apply(self, tx: TableProcessRow) -> bool:
@@ -77,11 +83,11 @@ class Filter:
                     logging.debug(f"FILTERED OUT: TransactionsProcessRow final_amount={amount} < min_amount={self.cfg['min_amount']}")
                 return result
             elif hasattr(tx, 'subtotal'):
-                # TransactionsItemsProcessRow - usar subtotal (monto por item)
+                # TransactionItemsProcessRow - usar subtotal (monto por item)
                 amount = tx.subtotal
                 result = amount >= self.cfg["min_amount"]
                 if not result:
-                    logging.debug(f"FILTERED OUT: TransactionsItemsProcessRow subtotal={amount} < min_amount={self.cfg['min_amount']}")
+                    logging.debug(f"FILTERED OUT: TransactionItemsProcessRow subtotal={amount} < min_amount={self.cfg['min_amount']}")
                 return result
             else:
                 logging.warning(f"Tipo de fila no reconocido para filtro amount: {type(tx)}")

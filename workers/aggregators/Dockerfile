@@ -1,12 +1,15 @@
 FROM python:3.12-slim
 
-WORKDIR /workers
+WORKDIR /workers/
 
-COPY workers/ /workers/
-COPY utils/ /utils/
-COPY middleware/ /middleware/
+# Copiar y instalar dependencias primero (para mejor caching)
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copiar el código fuente después
+COPY workers/aggregators/ ./aggregators/
 
 ENV PYTHONUNBUFFERED=1
-ENV PYTHONPATH=/workers:/utils:/middleware
+ENV PYTHONPATH=/workers/
 
-ENTRYPOINT ["python3"]
+WORKDIR /workers/aggregators

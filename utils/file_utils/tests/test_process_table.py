@@ -1,7 +1,7 @@
 import datetime
 from ..process_table import (
     YearHalf, MonthYear,
-    TransactionsProcessRow, TransactionsItemsProcessRow,
+    TransactionsProcessRow, TransactionItemsProcessRow,
     MenuItemsProcessRow, StoresProcessRow, UsersProcessRow,
     DateTime
 )
@@ -54,7 +54,7 @@ def test_transacions_process_row_serialize_deserialize():
 def test_transactions_items_process_row_from_file_row():
     date = DateTime(datetime.date(2023, 9, 1), datetime.time(12, 0))
     file_row = TransactionsItemsFileRow("tx2", 10, 2, 50.0, 100.0, date)
-    process_row = TransactionsItemsProcessRow.from_file_row(file_row)
+    process_row = TransactionItemsProcessRow.from_file_row(file_row)
     assert process_row.item_id == 10
     assert process_row.transaction_id == "tx2"
     assert process_row.quantity == 2
@@ -65,9 +65,9 @@ def test_transactions_items_process_row_from_file_row():
 
 def test_transactions_items_process_row_serialize_deserialize():
     date = DateTime(datetime.date(2023, 12, 25), datetime.time(18, 45))
-    row = TransactionsItemsProcessRow("tx3", 5, 3, 30.0, date)
+    row = TransactionItemsProcessRow("tx3", 5, 3, 30.0, date)
     serialized = row.serialize()
-    deserialized, consumed = TransactionsItemsProcessRow.deserialize(serialized)
+    deserialized, consumed = TransactionItemsProcessRow.deserialize(serialized)
     assert deserialized.transaction_id == "tx3"
     assert deserialized.item_id == 5
     assert deserialized.quantity == 3

@@ -4,7 +4,7 @@ from .file_table import *
 
 PROCESS_CLASSES = {
     TableType.TRANSACTIONS: TransactionsProcessRow,
-    TableType.TRANSACTION_ITEMS: TransactionsItemsProcessRow,
+    TableType.TRANSACTION_ITEMS: TransactionItemsProcessRow,
     TableType.MENU_ITEMS: MenuItemsProcessRow,
     TableType.STORES: StoresProcessRow,
     TableType.USERS: UsersProcessRow,

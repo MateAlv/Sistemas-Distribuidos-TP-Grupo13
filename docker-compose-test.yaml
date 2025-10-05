@@ -54,37 +54,20 @@ services:
     depends_on:
       server:
         condition: service_started
- 
-  filter_hour:
+  # -------------------------
+  # AGGREGATORS
+  # -------------------------
+  aggregator_products:
     build:
       context: .   
-      dockerfile: workers/filter/Dockerfile
-    container_name: filter_hour_service
-    command: ["python", "main.py", "--filter", "hour"]
+      dockerfile: workers/aggregators/Dockerfile
+    container_name: aggregator_products_service
+    command: ["python", "main.py"]
     environment:
       - PYTHONUNBUFFERED=1
       - LOGGING_LEVEL=INFO
+      - AGGREGATOR_TYPE=PRODUCTS
     volumes:
-      - ./workers/filter/config/config_hour.ini:/workers/filter/config/config_hour.ini
-      - ./utils:/workers/utils:ro
-      - ./middleware:/workers/middleware:ro
-    networks:
-      - testing_net
-    depends_on:
-      server:
-        condition: service_started
-
-  filter_amount:
-    build:
-      context: .   
-      dockerfile: workers/filter/Dockerfile
-    container_name: filter_amount_service
-    command: ["python", "main.py", "--filter", "amount"]
-    environment:
-      - PYTHONUNBUFFERED=1
-      - LOGGING_LEVEL=INFO
-    volumes:
-      - ./workers/filter/config/config_amount.ini:/workers/filter/config/config_amount.ini
       - ./utils:/workers/utils:ro
       - ./middleware:/workers/middleware:ro
     networks:
@@ -110,7 +93,8 @@ services:
       server:
         condition: service_started
     volumes:
-      - ./.data/:/data:rw
+      - ./.data-test/:/data:rw
+      - ./.results/client-1:/data/output:rw
       - ./client/config.ini:/config.ini:ro
       - ./utils:/client/utils:ro
       - ./middleware:/client/middleware:ro

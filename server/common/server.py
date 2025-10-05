@@ -234,7 +234,7 @@ class Server:
         # Enrutar según el tipo de tabla
         table_type = process_chunk.table_type()
         
-        if table_type == TableType.TRANSACTIONS:
+        if table_type == TableType.TRANSACTIONS or table_type == TableType.TRANSACTION_ITEMS:
             logging.info("action: send_to_filter1 | peer:%s | cli_id:%s | file:%s | table:%s",
                          peer, client_id, chunk.path(), table_type)
             self.middleware_queue_senders["to_filter_1"].send(process_chunk.serialize())
