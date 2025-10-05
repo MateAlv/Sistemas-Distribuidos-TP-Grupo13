@@ -89,9 +89,7 @@ class Filter:
                     if filtered_rows:
                         for queue_name, queue in self.middleware_queue_sender.items():
                             logging.info(f"action: sending_to_queue | type:{self.filter_type} | queue:{queue_name} | rows:{len(filtered_rows)}")
-                            if table_type == TableType.TRANSACTION_ITEMS and queue_name in ["to_filter_2", "to_agg_4"]:
-                                continue
-                            elif table_type == TableType.TRANSACTIONS and queue_name in ["to_agg_1"]:
+                            if self._should_skip_queue(table_type, queue_name):
                                 continue
                             queue.send(ProcessChunk(chunk.header, filtered_rows).serialize())
                     else:
@@ -121,9 +119,7 @@ class Filter:
                             logging.info(f"action: sending_end_message | type:{self.filter_type} | cli_id:{client_id} | file_type:{table_type} | total_chunks:{chunk.count()}")
                             for queue_name, queue in self.middleware_queue_sender.items():
                                 logging.info(f"action: sending_end_to_queue | type:{self.filter_type} | queue:{queue_name} | total_chunks:{chunk.count()}")
-                                if table_type == TableType.TRANSACTION_ITEMS and queue_name in ["to_filter_2", "to_agg_4"]:
-                                    continue
-                                elif table_type == TableType.TRANSACTIONS and queue_name in ["to_agg_1"]:
+                                if self._should_skip_queue(table_type, queue_name):
                                     continue
                                 msg_to_send = MessageEnd(client_id, table_type, total_expected - total_not_sent)
                                 queue.send(msg_to_send.encode())
@@ -152,9 +148,7 @@ class Filter:
 
                         for queue_name, queue in self.middleware_queue_sender.items():
                             logging.info(f"action: sending_end_to_queue | type:{self.filter_type} | queue:{queue_name} | total_chunks:{total_expected}")
-                            if table_type == TableType.TRANSACTION_ITEMS and queue_name in ["to_filter_2", "to_agg_4"]:
-                                    continue
-                            elif table_type == TableType.TRANSACTIONS and queue_name in ["to_agg_1"]:
+                            if self._should_skip_queue(table_type, queue_name):
                                 continue
                             msg_to_send = MessageEnd(client_id, table_type, total_expected - self.number_of_chunks_not_sent_per_client[client_id][table_type])
                             queue.send(msg_to_send.encode())
@@ -182,3 +176,10 @@ class Filter:
             dictionary[client_id] = {}
         if table_type not in dictionary[client_id]:
             dictionary[client_id][table_type] = 0
+
+    def _should_skip_queue(self, table_type: TableType, queue_name: str) -> bool:
+        if table_type == TableType.TRANSACTION_ITEMS and queue_name in ["to_filter_2", "to_agg_4"]:
+            return True
+        if table_type == TableType.TRANSACTIONS and queue_name in ["to_agg_1"]:
+            return True
+        return False
