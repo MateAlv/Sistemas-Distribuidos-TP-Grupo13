@@ -16,21 +16,27 @@ docker-image:
 
 .PHONY: docker-image
 
-docker-compose-up:
-	docker compose -f docker-compose-dev.yaml up -d --build
+up:
+	docker compose -f $0 up -d --build
 .PHONY: docker-compose-up
 
-docker-compose-down:
-	docker compose -f docker-compose-dev.yaml stop -t 1
-	docker compose -f docker-compose-dev.yaml down
+down:
+	docker compose -f $0 stop -t 1
+	docker compose -f $0 down
 .PHONY: docker-compose-down
 
-docker-compose-logs:
-	docker compose -f docker-compose-dev.yaml logs -f
+rebuild:
+	docker compose -f $0 stop -t 1
+	docker compose -f $0 down
+	docker compose -f $0 build --no-cache
+	docker compose -f $0 up -d
+
+logs:
+	docker compose -f $0 logs -f
 .PHONY: docker-compose-logs
 
 test:
-	docker compose -f docker-compose-test.yaml up --build
+	docker compose -f $0 up --build
 .PHONY: test
 
 images-clean:
@@ -45,17 +51,3 @@ images-clean:
 	docker rmi tp-distribuidos-grupo13-maximizer_max_absolute_id_1_service:latest
 
 .PHONY: images-clean
-
-test-clean:
-	docker compose -f docker-compose-test.yaml stop -t 1
-	docker compose -f docker-compose-test.yaml down
-
-.PHONY: test-clean
-
-test-rebuild:
-	docker compose -f docker-compose-test.yaml stop -t 1
-	docker compose -f docker-compose-test.yaml down
-	docker compose -f docker-compose-test.yaml build --no-cache
-	docker compose -f docker-compose-test.yaml up
-	
-.PHONY: test-rebuild

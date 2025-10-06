@@ -283,7 +283,19 @@ def generate_compose(meta: dict, nodes: dict):
 
 
 def main():
-    meta, nodes = read_config("compose-config.ini")
+
+    parser = argparse.ArgumentParser(description="Ejemplo de lectura de archivo de configuración")
+    
+    # Definimos el argumento --config
+    parser.add_argument(
+        "--config",          # nombre del parámetro
+        required=True,       # obligatorio
+        help="Archivo de configuración a usar"
+    )
+
+    args = parser.parse_args()
+
+    meta, nodes = read_config(args.config)
     compose = generate_compose(meta, nodes)
 
     output_file = meta.get("output_file", "docker-compose.yaml")
