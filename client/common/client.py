@@ -6,6 +6,7 @@ from typing import Dict, Tuple
 
 from utils.communication.directory_reader import DirectoryReader
 from utils.communication.batch_reader import BatchReader
+from utils.file_utils.result_table import ResultTableType
 from common.sender import Sender
 
 
@@ -135,46 +136,34 @@ class Client:
                 try:
                     # Leer header del resultado
                     header = sender._recv_header_id(sender._sock)
-                    
-                    if header == 5:  # H_ID_Q1_RESULT - Identificador de Q1
-                        current_query = "q1"
-                        logging.info("Cliente %s: recibiendo resultados de Query 1", self.id)
-                        continue
                         
-                    elif header == 2:  # H_ID_DATA - son resultados como ProcessChunk
+                    if header == 2:  # H_ID_DATA - son resultados como ProcessChunk
                         # Leer el ProcessChunk serializado
-                        from utils.file_utils.process_batch_reader import ProcessBatchReader
+                        from utils.file_utils.result_batch_reader import ResultBatchReader
                         from utils.communication.socket_utils import recv_exact
-                        from utils.file_utils.process_chunk import ProcessChunkHeader
+                        from utils.file_utils.result_chunk import ResultChunkHeader
                         
                         # Leer header del ProcessChunk para saber el tamaño
-                        header_data = recv_exact(sender._sock, ProcessChunkHeader.HEADER_SIZE)
-                        process_header = ProcessChunkHeader.deserialize(header_data)
+                        header_data = recv_exact(sender._sock, ResultChunkHeader.HEADER_SIZE)
+                        result_header = ResultChunkHeader.deserialize(header_data)
                         
                         # Leer el payload
-                        payload_data = recv_exact(sender._sock, process_header.size)
+                        payload_data = recv_exact(sender._sock, result_header.size)
                         
                         # Reconstruir el chunk completo
                         full_chunk_data = header_data + payload_data
-                        result_chunk = ProcessBatchReader.from_bytes(full_chunk_data)
+                        result_chunk = ResultBatchReader.from_bytes(full_chunk_data)
                         
                         results_received += 1
                         total_bytes += len(full_chunk_data)
                         
-                        logging.info("Cliente %s: resultado recibido #%d: table=%s rows=%s bytes=%s", 
-                                   self.id, results_received, result_chunk.table_type().name, 
+                        logging.info("Cliente %s: resultado recibido #%d: query=%s rows=%s bytes=%s", 
+                                   self.id, results_received, result_chunk.query_type().name, 
                                    len(result_chunk.rows), len(full_chunk_data))
-                        
-                        # Guardar resultado en archivo con nombre según el tipo de query
-                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                        if current_query == "q1":
-                            output_filename = f"q1_results_{timestamp}.csv"
-                        else:
-                            output_filename = f"result_{result_chunk.table_type().name.lower()}_{results_received}_{timestamp}.csv"
-                        output_path = os.path.join(self.output_dir, output_filename)
-                        
-                        # Convertir ProcessChunk de vuelta a formato CSV para el cliente
-                        self._save_process_chunk_as_csv(result_chunk, output_path)
+
+                        output_path = f"results_{result_chunk.query_type().name.lower()}"
+                        csv_header = self._obtain_csv_header(result_chunk.query_type())
+                        self._save_process_chunk_as_csv(result_chunk, output_path, csv_header)
                         
                         logging.info("Cliente %s: resultado guardado en: %s", self.id, output_path)
                         
@@ -202,18 +191,34 @@ class Client:
                         
         except Exception as e:
             logging.error("Cliente %s: error esperando resultados: %s", self.id, e)
+    
+    def _obtain_csv_header(query_type: ResultTableType) -> str:
+        if query_type == ResultTableType.QUERY_1:
+            return "transaction_id,final_amount\n"
+        elif query_type == ResultTableType.QUERY_2_1:
+            return "item_id,item_name,sellings_qty\n"
+        elif query_type == ResultTableType.QUERY_2_2:
+            return "item_id,item_name,profit_sum\n"
+        elif query_type == ResultTableType.QUERY_3:
+            return "year_half_created_at,store_name,tpv\n"
+        elif query_type == ResultTableType.QUERY_4:
+            return "store_name,birthdate,purchases_qty\n"
 
-    def _save_process_chunk_as_csv(self, process_chunk, output_path: str) -> None:
+    def _save_process_chunk_as_csv(self, process_chunk, output_path: str, csv_header: str) -> None:
         """
         Convierte un ProcessChunk de vuelta a formato CSV y lo guarda.
         """
         try:
-            with open(output_path, 'wb') as f:
-                # Cada row ya tiene un método serialize() que devuelve CSV en bytes
-                for row in process_chunk.rows:
-                    f.write(row.serialize())
-        except Exception as e:
-            logging.error("Cliente %s: error guardando CSV: %s", self.id, e)
-            # Fallback: guardar como binario
-            with open(output_path + '.bin', 'wb') as f:
-                f.write(process_chunk.serialize())
+            with open(output_path, "r") as f:
+                file_exists = True
+        except FileNotFoundError:
+            file_exists = False
+
+        with open(output_path, "a") as f:
+            if not file_exists:
+                f.write(csv_header)
+            for row in process_chunk.rows:
+                data = row.serialize()
+                if not data.endswith(b'\n'):
+                    data += b'\n'
+                f.write(data)

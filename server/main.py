@@ -23,6 +23,7 @@ def initialize_config():
 
     config_params = {}
     try:
+        config_params["max_number_of_chunks_in_batch"] = int(os.getenv('MAX_NUMBER_OF_CHUNKS_IN_BATCH', config["DEFAULT"]["MAX_NUMBER_OF_CHUNKS_IN_BATCH"]))
         config_params["port"] = int(os.getenv('SERVER_PORT', config["DEFAULT"]["SERVER_PORT"]))
         config_params["listen_backlog"] = int(os.getenv('SERVER_LISTEN_BACKLOG', config["DEFAULT"]["SERVER_LISTEN_BACKLOG"]))
         config_params["logging_level"] = os.getenv('LOGGING_LEVEL', config["DEFAULT"]["LOGGING_LEVEL"])
@@ -48,7 +49,7 @@ def main():
                   f"listen_backlog: {listen_backlog} | logging_level: {logging_level}")
 
     # Initialize server and start server loop
-    server = Server(port, listen_backlog)
+    server = Server(port, listen_backlog, config_params["max_number_of_chunks_in_batch"])
 
     signal.signal(signal.SIGTERM, server._begin_shutdown)
 

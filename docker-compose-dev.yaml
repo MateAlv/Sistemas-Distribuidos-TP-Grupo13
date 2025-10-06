@@ -33,11 +33,13 @@ services:
   # FILTERS
   # -------------------------
 
-  filter_year:
+  filter_year_1:
     build:
       context: .             # project root
       dockerfile: workers/filter/Dockerfile
     container_name: filter_service
+    environment:
+      - FILTER_ID=1
     command: ["python", "main.py", "--filter", "year"]
     volumes:
       - ./workers/filters/config_year.ini:/workers/filters/config_year.ini

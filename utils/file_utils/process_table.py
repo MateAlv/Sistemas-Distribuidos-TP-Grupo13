@@ -13,6 +13,18 @@ class YearHalf:
     @staticmethod
     def from_date(date: datetime.date):
         return YearHalf(date.year, 1 if date.month <= 6 else 2)
+    
+    @staticmethod
+    def from_str(string: str):
+        try:
+            year_part, half_part = string.split('-H')
+            year = int(year_part)
+            half = int(half_part)
+            if half not in (1, 2):
+                raise ValueError("El valor de 'half' debe ser 1 o 2.")
+            return YearHalf(year, half)
+        except Exception as e:
+            raise ValueError(f"Formato inválido para YearHalf: '{string}'. Debe ser 'YYYY-H1' o 'YYYY-H2'.") from e
 
 class MonthYear:
     def __init__(self, month: int, year: int):

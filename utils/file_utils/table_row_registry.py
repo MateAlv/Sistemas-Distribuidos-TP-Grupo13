@@ -1,6 +1,7 @@
-from .table_type import TableType
+from .table_type import TableType, ResultTableType
 from .process_table import *
 from .file_table import *
+from .result_table import *
 
 PROCESS_CLASSES = {
     TableType.TRANSACTIONS: TransactionsProcessRow,
@@ -18,6 +19,14 @@ FILE_CLASSES = {
     TableType.USERS: UsersFileRow,
 }
 
+RESULT_CLASSES = {
+    ResultTableType.QUERY_1: Query1ResultRow,
+    ResultTableType.QUERY_2_1: Query2_1ResultRow,
+    ResultTableType.QUERY_2_2: Query2_2ResultRow,
+    ResultTableType.QUERY_3: Query3ResultRow,
+    ResultTableType.QUERY_4: Query4ResultRow,
+}
+
 class TableRowRegistry:
     @staticmethod
     def get_process_class(table_type: TableType):
@@ -30,3 +39,9 @@ class TableRowRegistry:
         if table_type in FILE_CLASSES:
             return FILE_CLASSES[table_type]
         raise ValueError(f"No se encontró la clase de archivo para el tipo de tabla: {table_type}")
+    
+    @staticmethod
+    def get_result_class(result_table_type: ResultTableType):
+        if result_table_type in RESULT_CLASSES:
+            return RESULT_CLASSES[result_table_type]
+        raise ValueError(f"No se encontró la clase de resultado para el tipo de tabla: {result_table_type}")

@@ -30,7 +30,7 @@ class DateTime:
     def from_string(date_str: str):
         date_part, time_part = date_str.split(" ")
         date = datetime.date.fromisoformat(date_part)
-        time = datetime.time.fromisoformat(time_part)
+        time = datetime.time.fromisoformat(time_part.strip())
         return DateTime(date, time)
     
 # =========================================
