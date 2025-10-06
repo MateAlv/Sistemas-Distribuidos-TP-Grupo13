@@ -27,12 +27,13 @@ class FilterStatsMessage:
                    int(chunks_received), int(chunks_not_sent))
     
 class FilterStatsEndMessage:
-    def __init__(self, filter_id: int, client_id: int):
+    def __init__(self, filter_id: int, client_id: int, table_type: TableType):
         self.filter_id = filter_id
         self.client_id = client_id
+        self.table_type = table_type
     
     def encode(self) -> bytes:
-        return f"STATS_END;{self.filter_id};{self.client_id}".encode("utf-8")
+        return f"STATS_END;{self.filter_id};{self.client_id};{self.table_type.value}".encode("utf-8")
     
     @classmethod
     def decode(cls, message: bytes) -> "FilterStatsEndMessage":
@@ -41,6 +42,7 @@ class FilterStatsEndMessage:
         if len(parts) != 3 or parts[0] != "STATS_END":
             raise ValueError(f"Formato inválido de mensaje STATS_END: {decoded}")
         
-        _, filter_id, client_id = parts
+        _, filter_id, client_id, table_type_value = parts
+        table_type = TableType(int(table_type_value))
         
-        return cls(int(filter_id), int(client_id))
+        return cls(int(filter_id), int(client_id), table_type)

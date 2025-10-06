@@ -84,10 +84,8 @@ class Filter:
                     if stats_end.filter_id == self.id:
                         stats_results.remove(stats_msg)
                         continue
-                    logging.info(f"action: stats_end_received | type:{self.filter_type} | filter_id:{stats_end.filter_id} | cli_id:{stats_end.client_id}")
+                    logging.info(f"action: stats_end_received | type:{self.filter_type} | filter_id:{stats_end.filter_id} | cli_id:{stats_end.client_id} | table_type:{stats_end.table_type}")
                     self.delete_client_data(stats_end)
-
-
                     stats_results.remove(stats_msg)
 
             for msg in results:
@@ -155,11 +153,11 @@ class Filter:
                 results.remove(msg)
 
     def delete_client_data(self, stats_end):
-        del self.end_message_received[stats_end.client_id][stats_end.filter_id]
-        del self.already_sent_stats[(stats_end.client_id, stats_end.filter_id)]
-        del self.number_of_chunks_received_per_client[stats_end.client_id][stats_end.filter_id]
-        del self.number_of_chunks_not_sent_per_client[stats_end.client_id][stats_end.filter_id]
-        del self.number_of_chunks_to_receive[stats_end.client_id][stats_end.filter_id]
+        del self.end_message_received[stats_end.client_id][stats_end.table_type]
+        del self.already_sent_stats[(stats_end.client_id, stats_end.table_type)]
+        del self.number_of_chunks_received_per_client[stats_end.client_id][stats_end.table_type]
+        del self.number_of_chunks_not_sent_per_client[stats_end.client_id][stats_end.table_type]
+        del self.number_of_chunks_to_receive[stats_end.client_id][stats_end.table_type]
 
         if self.end_message_received[stats_end.client_id] == {}:
             del self.end_message_received[stats_end.client_id]
@@ -182,8 +180,9 @@ class Filter:
                 continue
             msg_to_send = MessageEnd(client_id, table_type, total_expected - total_not_sent)
             queue.send(msg_to_send.encode())
-        end_msg = FilterStatsEndMessage(self.id, client_id)
+        end_msg = FilterStatsEndMessage(self.id, client_id, table_type)
         self.middleware_end_exchange.send(end_msg.encode())
+        self.delete_client_data(end_msg)
             
     def apply(self, tx: TableProcessRow) -> bool:
         """
