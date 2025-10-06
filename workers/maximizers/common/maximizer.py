@@ -104,8 +104,9 @@ class Maximizer:
         accumulated_results = []
         
         if self.maximizer_type == "MAX":
-            for result in self.sellings_max.items():
-                (item_id, month_year), max_quantity = result
+            for key, value in self.sellings_max.items():
+                item_id, month_year = key
+                max_quantity = value
                 new_row = TransactionItemsProcessRow(
                     transaction_id="",
                     item_id=item_id,
@@ -113,9 +114,10 @@ class Maximizer:
                     subtotal=None,
                     created_at=DateTime(datetime.date(month_year.year, month_year.month, 1), datetime.time(0, 0)) if month_year is not None else None
                 )
-                accummulated_results.append(new_row)
-            for result in self.profit_max.items():
-                item_id, (max_profit, month_year) = result
+                accumulated_results.append(new_row)
+            for key, value in self.profit_max.items():
+                item_id, month_year = key
+                max_profit = value
                 new_row = TransactionItemsProcessRow(
                     transaction_id="",
                     item_id=item_id,
@@ -123,6 +125,6 @@ class Maximizer:
                     subtotal=max_profit,
                     created_at=DateTime(datetime.date(month_year.year, month_year.month, 1), datetime.time(0, 0)) if month_year is not None else None
                 )
-                accummulated_results.append(new_row)
-        
-        self.data_sender.send(ProcessChunk(chunk.header, accummulated_results).serialize())
+                accumulated_results.append(new_row)
+
+        self.data_sender.send(ProcessChunk(chunk.header, accumulated_results).serialize())
