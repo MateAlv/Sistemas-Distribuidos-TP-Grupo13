@@ -69,7 +69,7 @@ class Maximizer:
                     # wait for END message
                     logging.info(f"action: waiting_end_message | type:{self.maximizer_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()}")
                 else:
-                    self.publish_results(chunk, partial_results)
+                    self.publish_results(chunk)
                 
                 results.remove(data)
 
