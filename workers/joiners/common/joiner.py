@@ -47,8 +47,8 @@ class Joiner:
 
         while True:
             # Max receive initialization
-            self.data_receiver.connection.call_later(TIMEOUT, stop_max)
-            self.data_receiver.start_consuming(callback_max)
+            self.data_receiver.connection.call_later(TIMEOUT, stop)
+            self.data_receiver.start_consuming(callback)
 
             for data in results:
                 chunk = ProcessBatchReader.from_bytes(data)
