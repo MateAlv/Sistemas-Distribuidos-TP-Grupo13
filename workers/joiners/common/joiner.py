@@ -22,13 +22,14 @@ class Joiner:
         self.data = {}
         self.joiner_data = {}
         self.joiner_results = []
-        self.ready_to_join = False # Condition variable for threading
+        self.lock = threading.Lock()
+        self.ready_to_join = False # Variable compartida para indicar que se recibio el END de join data
         self.received_end_message = False
         
         if self.joiner_type == "ITEMS":
             self.data_sender = MessageMiddlewareQueue("rabbitmq", "to_merge_data")
             self.data_receiver = MessageMiddlewareQueue("rabbitmq", "to_transaction_items_to_join")
-            self.data_join_receiver = MessageMiddlewareQueue("rabbitmq", "to_join_menu_items"))
+            self.data_join_receiver = MessageMiddlewareQueue("rabbitmq", "to_join_menu_items")
             
         self.middleware_exchange_receiver = MessageMiddlewareExchange("rabbitmq", "FIRST_END_MESSAGE", [""], exchange_type="fanout")
         self.middleware_exchange_sender = MessageMiddlewareExchange("rabbitmq", "SECOND_END_MESSAGE", [""], exchange_type="fanout")
@@ -56,9 +57,11 @@ class Joiner:
                 self.save_data(chunk.rows, self.joiner_data)
                 
                 # if recibo el END:
-                self.ready_to_join = True
-                self.apply()
-                logging.info(f"action: ready_to_join | type:{self.joiner_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()}") 
+                with self.lock:
+                    self.ready_to_join = True
+                    # Modifica self.data -> Compartido con handle_data_thread
+                    self.apply()
+                    logging.info(f"action: ready_to_join | type:{self.joiner_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()}") 
 
                 results.remove(data)
                 
@@ -83,16 +86,18 @@ class Joiner:
                 chunk = ProcessBatchReader.from_bytes(data)
                 logging.info(f"action: receive_data | type:{self.joiner_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()} | rows_in:{len(chunk.rows)}")
                 
-                # wait for END message of Join Table
-                if self.ready_to_join:
-                    logging.info(f"action: joining_data | type:{self.joiner_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()}")
-                    self.apply()
-                    if self.received_end_message:
-                        self.publish_results()
-                        logging.info(f"action: sent_end_message | type:{self.joiner_type}")
-                else:
+                                        
+                with self.lock:
                     self.save_data(chunk)
-                    logging.debug(f"action: waiting_join_data | type:{self.joiner_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()}")
+                    # wait for END message of Join Table
+                    if self.ready_to_join:
+                        logging.info(f"action: joining_data | type:{self.joiner_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()}")
+                        self.apply()
+                        if self.received_end_message:
+                            self.publish_results()
+                            logging.info(f"action: sent_end_message | type:{self.joiner_type}")
+                    else:
+                        logging.debug(f"action: waiting_join_data | type:{self.joiner_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()}")
  
                 results.remove(data)
     
