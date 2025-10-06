@@ -1,5 +1,9 @@
 middleware/__pycache__/
 .data/
+.data-test/
+.data-test-mini/
+.results/
 .vscode/
 .venv/
+docker-compose.yaml
 __pycache__/

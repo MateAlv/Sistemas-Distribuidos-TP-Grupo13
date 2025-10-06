@@ -1,6 +1,8 @@
 SHELL := /bin/bash
 PWD := $(shell pwd)
 
+DOCKER ?= docker-compose.yaml
+
 default: docker-image
 
 all: docker-image
@@ -16,33 +18,38 @@ docker-image:
 
 .PHONY: docker-image
 
-docker-compose-up:
-	docker compose -f docker-compose-dev.yaml up -d --build
+up:
+	docker compose -f ${DOCKER} up -d --build
 .PHONY: docker-compose-up
 
-docker-compose-down:
-	docker compose -f docker-compose-dev.yaml stop -t 1
-	docker compose -f docker-compose-dev.yaml down
+down:
+	docker compose -f ${DOCKER} stop -t 1
+	docker compose -f ${DOCKER} down
 .PHONY: docker-compose-down
 
-docker-compose-logs:
-	docker compose -f docker-compose-dev.yaml logs -f
+rebuild:
+	docker compose -f ${DOCKER} stop -t 1
+	docker compose -f ${DOCKER} down
+	docker compose -f ${DOCKER} build --no-cache
+	docker compose -f ${DOCKER} up -d
+
+logs:
+	docker compose -f ${DOCKER} logs -f
 .PHONY: docker-compose-logs
 
 test:
-	docker compose -f docker-compose-test.yaml up --build
+	docker compose -f ${DOCKER} up --build
 .PHONY: test
 
-test-clean:
-	docker compose -f docker-compose-test.yaml stop -t 1
-	docker compose -f docker-compose-test.yaml down
-	
-.PHONY: test-clean
+images-clean:
+	docker rmi tp-distribuidos-grupo13-server:latest 
+	docker rmi tp-distribuidos-grupo13-client_id_1:latest 
+	docker rmi tp-distribuidos-grupo13-filter_year_id_1_service:latest   
+	docker rmi tp-distribuidos-grupo13-aggregator_products_id_1_service:latest 
+	docker rmi tp-distribuidos-grupo13-joiner_items_id_1_service:latest 
+	docker rmi tp-distribuidos-grupo13-maximizer_max_1_3_id_1_service:latest 
+	docker rmi tp-distribuidos-grupo13-maximizer_max_4_6_id_1_service:latest 
+	docker rmi tp-distribuidos-grupo13-maximizer_max_7_8_id_1_service:latest 
+	docker rmi tp-distribuidos-grupo13-maximizer_max_absolute_id_1_service:latest
 
-test-rebuild:
-	docker compose -f docker-compose-test.yaml stop -t 1
-	docker compose -f docker-compose-test.yaml down
-	docker compose -f docker-compose-test.yaml build --no-cache
-	docker compose -f docker-compose-test.yaml up
-	
-.PHONY: test-rebuild
+.PHONY: images-clean

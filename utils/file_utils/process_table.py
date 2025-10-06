@@ -119,7 +119,7 @@ class TransactionsProcessRow(TableProcessRow):
 #       - month_year_created_at: MonthYear
 # =========================================
 
-class TransactionsItemsProcessRow(TableProcessRow):
+class TransactionItemsProcessRow(TableProcessRow):
     def __init__(self, transaction_id: str, item_id: int, quantity: int, subtotal: float, created_at: DateTime):
         self.transaction_id = transaction_id
         self.item_id = item_id
@@ -139,7 +139,7 @@ class TransactionsItemsProcessRow(TableProcessRow):
         return f"{transaction_id_str},{item_id_str},{quantity_str},{subtotal_str},{created_at_str},{month_year_created_at_str}\n".encode("utf-8")
 
     def from_file_row(file_row: TransactionsItemsFileRow):
-        return TransactionsItemsProcessRow(
+        return TransactionItemsProcessRow(
             file_row.transaction_id,
             file_row.item_id,
             file_row.quantity,
@@ -158,7 +158,7 @@ class TransactionsItemsProcessRow(TableProcessRow):
         subtotal = float(parts[3]) if len(parts[3]) > 0 else None
         created_at = DateTime.from_string(parts[4]) if len(parts[4]) > 0 else None
 
-        row = TransactionsItemsProcessRow(transaction_id, item_id, quantity, subtotal, created_at)
+        row = TransactionItemsProcessRow(transaction_id, item_id, quantity, subtotal, created_at)
         consumed = len(line.encode("utf-8")) + 1
         
         return row, consumed

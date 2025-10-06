@@ -221,6 +221,7 @@ class Filter:
         elif self.filter_type == "amount":
             return tx.final_amount >= self.cfg["min_amount"]
 
+
         logging.error(f"Filtro desconocido: {self.filter_type}")
         return False
     
