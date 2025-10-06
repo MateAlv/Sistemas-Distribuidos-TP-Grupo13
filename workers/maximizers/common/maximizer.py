@@ -101,7 +101,7 @@ class Maximizer:
     
     def publish_results(self, chunk):
         
-        acummulated_results = []
+        accumulated_results = []
         
         if self.maximizer_type == "MAX":
             for result in self.sellings_max.items():
