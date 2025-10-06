@@ -36,7 +36,17 @@ test:
 test-clean:
 	docker compose -f docker-compose-test.yaml stop -t 1
 	docker compose -f docker-compose-test.yaml down
-	
+	docker rmi tp-distribuidos-grupo13-server:latest 
+	docker rmi tp-distribuidos-grupo13-client_id_1:latest 
+	docker rmi tp-distribuidos-grupo13-filter_year_id_1_service:latest   
+	docker rmi tp-distribuidos-grupo13-aggregator_products_id_1_service:latest 
+	docker rmi tp-distribuidos-grupo13-joiner_items_id_1_service:latest 
+	docker rmi tp-distribuidos-grupo13-maximizer_max_1_3_id_1_service:latest 
+	docker rmi tp-distribuidos-grupo13-maximizer_max_4_6_id_1_service:latest 
+	docker rmi tp-distribuidos-grupo13-maximizer_max_7_8_id_1_service:latest 
+	docker rmi tp-distribuidos-grupo13-maximizer_max_absolute_id_1_service:latest
+
+
 .PHONY: test-clean
 
 test-rebuild:
