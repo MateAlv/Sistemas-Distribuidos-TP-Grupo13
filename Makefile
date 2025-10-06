@@ -1,6 +1,8 @@
 SHELL := /bin/bash
 PWD := $(shell pwd)
 
+DOCKER ?= docker-compose.yaml
+
 default: docker-image
 
 all: docker-image
@@ -17,26 +19,26 @@ docker-image:
 .PHONY: docker-image
 
 up:
-	docker compose -f $0 up -d --build
+	docker compose -f ${DOCKER} up -d --build
 .PHONY: docker-compose-up
 
 down:
-	docker compose -f $0 stop -t 1
-	docker compose -f $0 down
+	docker compose -f ${DOCKER} stop -t 1
+	docker compose -f ${DOCKER} down
 .PHONY: docker-compose-down
 
 rebuild:
-	docker compose -f $0 stop -t 1
-	docker compose -f $0 down
-	docker compose -f $0 build --no-cache
-	docker compose -f $0 up -d
+	docker compose -f ${DOCKER} stop -t 1
+	docker compose -f ${DOCKER} down
+	docker compose -f ${DOCKER} build --no-cache
+	docker compose -f ${DOCKER} up -d
 
 logs:
-	docker compose -f $0 logs -f
+	docker compose -f ${DOCKER} logs -f
 .PHONY: docker-compose-logs
 
 test:
-	docker compose -f $0 up --build
+	docker compose -f ${DOCKER} up --build
 .PHONY: test
 
 images-clean:

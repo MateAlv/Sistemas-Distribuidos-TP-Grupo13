@@ -5,4 +5,5 @@ middleware/__pycache__/
 .results/
 .vscode/
 .venv/
+docker-compose.yaml
 __pycache__/
