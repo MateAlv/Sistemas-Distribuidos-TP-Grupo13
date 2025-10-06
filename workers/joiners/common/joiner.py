@@ -56,9 +56,9 @@ class Joiner:
                 self.save_data(chunk.rows, self.joiner_data)
                 
                 # if recibo el END:
-                    # wait for END message
-                    self.ready_to_join = True
-                    logging.info(f"action: ready_to_join | type:{self.joiner_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()}") 
+                self.ready_to_join = True
+                self.apply()
+                logging.info(f"action: ready_to_join | type:{self.joiner_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()}") 
 
                 results.remove(data)
                 
@@ -83,27 +83,24 @@ class Joiner:
                 chunk = ProcessBatchReader.from_bytes(data)
                 logging.info(f"action: receive_data | type:{self.joiner_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()} | rows_in:{len(chunk.rows)}")
                 
-                self.save_data(chunk)
-                # fuera del else:
-                # wait for END message
-                if self.received_end_message:
-                    if self.ready_to_join:
-                        logging.info(f"action: joining_data | type:{self.joiner_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()}")
-                        self.apply()
+                # wait for END message of Join Table
+                if self.ready_to_join:
+                    logging.info(f"action: joining_data | type:{self.joiner_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()}")
+                    self.apply()
+                    if self.received_end_message:
                         self.publish_results()
-                    else:
-                        # wait for ready_to_join
-                        logging.debug(f"action: waiting_join_data | type:{self.joiner_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()}")
+                        logging.info(f"action: sent_end_message | type:{self.joiner_type}")
                 else:
-                    logging.debug(f"action: waiting_for_end_message | type:{self.joiner_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()}")
-
+                    self.save_data(chunk)
+                    logging.debug(f"action: waiting_join_data | type:{self.joiner_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()}")
+ 
                 results.remove(data)
     
     def run(self):
         logging.info(f"Joiner iniciado. Tipo: {self.joiner_type}")
         # Iniciar hilos para manejar data y join_data
-        data_handler_thread = threading.Thread(target=self.handle_data)
-        join_data_handler_thread = threading.Thread(target=self.handle_join_data)
+        data_handler_thread = threading.Thread(target=self.handle_data, name="DataHandler")
+        join_data_handler_thread = threading.Thread(target=self.handle_join_data, name="JoinDataHandler")
         data_handler_thread.start() 
         join_data_handler_thread.start()
         
@@ -141,7 +138,7 @@ class Joiner:
             
         return True
 
-    def apply(self, rows: list[TableProcessRow]) -> bool:
+    def apply(self) -> bool:
         """
         Aplica el agrupador según el tipo configurado.
         """

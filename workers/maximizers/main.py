@@ -21,7 +21,7 @@ def initialize_config():
 
         if max_type != "MAX" and max_type != "TOP3":
             raise ValueError(f"Tipo de maximizer inválido: {max_type}")
-        if max_range != "1" and max_range != "2" and max_range != "3":
+        if max_range not in ["0", "1", "2", "3"] :
             raise ValueError(f"Rango de maximizer inválido: {max_range}")
 
     except KeyError as e:

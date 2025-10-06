@@ -35,8 +35,8 @@ class Maximizer:
                     self.data_receiver = MessageMiddlewareQueue("rabbitmq", "to_max_4_6")
                 elif self.maximizer_range == "3":
                     self.data_receiver = MessageMiddlewareQueue("rabbitmq", "to_max_7_8")
-            else:
-                raise ValueError(f"Rango de maximizer inválido: {self.maximizer_range}")
+                else:
+                    raise ValueError(f"Rango de maximizer inválido: {self.maximizer_range}")
             
 
         self.middleware_exchange_receiver = MessageMiddlewareExchange("rabbitmq", "FIRST_END_MESSAGE", [""], exchange_type="fanout")
@@ -56,20 +56,20 @@ class Maximizer:
 
         while True:
             # Max receive initialization
-            self.data_receiver.connection.call_later(TIMEOUT, stop_max)
-            self.data_receiver.start_consuming(callback_max)
+            self.data_receiver.connection.call_later(TIMEOUT, stop)
+            self.data_receiver.start_consuming(callback)
 
             for data in results:
                 chunk = ProcessBatchReader.from_bytes(data)
                 logging.info(f"action: maximize | type:{self.maximizer_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()} | rows_in:{len(chunk.rows)}")
                 
-                self.apply(chunk.rows)
+                self.apply(chunk)
                 
                 if self.is_absolute_max():
                     # wait for END message
                     logging.info(f"action: waiting_end_message | type:{self.maximizer_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()}")
-                
-                self.publish_results(chunk, partial_results)
+                else:
+                    self.publish_results(chunk, partial_results)
                 
                 results.remove(data)
 
@@ -78,18 +78,18 @@ class Maximizer:
         Actualiza los máximos relativos o absolutos.
         """
         for row in rows:
-            key = (row.item_id, row.month_year)  # month_year es un objeto MonthYear
+            key = (row.item_id, row.month_year_created_at)  # month_year es un objeto MonthYear
             if key not in self.sellings_max or row.quantity > self.sellings_max[key][0]:
                 self.sellings_max[key] = row.quantity
             if key not in self.profit_max or row.subtotal > self.profit_max[key][0]:
                 self.profit_max[key] = row.subtotal
     
-    def apply(self, rows: list[TableProcessRow]) -> bool:
+    def apply(self, chunk) -> bool:
         """
         Aplica el agrupador según el tipo configurado.
         """
         if self.maximizer_type == "MAX":
-            self.update_max(rows)
+            self.update_max(chunk.rows)
             if self.is_absolute_max():
                 logging.info(f"action: maximizer_result | type:{self.maximizer_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()} | results_out: Sellings_max: {self.sellings_max} - Profit_max: {self.profit_max}")
             else:

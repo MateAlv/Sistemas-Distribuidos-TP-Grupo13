@@ -5,8 +5,8 @@ import logging
 import argparse
 from configparser import ConfigParser
 
-# Importar Maximizer
-from common import Maximizer
+# Importar Joiners
+from common import Joiner
     
 # Configurar logging de pika MUY temprano y de forma agresiva
 logging.getLogger('pika').setLevel(logging.CRITICAL)
