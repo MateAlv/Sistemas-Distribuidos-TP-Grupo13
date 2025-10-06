@@ -28,3 +28,10 @@ class TableType(Enum):
                     
         raise ValueError(f"No se pudo determinar el tipo de tabla para el path: {path}")
 # =========================================
+
+class ResultTableType(Enum):
+    QUERY_1 = 1
+    QUERY_2_1 = 2
+    QUERY_2_2 = 3
+    QUERY_3 = 4
+    QUERY_4 = 5

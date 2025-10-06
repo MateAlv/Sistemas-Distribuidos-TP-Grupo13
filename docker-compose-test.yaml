@@ -56,18 +56,18 @@ services:
       server:
         condition: service_started
     
-  filter_year_2:
+  filter_hour_1:
     build:
       context: .   
       dockerfile: workers/filter/Dockerfile
-    container_name: filter_year_2
-    command: ["python", "main.py", "--filter", "year"]
+    container_name: filter_hour_1
+    command: ["python", "main.py", "--filter", "hour"]
     environment:
       - PYTHONUNBUFFERED=1
       - LOGGING_LEVEL=INFO
-      - WORKER_ID=2
+      - WORKER_ID=1
     volumes:
-      - ./workers/filter/config/config_year.ini:/workers/filter/config/config_year.ini
+      - ./workers/filter/config/config_hour.ini:/workers/filter/config/config_hour.ini
       - ./utils:/workers/utils:ro
       - ./middleware:/workers/middleware:ro
     networks:
@@ -75,7 +75,27 @@ services:
     depends_on:
       server:
         condition: service_started
-      
+
+  filter_amount_1:
+    build:
+      context: .   
+      dockerfile: workers/filter/Dockerfile
+    container_name: filter_amount_1
+    command: ["python", "main.py", "--filter", "amount"]
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOGGING_LEVEL=INFO
+      - WORKER_ID=1
+    volumes:
+      - ./workers/filter/config/config_amount.ini:/workers/filter/config/config_amount.ini
+      - ./utils:/workers/utils:ro
+      - ./middleware:/workers/middleware:ro
+    networks:
+      - testing_net
+    depends_on:
+      server:
+        condition: service_started
+    
   client1:
     container_name: client1
     build:

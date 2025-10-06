@@ -1,13 +1,14 @@
 import logging
 from utils.file_utils.process_table import TableProcessRow
 from utils.file_utils.process_chunk import ProcessChunk
+from utils.file_utils.result_chunk import ResultChunkHeader, ResultChunk
 from utils.file_utils.process_batch_reader import ProcessBatchReader
-from utils.file_utils.end_message import MessageEnd
-from utils.file_utils.table_type import TableType
-from middleware.middleware_interface import MessageMiddlewareQueue, MessageMiddlewareExchange
+from utils.file_utils.end_messages import MessageEnd, MessageQueryEnd
+from utils.file_utils.table_type import TableType, ResultTableType
+from middleware.middleware_interface import MessageMiddlewareQueue, MessageMiddlewareExchange, TIMEOUT
 from .filter_stats_messages import FilterStatsMessage, FilterStatsEndMessage
 
-TIMEOUT = 3
+
 
 class Filter:
     def __init__(self, cfg: dict):
@@ -20,30 +21,29 @@ class Filter:
         self.number_of_chunks_received_per_client = {}
         self.number_of_chunks_not_sent_per_client = {}
         self.number_of_chunks_to_receive = {}
-        self.middleware_queue_sender = {}
         self.already_sent_stats = {}
+        self.middleware_queue_sender = {}
 
         self.middleware_end_exchange = MessageMiddlewareExchange("rabbitmq", f"end_exchange_filter_{self.filter_type}", [""], "fanout")
         
         if self.filter_type == "year":
             self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", "to_filter_1")
             self.middleware_queue_sender["to_filter_2"] = MessageMiddlewareQueue("rabbitmq", "to_filter_2")
-            self.middleware_queue_sender["to_agg_1"] = MessageMiddlewareQueue("rabbitmq", "to_agg_1")
+            self.middleware_queue_sender["to_agg_1+2"] = MessageMiddlewareQueue("rabbitmq", "to_agg_1+2")
             self.middleware_queue_sender["to_agg_4"] = MessageMiddlewareQueue("rabbitmq", "to_agg_4")
         elif self.filter_type == "hour":
             self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", "to_filter_2")
-            self.middleware_queue_sender["to_filter_3"] = MessageMiddlewareQueue("rabbitmq", "to_filter_amount")
+            self.middleware_queue_sender["to_filter_3"] = MessageMiddlewareQueue("rabbitmq", "to_filter_3")
             self.middleware_queue_sender["to_agg_3"] = MessageMiddlewareQueue("rabbitmq", "to_agg_3")
         elif self.filter_type == "amount":
-            self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", "to_filter_amount")
-            self.middleware_queue_sender["to_merge_data"] = MessageMiddlewareQueue("rabbitmq", "to_merge_data")
+            self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", "to_filter_3")
         else:
             raise ValueError(f"Tipo de filtro inválido: {self.filter_type}")
 
 
 
     def run(self):
-        logging.info(f"Filtro iniciado. Tipo: {self.filter_type}")
+        logging.info(f"Filtro iniciado. Tipo: {self.filter_type}, ID: {self.id}")
         results = []
         stats_results = []
         def callback(msg): results.append(msg)
@@ -93,6 +93,10 @@ class Filter:
                 try:
                     chunk = ProcessBatchReader.from_bytes(msg)
                     client_id = chunk.client_id()
+
+                    if self.filter_type == "amount" and client_id not in self.middleware_queue_sender:
+                        self.middleware_queue_sender[f"to_merge_data_{client_id}"] = MessageMiddlewareQueue("rabbitmq", f"to_merge_data_{client_id}")
+
                     table_type = chunk.table_type()
                     logging.info(f"action: filter | type:{self.filter_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()} | rows_in:{len(chunk.rows)}")
                     filtered_rows = [tx for tx in chunk.rows if self.apply(tx)]
@@ -102,7 +106,15 @@ class Filter:
                             logging.info(f"action: sending_to_queue | type:{self.filter_type} | queue:{queue_name} | rows:{len(filtered_rows)}")
                             if self._should_skip_queue(table_type, queue_name):
                                 continue
-                            queue.send(ProcessChunk(chunk.header, filtered_rows).serialize())
+                            if self.filter_type != "amount":
+                                queue.send(ProcessChunk(chunk.header, filtered_rows).serialize())
+                            else:
+                                from utils.file_utils.result_table import Query1ResultRow
+                                converted_rows = [
+                                    Query1ResultRow(tx.transaction_id, tx.final_amount)
+                                    for tx in filtered_rows
+                                ]
+                                queue.send(ResultChunk(ResultChunkHeader(client_id, ResultTableType.QUERY_1), converted_rows).serialize())
                     else:
                         logging.info(f"action: no_rows_to_send | type:{self.filter_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()}")
                         self._ensure_dict_entry(self.number_of_chunks_not_sent_per_client, client_id, table_type)
@@ -110,7 +122,7 @@ class Filter:
                     
                     self._ensure_dict_entry(self.number_of_chunks_received_per_client, client_id, table_type)
                     self.number_of_chunks_received_per_client[client_id][table_type] += 1
-                    if self.client_id not in self.end_message_received:
+                    if client_id not in self.end_message_received:
                         self.end_message_received[client_id] = {}
 
                     if self.end_message_received[client_id].get(table_type, False):
@@ -153,17 +165,18 @@ class Filter:
                     self.middleware_end_exchange.send(stats_msg.encode())
 
                     if self._can_send_end_message(total_expected, client_id, table_type):
-                        self._send_end_message(chunk, client_id, table_type, total_expected, self.number_of_chunks_not_sent_per_client[client_id][table_type])
+                        self._send_end_message(client_id, table_type, total_expected, self.number_of_chunks_not_sent_per_client[client_id][table_type])
 
                 results.remove(msg)
 
     def delete_client_data(self, stats_end):
         del self.end_message_received[stats_end.client_id][stats_end.table_type]
-        del self.already_sent_stats[(stats_end.client_id, stats_end.table_type)]
         del self.number_of_chunks_received_per_client[stats_end.client_id][stats_end.table_type]
         del self.number_of_chunks_not_sent_per_client[stats_end.client_id][stats_end.table_type]
         del self.number_of_chunks_to_receive[stats_end.client_id][stats_end.table_type]
 
+        if (stats_end.client_id, stats_end.table_type) in self.already_sent_stats:
+            del self.already_sent_stats[(stats_end.client_id, stats_end.table_type)]
         if self.end_message_received[stats_end.client_id] == {}:
             del self.end_message_received[stats_end.client_id]
         if self.number_of_chunks_received_per_client[stats_end.client_id] == {}:
@@ -176,18 +189,24 @@ class Filter:
     def _can_send_end_message(self, total_expected, client_id, table_type):
         return total_expected == self.number_of_chunks_received_per_client[client_id][table_type] and self.id == 1
 
-    def _send_end_message(self, chunk, client_id, table_type, total_expected, total_not_sent):
-        logging.info(f"action: sending_end_message | type:{self.filter_type} | cli_id:{client_id} | file_type:{table_type} | total_chunks:{chunk.count()}")
+    def _send_end_message(self, client_id, table_type, total_expected, total_not_sent):
+        logging.info(f"action: sending_end_message | type:{self.filter_type} | cli_id:{client_id} | file_type:{table_type.name} | total_chunks:{total_expected-total_not_sent}")
         
         for queue_name, queue in self.middleware_queue_sender.items():
-            logging.info(f"action: sending_end_to_queue | type:{self.filter_type} | queue:{queue_name} | total_chunks:{chunk.count()}")
+            logging.info(f"action: sending_end_to_queue | type:{self.filter_type} | queue:{queue_name} | total_chunks:{total_expected-total_not_sent}")
             if self._should_skip_queue(table_type, queue_name):
                 continue
-            msg_to_send = MessageEnd(client_id, table_type, total_expected - total_not_sent)
+            msg_to_send = self._end_message_to_send(client_id, table_type, total_expected, total_not_sent)
             queue.send(msg_to_send.encode())
         end_msg = FilterStatsEndMessage(self.id, client_id, table_type)
         self.middleware_end_exchange.send(end_msg.encode())
         self.delete_client_data(end_msg)
+
+    def _end_message_to_send(self, client_id, table_type, total_expected, total_not_sent):
+        if self.filter_type != "amount":
+            return MessageEnd(client_id, table_type, total_expected - total_not_sent)
+        else:
+            return MessageQueryEnd(client_id, ResultTableType.QUERY_1, total_expected - total_not_sent)
             
     def apply(self, tx: TableProcessRow) -> bool:
         """
@@ -200,7 +219,7 @@ class Filter:
             return self.cfg["hour_start"] <= tx.created_at.time.hour <= self.cfg["hour_end"]
 
         elif self.filter_type == "amount":
-            return tx.total_amount >= self.cfg["min_amount"]
+            return tx.final_amount >= self.cfg["min_amount"]
 
         logging.error(f"Filtro desconocido: {self.filter_type}")
         return False
@@ -214,6 +233,6 @@ class Filter:
     def _should_skip_queue(self, table_type: TableType, queue_name: str) -> bool:
         if table_type == TableType.TRANSACTION_ITEMS and queue_name in ["to_filter_2", "to_agg_4"]:
             return True
-        if table_type == TableType.TRANSACTIONS and queue_name in ["to_agg_1"]:
+        if table_type == TableType.TRANSACTIONS and queue_name in ["to_agg_1+2"]:
             return True
         return False
