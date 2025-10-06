@@ -33,9 +33,7 @@ test:
 	docker compose -f docker-compose-test.yaml up --build
 .PHONY: test
 
-test-clean:
-	docker compose -f docker-compose-test.yaml stop -t 1
-	docker compose -f docker-compose-test.yaml down
+images-clean:
 	docker rmi tp-distribuidos-grupo13-server:latest 
 	docker rmi tp-distribuidos-grupo13-client_id_1:latest 
 	docker rmi tp-distribuidos-grupo13-filter_year_id_1_service:latest   
@@ -46,6 +44,11 @@ test-clean:
 	docker rmi tp-distribuidos-grupo13-maximizer_max_7_8_id_1_service:latest 
 	docker rmi tp-distribuidos-grupo13-maximizer_max_absolute_id_1_service:latest
 
+.PHONY: images-clean
+
+test-clean:
+	docker compose -f docker-compose-test.yaml stop -t 1
+	docker compose -f docker-compose-test.yaml down
 
 .PHONY: test-clean
 
