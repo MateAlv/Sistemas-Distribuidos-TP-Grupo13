@@ -68,7 +68,8 @@ class Filter:
                         continue
                     logging.info(f"action: stats_received | type:{self.filter_type} | filter_id:{stats.filter_id} | cli_id:{stats.client_id} | file_type:{stats.table_type} | chunks_received:{stats.chunks_received} | chunks_not_sent:{stats.chunks_not_sent}")
                     if stats.client_id not in self.end_message_received:
-                        self.end_message_received[stats.client_id] = True
+                        self.end_message_received[stats.client_id] = {}
+                    self.end_message_received[stats.client_id][stats.table_type] = True
 
                     self._ensure_dict_entry(self.number_of_chunks_received_per_client, stats.client_id, stats.table_type)
                     self._ensure_dict_entry(self.number_of_chunks_not_sent_per_client, stats.client_id, stats.table_type)
@@ -109,8 +110,10 @@ class Filter:
                     
                     self._ensure_dict_entry(self.number_of_chunks_received_per_client, client_id, table_type)
                     self.number_of_chunks_received_per_client[client_id][table_type] += 1
-                    
-                    if self.end_message_received.get(client_id, False):
+                    if self.client_id not in self.end_message_received:
+                        self.end_message_received[client_id] = {}
+
+                    if self.end_message_received[client_id].get(table_type, False):
                         total_expected = self.number_of_chunks_to_receive[client_id][table_type]
                         self._ensure_dict_entry(self.number_of_chunks_received_per_client, client_id, table_type)
                         self._ensure_dict_entry(self.number_of_chunks_not_sent_per_client, client_id, table_type)
@@ -132,7 +135,9 @@ class Filter:
                     end_message = MessageEnd.decode(msg)
                     client_id = end_message.client_id()
                     table_type = end_message.table_type()
-                    self.end_message_received[client_id] = True
+                    if client_id not in self.end_message_received:
+                        self.end_message_received[client_id] = {}
+                    self.end_message_received[client_id][table_type] = True
                     total_expected = end_message.total_chunks()
                     self._ensure_dict_entry(self.number_of_chunks_received_per_client, client_id, table_type)
 
