@@ -150,17 +150,21 @@ def define_aggregator(meta: dict, compose: dict, nodo: str, index: int):
 
 def get_maximizer_range(nodo: str):
     # MAXIMIZER_MAX_ABSOLUTE -> 0
-    # MAXIMIZER_MAX_1_3 -> 1
-    # MAXIMIZER_MAX_4_6 -> 2
-    # MAXIMIZER_MAX_7_8 -> 3
+    # MAXIMIZER_MAX_1 -> 1
+    # MAXIMIZER_MAX_2 -> 2
+    # MAXIMIZER_MAX_3-> 3
+    # MAXIMIZER_TOP3_ABSOLUTE -> 0
+    # MAXIMIZER_TOP3_1 -> 1
+    # MAXIMIZER_TOP3_2 -> 2
+    # MAXIMIZER_TOP3_3-> 3
     r = nodo.split("_")[2]
     if r == "ABSOLUTE":
         return 0
     elif r == "1":
         return 1
-    elif r == "4":
+    elif r == "2":
         return 2
-    elif r == "7":
+    elif r == "3":
         return 3
 
 def is_maximizer(nodo: str):
@@ -193,7 +197,18 @@ def define_maximizer(meta: dict, compose: dict, nodo: str, index: int):
     }
 
 def is_joiner(nodo: str):
+    # JOINER_ITEMS
+    # JOINER_STORES_TPV
+    # JOINER_STORES_TOP3
+    # JOINER_USERS
     return nodo.startswith("JOINER_")
+
+def get_joiner_type(nodo: str):
+    # JOINER_ITEMS -> ITEMS
+    # JOINER_STORES_TPV -> STORES_TPV
+    # JOINER_STORES_TOP3 -> STORES_TOP3
+    # JOINER_USERS -> USERS
+    return nodo.split("_", 1)[1].upper()
 
 def define_joiner(meta: dict, compose: dict, nodo: str, index: int):
     service_name = f"{nodo.lower()}_id_{index}_service"
@@ -207,7 +222,7 @@ def define_joiner(meta: dict, compose: dict, nodo: str, index: int):
         "environment": [
             "PYTHONUNBUFFERED=1",
             f"LOGGING_LEVEL={meta['logging_level']}",
-            f"JOINER_TYPE={nodo.split('_')[1].upper()}",
+            f"JOINER_TYPE={get_joiner_type(nodo)}",
         ],
         "volumes": [
             "./utils:/workers/utils:ro",

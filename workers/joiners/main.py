@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 
+from common.joiner import StoresTop3Joiner
 import os
 import logging
 import argparse
 from configparser import ConfigParser
 
 # Importar Joiners
-from common import Joiner
+from common import MenuItemsJoiner, StoresTpvJoiner, StoresTop3Joiner, UsersJoiner
+from common import ITEMS_JOINER, STORES_TPV_JOINER, STORES_TOP3_JOINER, USERS_JOINER
     
 # Configurar logging de pika MUY temprano y de forma agresiva
 logging.getLogger('pika').setLevel(logging.CRITICAL)
@@ -18,7 +20,7 @@ def initialize_config():
         logging_level = os.getenv("LOGGING_LEVEL", "DEBUG")
         join_type = os.getenv("JOINER_TYPE")
 
-        if join_type != "ITEMS" and join_type != "STORES" and join_type != "USERS":
+        if join_type != ITEMS_JOINER and join_type != STORES_TPV_JOINER and join_type != STORES_TOP3_JOINER and join_type != USERS_JOINER:
             raise ValueError(f"Tipo de joiner inválido: {join_type}")
 
     except KeyError as e:
@@ -56,7 +58,18 @@ def main():
 
     logging.debug(f"action: config | result: success | joiner_type:{joiner_type} | log_level:{logging_level}")
 
-    joiner = Joiner(joiner_type)
+    if joiner_type == ITEMS_JOINER:
+        logging.info("Iniciando Joiner de Items...")
+        joiner = MenuItemsJoiner(joiner_type)
+    elif joiner_type == STORES_TPV_JOINER:
+        logging.info("Iniciando Joiner de Stores TPV...")
+        joiner = StoresTpvJoiner(joiner_type)
+    elif joiner_type == STORES_TOP3_JOINER:
+        logging.info("Iniciando Joiner de Stores Top3...")
+        joiner = StoresTop3Joiner(joiner_type)
+    elif joiner_type == USERS_JOINER:
+        logging.info("Iniciando Joiner de Users...")
+        joiner = UsersJoiner(joiner_type)
 
     joiner.run()
 
