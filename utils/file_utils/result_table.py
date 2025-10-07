@@ -1,6 +1,6 @@
 from .table_type import ResultTableType
 from .file_table import CSV_DELIMITER
-from .process_table import YearHalf
+from .process_table import YearHalf, MonthYear
 from datetime import date
 
 # =========================================
@@ -41,52 +41,58 @@ class Query1ResultRow(TableResultRow):
 
 # =========================================
 # QUERY 2.1
+# Max sellings por producto
 # =========================================
 class Query2_1ResultRow(TableResultRow):
-    def __init__(self, product_id: int, product_name: str, quantity: int):
-        self.product_id = product_id
-        self.product_name = product_name
-        self.quantity = quantity
+    def __init__(self, item_id: int, item_name: str, sellings_quantity: int, year_month_created_at: str = None):
+        self.item_id = item_id
+        self.item_name = item_name
+        self.sellings_quantity = sellings_quantity
+        self.year_month_created_at = year_month_created_at
 
     def serialize(self) -> bytes:
-        return f"{self.product_id},{self.product_name},{self.quantity}\n".encode("utf-8")
-    
+        return f"{str(self.year_month_created_at)},{self.item_id},{self.item_name},{self.sellings_quantity}\n".encode("utf-8")
+
     @staticmethod
     def deserialize(data: bytes):
         line = data.split(b"\n", 1)[0].decode("utf-8")
         parts = line.split(CSV_DELIMITER)
 
-        product_id = int(parts[0]) if len(parts) > 0 and parts[0] else None
-        product_name = parts[1] if len(parts) > 1 and parts[1] else None
-        quantity = int(parts[2]) if len(parts) > 2 and parts[2] else None
+        year_month_created_at = MonthYear.from_str(parts[0]) if len(parts) > 0 and parts[0] else None
+        item_id = int(parts[1]) if len(parts) > 1 and parts[1] else None
+        item_name = parts[2] if len(parts) > 2 and parts[2] else None
+        sellings_quantity = int(parts[3]) if len(parts) > 3 and parts[3] else None
 
-        row = Query2_1ResultRow(product_id, product_name, quantity)
+        row = Query2_1ResultRow(item_id, item_name, sellings_quantity, year_month_created_at)
         consumed = len(line.encode("utf-8")) + 1
         return row, consumed
 
 
 # =========================================
 # QUERY 2.2
+# Max profit por producto
 # =========================================
 class Query2_2ResultRow(TableResultRow):
-    def __init__(self, product_id: int, product_name: str, profit_sum: float):
-        self.product_id = product_id
-        self.product_name = product_name
+    def __init__(self, item_id: int, item_name: str, profit_sum: float, year_month_created_at: str = None):
+        self.item_id = item_id
+        self.item_name = item_name
         self.profit_sum = profit_sum
+        self.year_month_created_at = year_month_created_at
 
     def serialize(self) -> bytes:
-        return f"{self.product_id},{self.product_name},{self.profit_sum}\n".encode("utf-8")
+        return f"{str(self.year_month_created_at)},{self.item_id},{self.item_name},{self.profit_sum}\n".encode("utf-8")
 
     @staticmethod
     def deserialize(data: bytes):
         line = data.split(b"\n", 1)[0].decode("utf-8")
         parts = line.split(CSV_DELIMITER)
 
-        product_id = int(parts[0]) if len(parts) > 0 and parts[0] else None
-        product_name = parts[1] if len(parts) > 1 and parts[1] else None
-        profit_sum = float(parts[2]) if len(parts) > 2 and parts[2] else None
+        year_month_created_at = MonthYear.from_str(parts[0]) if len(parts) > 0 and parts[0] else None
+        item_id = int(parts[1]) if len(parts) > 1 and parts[1] else None
+        item_name = parts[2] if len(parts) > 2 and parts[2] else None
+        profit_sum = float(parts[3]) if len(parts) > 3 and parts[3] else None
 
-        row = Query2_2ResultRow(product_id, product_name, profit_sum)
+        row = Query2_2ResultRow(item_id, item_name, profit_sum, year_month_created_at)
         consumed = len(line.encode("utf-8")) + 1
         return row, consumed
 
