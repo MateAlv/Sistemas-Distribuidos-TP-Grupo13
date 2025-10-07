@@ -18,7 +18,7 @@ def initialize_config():
         logging_level = os.getenv("LOGGING_LEVEL", "DEBUG")
         join_type = os.getenv("JOINER_TYPE")
 
-        if join_type != "ITEMS" and join_type != "STORES" and join_type != "USERS":
+        if join_type != "ITEMS" and join_type != "STORES_TPV" and join_type != "STORES_TOP3" and join_type != "USERS":
             raise ValueError(f"Tipo de joiner inválido: {join_type}")
 
     except KeyError as e:
