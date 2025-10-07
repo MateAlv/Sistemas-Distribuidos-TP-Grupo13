@@ -1,7 +1,10 @@
 middleware/__pycache__/
 .data/
+.data-reduced/
 .data-test/
-.data-test-mini/
+.data-test-reduced/
+.kaggle_results/
+.kaggle_reduced_results/
 .results/
 .vscode/
 .venv/
