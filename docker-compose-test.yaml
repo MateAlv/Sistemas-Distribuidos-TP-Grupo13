@@ -99,17 +99,17 @@ services:
       server:
         condition: service_started
   
-  maximizer_products_2:
+  maximizer_products_4:
     build:
       context: .   
       dockerfile: workers/maximizers/Dockerfile
-    container_name: maximizer_products_2_service
+    container_name: maximizer_products_4_service
     command: ["python", "main.py"]
     environment:
       - PYTHONUNBUFFERED=1
       - LOGGING_LEVEL=DEBUG
       - MAXIMIZER_TYPE=MAX
-      - MAXIMIZER_RANGE=2
+      - MAXIMIZER_RANGE=4
     volumes:
       - ./utils:/workers/utils:ro
       - ./middleware:/workers/middleware:ro
@@ -119,17 +119,17 @@ services:
       server:
         condition: service_started
   
-  maximizer_products_3:
+  maximizer_products_7:
     build:
       context: .   
       dockerfile: workers/maximizers/Dockerfile
-    container_name: maximizer_products_3_service
+    container_name: maximizer_products_7_service
     command: ["python", "main.py"]
     environment:
       - PYTHONUNBUFFERED=1
       - LOGGING_LEVEL=DEBUG
       - MAXIMIZER_TYPE=MAX
-      - MAXIMIZER_RANGE=3
+      - MAXIMIZER_RANGE=7
     volumes:
       - ./utils:/workers/utils:ro
       - ./middleware:/workers/middleware:ro
