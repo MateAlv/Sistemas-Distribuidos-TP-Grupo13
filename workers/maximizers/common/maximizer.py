@@ -7,6 +7,8 @@ from utils.file_utils.process_table import TableProcessRow
 from utils.file_utils.process_chunk import ProcessChunk
 from utils.file_utils.process_batch_reader import ProcessBatchReader
 from utils.file_utils.file_table import DateTime
+from utils.file_utils.end_messages import MessageEnd
+from utils.file_utils.table_type import TableType
 from middleware.middleware_interface import MessageMiddlewareQueue, MessageMiddlewareExchange
 from collections import defaultdict
 import datetime
@@ -35,7 +37,7 @@ class Maximizer:
                 self.data_sender = MessageMiddlewareQueue("rabbitmq", "to_transaction_items_to_join")
                 self.data_receiver = MessageMiddlewareQueue("rabbitmq", "to_absolute_max")
                 # Envía END message al joiner cuando termine
-                self.middleware_exchange_sender = MessageMiddlewareExchange("rabbitmq", "SECOND_END_MESSAGE", [""], exchange_type="fanout")
+                self.middleware_exchange_sender = MessageMiddlewareExchange("rabbitmq", "end_exchange_maximizer_PRODUCTS", [""], exchange_type="fanout")
                 self.expected_partial_maximizers = 3  # Sabemos que son 3: rango 1, 4, 7
             else:
                 # Maximizers parciales - envían al absolute max
@@ -173,10 +175,10 @@ class Maximizer:
                 self.publish_absolute_max_results()
                 # Enviar END message al joiner
                 try:
-                    end_msg = f"client_id:{self.client_id or 1}"
-                    self.middleware_exchange_sender.send(end_msg)
+                    end_msg = MessageEnd(self.client_id or 1, TableType.TRANSACTION_ITEMS, 1)
+                    self.middleware_exchange_sender.send(end_msg.encode())
                     self.middleware_exchange_sender.close()
-                    logging.info(f"action: sent_end_message_to_joiner | client_id:{self.client_id or 1}")
+                    logging.info(f"action: sent_end_message_to_joiner | client_id:{self.client_id or 1} | format:END;{self.client_id or 1};{TableType.TRANSACTION_ITEMS.value};1")
                 except Exception as e:
                     logging.error(f"action: error_sending_end_to_joiner | error:{e}")
             else:
@@ -407,10 +409,10 @@ class Maximizer:
             
             # Enviar END message
             try:
-                end_msg = f"client_id:{self.client_id or 1}"
-                self.middleware_exchange_sender.send(end_msg)
+                end_msg = MessageEnd(self.client_id or 1, TableType.TRANSACTIONS, 1)
+                self.middleware_exchange_sender.send(end_msg.encode())
                 self.middleware_exchange_sender.close()
-                logging.info(f"action: sent_top3_end_message | client_id:{self.client_id or 1}")
+                logging.info(f"action: sent_top3_end_message | client_id:{self.client_id or 1} | format:END;{self.client_id or 1};{TableType.TRANSACTIONS.value};1")
             except Exception as e:
                 logging.error(f"action: error_sending_top3_end_message | error:{e}")
         else:

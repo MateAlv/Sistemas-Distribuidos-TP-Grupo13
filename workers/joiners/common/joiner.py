@@ -6,6 +6,7 @@ from utils.file_utils.process_chunk import ProcessChunk
 from utils.file_utils.process_batch_reader import ProcessBatchReader
 from utils.file_utils.result_chunk import ResultChunk, ResultChunkHeader
 from utils.file_utils.file_table import DateTime
+from utils.file_utils.end_messages import MessageEnd
 from middleware.middleware_interface import MessageMiddlewareQueue, MessageMiddlewareExchange
 import logging
 from collections import defaultdict
@@ -37,9 +38,9 @@ class Joiner:
         self.define_queues()
         
         self.data_sender = MessageMiddlewareQueue("rabbitmq", "to_merge_data")
-        self.middleware_exchange_receiver = MessageMiddlewareExchange("rabbitmq", "SECOND_END_MESSAGE", [""], exchange_type="fanout")
+        self.middleware_exchange_receiver = MessageMiddlewareExchange("rabbitmq", "end_exchange_maximizer_PRODUCTS", [""], exchange_type="fanout")
         # El joiner NO debe reenviar END messages - solo recibirlos
-        # self.middleware_exchange_sender = MessageMiddlewareExchange("rabbitmq", "SECOND_END_MESSAGE", [""], exchange_type="fanout")
+        # self.middleware_exchange_sender = MessageMiddlewareExchange("rabbitmq", "end_exchange_maximizer_PRODUCTS", [""], exchange_type="fanout")
     
     def handle_join_data(self):
         """Maneja datos de join (tabla de productos del server)"""
@@ -182,29 +183,27 @@ class Joiner:
     
     def handle_end_messages(self):
         """Handle end messages from the maximizer pipeline"""
-        logging.info(f"action: start_end_message_handler | type:{self.joiner_type} | listening_on:SECOND_END_MESSAGE")
+        logging.info(f"action: start_end_message_handler | type:{self.joiner_type} | listening_on:end_exchange_maximizer_PRODUCTS")
         
         def end_callback(msg):
-            # Parse the client_id from the end message
+            # Parse the client_id from the end message using MessageEnd format
             logging.info(f"action: received_raw_end_message | type:{self.joiner_type} | msg_size:{len(msg)} | msg_preview:{msg[:100] if len(msg) > 100 else msg}")
             try:
-                # Assume end message contains client_id in format "client_id:X"
-                if msg and "client_id:" in msg.decode():
-                    client_id = int(msg.decode().split("client_id:")[1])
-                    with self.lock:
-                        self.client_end_messages_received.add(client_id)
-                        logging.info(f"action: received_end_message | type:{self.joiner_type} | client_id:{client_id}")
-                else:
-                    # Fallback - add all potential client_ids (this is not ideal but works for single client)
-                    with self.lock:
-                        # Add client_id 1 as default (should be improved to parse actual client_id)
-                        self.client_end_messages_received.add(1)
-                        logging.info(f"action: received_end_message_fallback | type:{self.joiner_type} | client_id:1")
+                # Parse using MessageEnd format: END;{client_id};{table_type};{count}
+                end_message = MessageEnd.decode(msg)
+                client_id = end_message.client_id()
+                table_type = end_message.table_type()
+                
+                with self.lock:
+                    self.client_end_messages_received.add(client_id)
+                    logging.info(f"action: received_end_message | type:{self.joiner_type} | client_id:{client_id} | table_type:{table_type} | count:{end_message.total_chunks()}")
+                    
             except Exception as e:
-                logging.error(f"action: error_parsing_end_message | type:{self.joiner_type} | error:{e}")
-                # Fallback
+                logging.error(f"action: error_parsing_end_message | type:{self.joiner_type} | error:{e} | msg:{msg}")
+                # Fallback - add client_id 1 as default
                 with self.lock:
                     self.client_end_messages_received.add(1)
+                    logging.info(f"action: received_end_message_fallback | type:{self.joiner_type} | client_id:1")
         
         # Listen for end messages without timeout - blocking until message arrives
         try:
