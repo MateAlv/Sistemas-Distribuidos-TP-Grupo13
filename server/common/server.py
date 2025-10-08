@@ -172,7 +172,6 @@ class Server:
                         
                     sendall(sock, self.header_id_to_bytes(H_ID_OK))
                     
-                    # Si tenemos client_id, escuchar resultados
                     if client_id is not None:
                         logging.info("action: waiting_for_results | peer:%s | client_id:%s", peer, client_id)
                         self._listen_and_send_results(sock, client_id, peer)

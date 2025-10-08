@@ -17,6 +17,7 @@ def initialize_config():
     try:
         logging_level = os.getenv("LOGGING_LEVEL", "DEBUG")
         agg_type = os.getenv("AGGREGATOR_TYPE")
+        agg_id = int(os.getenv("AGGREGATOR_ID", "1"))
 
         if agg_type != "PRODUCTS" and agg_type != "PURCHASES" and agg_type != "TPV":
             raise ValueError(f"Tipo de agregador inválido: {agg_type}")
@@ -26,7 +27,7 @@ def initialize_config():
     except ValueError as e:
         raise ValueError(f"Error de parseo. {e}. Abortando.")
 
-    return (logging_level, agg_type)
+    return (logging_level, agg_type, agg_id)
 
 
 def initialize_log(logging_level):
@@ -51,12 +52,12 @@ def main():
     parser = argparse.ArgumentParser(description="Procesador de transacciones con agregación.")
     args = parser.parse_args()
 
-    (logging_level, agg_type) = initialize_config()
+    (logging_level, agg_type, agg_id) = initialize_config()
     initialize_log(logging_level)
     
-    logging.debug(f"action: config | result: success | agg_type:{agg_type} | log_level:{logging_level}")
+    logging.debug(f"action: config | result: success | agg_type:{agg_type} | agg_id:{agg_id} | log_level:{logging_level}")
     
-    aggregator = Aggregator(agg_type)
+    aggregator = Aggregator(agg_type, agg_id)
 
     aggregator.run()
 

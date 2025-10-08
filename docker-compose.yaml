@@ -67,6 +67,7 @@ services:
     - PYTHONUNBUFFERED=1
     - LOGGING_LEVEL=DEBUG
     - AGGREGATOR_TYPE=PRODUCTS
+    - AGGREGATOR_ID=1
     volumes:
     - ./utils:/workers/utils:ro
     - ./middleware:/workers/middleware:ro
@@ -108,7 +109,7 @@ services:
     - PYTHONUNBUFFERED=1
     - LOGGING_LEVEL=DEBUG
     - MAXIMIZER_TYPE=MAX
-    - MAXIMIZER_RANGE=2
+    - MAXIMIZER_RANGE=4
     volumes:
     - ./utils:/workers/utils:ro
     - ./middleware:/workers/middleware:ro
@@ -129,7 +130,7 @@ services:
     - PYTHONUNBUFFERED=1
     - LOGGING_LEVEL=DEBUG
     - MAXIMIZER_TYPE=MAX
-    - MAXIMIZER_RANGE=3
+    - MAXIMIZER_RANGE=7
     volumes:
     - ./utils:/workers/utils:ro
     - ./middleware:/workers/middleware:ro

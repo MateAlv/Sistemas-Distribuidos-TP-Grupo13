@@ -40,8 +40,6 @@ class Filter:
         else:
             raise ValueError(f"Tipo de filtro inválido: {self.filter_type}")
 
-
-
     def run(self):
         logging.info(f"Filtro iniciado. Tipo: {self.filter_type}, ID: {self.id}")
         results = []
@@ -75,10 +73,17 @@ class Filter:
                     self._ensure_dict_entry(self.number_of_chunks_not_sent_per_client, stats.client_id, stats.table_type)
                     self.number_of_chunks_received_per_client[stats.client_id][stats.table_type] += stats.chunks_received
                     self.number_of_chunks_not_sent_per_client[stats.client_id][stats.table_type] += stats.chunks_not_sent
-                    self._ensure_dict_entry(self.number_of_chunks_to_receive, stats.client_id, stats.table_type)
-
-                    if self._can_send_end_message(total_expected, stats.client_id, stats.table_type):
-                        self._send_end_message(chunk, stats.client_id, stats.table_type, total_expected, self.number_of_chunks_not_sent_per_client[stats.client_id][stats.table_type])
+                    
+                    total_received = self.number_of_chunks_received_per_client[stats.client_id][stats.table_type]
+                    total_not_sent= self.number_of_chunks_not_sent_per_client[stats.client_id][stats.table_type]
+                    
+                    if (stats.client_id, stats.table_type) not in self.already_sent_stats:
+                        self.already_sent_stats[(stats.client_id, stats.table_type)] = True
+                        stats_msg = FilterStatsMessage(self.id, stats.client_id, stats.table_type, stats.total_expected, total_received, total_not_sent)
+                        self.middleware_end_exchange.send(stats_msg.encode())
+                        
+                    if self._can_send_end_message(stats.total_expected, stats.client_id, stats.table_type):
+                        self._send_end_message(stats.client_id, stats.table_type, stats.total_expected, self.number_of_chunks_not_sent_per_client[stats.client_id][stats.table_type])
 
                 except:
                     stats_end = FilterStatsEndMessage.decode(stats_msg)
@@ -135,10 +140,10 @@ class Filter:
 
                         if (client_id, table_type) not in self.already_sent_stats:
                             self.already_sent_stats[(client_id, table_type)] = True
-                            stats_msg = FilterStatsMessage(self.id, client_id, table_type, total_received, total_not_sent)
+                            stats_msg = FilterStatsMessage(self.id, client_id, table_type, total_expected, total_received, total_not_sent)
                             self.middleware_end_exchange.send(stats_msg.encode())
                         else:
-                            stats_msg = FilterStatsMessage(self.id, client_id, table_type, 1, 0 if filtered_rows else 1)
+                            stats_msg = FilterStatsMessage(self.id, client_id, table_type, total_expected, 1, 0 if filtered_rows else 1)
 
                         if self._can_send_end_message(total_expected, client_id, table_type):
                             self._send_end_message(client_id, table_type, total_expected, total_not_sent)
@@ -159,7 +164,7 @@ class Filter:
                     self._ensure_dict_entry(self.number_of_chunks_not_sent_per_client, client_id, table_type)
                     self.number_of_chunks_to_receive[client_id] = {table_type: total_expected}
 
-                    stats_msg = FilterStatsMessage(self.id, client_id, table_type, 
+                    stats_msg = FilterStatsMessage(self.id, client_id, table_type, total_expected,
                                 self.number_of_chunks_received_per_client[client_id][table_type],
                                 self.number_of_chunks_not_sent_per_client[client_id][table_type])
                     self.middleware_end_exchange.send(stats_msg.encode())

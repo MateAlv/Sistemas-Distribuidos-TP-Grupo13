@@ -136,6 +136,7 @@ def define_aggregator(meta: dict, compose: dict, nodo: str, index: int):
             "PYTHONUNBUFFERED=1",
             f"LOGGING_LEVEL={meta['logging_level']}",
             f"AGGREGATOR_TYPE={nodo.split('_')[1].upper()}",
+            f"AGGREGATOR_ID={index}",
         ],
         "volumes": [
             "./utils:/workers/utils:ro",
@@ -150,22 +151,33 @@ def define_aggregator(meta: dict, compose: dict, nodo: str, index: int):
 
 def get_maximizer_range(nodo: str):
     # MAXIMIZER_MAX_ABSOLUTE -> 0
-    # MAXIMIZER_MAX_1 -> 1
-    # MAXIMIZER_MAX_2 -> 2
-    # MAXIMIZER_MAX_3-> 3
+    # MAXIMIZER_MAX_1_3 -> 1
+    # MAXIMIZER_MAX_4_6 -> 4
+    # MAXIMIZER_MAX_7_8 -> 7
     # MAXIMIZER_TOP3_ABSOLUTE -> 0
-    # MAXIMIZER_TOP3_1 -> 1
-    # MAXIMIZER_TOP3_2 -> 2
-    # MAXIMIZER_TOP3_3-> 3
+    # MAXIMIZER_TOP3_1_3 -> 1
+    # MAXIMIZER_TOP3_4_6 -> 4
+    # MAXIMIZER_TOP3_7_8 -> 7
     r = nodo.split("_")[2]
     if r == "ABSOLUTE":
         return 0
-    elif r == "1":
+    elif r == "1" or r == "1_3":
         return 1
     elif r == "2":
         return 2
     elif r == "3":
         return 3
+    elif r == "4_6":
+        return 4
+    elif r == "7_8":
+        return 7
+    else:
+        # Try to extract just the first number for other patterns
+        import re
+        match = re.match(r'(\d+)', r)
+        if match:
+            return int(match.group(1))
+        return None
 
 def is_maximizer(nodo: str):
     return nodo.startswith("MAXIMIZER_")
