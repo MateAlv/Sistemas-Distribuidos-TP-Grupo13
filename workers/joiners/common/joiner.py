@@ -202,14 +202,12 @@ class Joiner:
                     
             except Exception as e:
                 logging.error(f"action: error_parsing_end_message | type:{self.joiner_type} | error:{e} | msg:{msg}")
-                # Fallback - add client_id 1 as default
-                with self.lock:
-                    self.client_end_messages_received.add(1)
-                    logging.info(f"action: received_end_message_fallback | type:{self.joiner_type} | client_id:1")
         
         # Listen for end messages without timeout - blocking until message arrives
         try:
+            logging.info(f"action: exchange_start_consuming | type:{self.joiner_type} | exchange:{self.middleware_exchange_receiver.exchange_name}")
             self.middleware_exchange_receiver.start_consuming(end_callback)
+            logging.info(f"action: exchange_consuming_started | type:{self.joiner_type} | exchange:{self.middleware_exchange_receiver.exchange_name}")
         except Exception as e:
             logging.error(f"action: end_message_handler_failed | type:{self.joiner_type} | error:{e}")
             # If listening fails, the joiner should probably exit or restart

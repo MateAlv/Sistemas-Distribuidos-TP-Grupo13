@@ -175,6 +175,7 @@ class Maximizer:
                 self.publish_absolute_max_results()
                 # Enviar END message al joiner
                 try:
+                    logging.info(f"action: sending_end_message_to_joiner | client_id:{self.client_id or 1} | exchange:{self.middleware_exchange_sender.exchange_name}")
                     end_msg = MessageEnd(self.client_id or 1, TableType.TRANSACTION_ITEMS, 1)
                     self.middleware_exchange_sender.send(end_msg.encode())
                     logging.info(f"action: sent_end_message_to_joiner | client_id:{self.client_id or 1} | format:END;{self.client_id or 1};{TableType.TRANSACTION_ITEMS.value};1")
