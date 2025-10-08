@@ -23,6 +23,7 @@ class Maximizer:
         self.maximizer_range = max_range
         self.client_id = None  # Track client ID for publishing results
         self.end_received = False  # Track si se recibió END message
+        self.received_ranges = set()  # Para el absolute max: trackear qué rangos han enviado datos
         
         if self.maximizer_type == "MAX":
             self.sellings_max = dict()  # Almacena los máximos actuales
@@ -33,8 +34,8 @@ class Maximizer:
                 # Maximo absoluto - recibe de maximizers parciales
                 self.data_sender = MessageMiddlewareQueue("rabbitmq", "to_transaction_items_to_join")
                 self.data_receiver = MessageMiddlewareQueue("rabbitmq", "to_absolute_max")
-                # NO necesita exchange para END - simplemente cuenta cuando recibe datos de los 3 maximizers parciales
-                self.middleware_exchange_sender = MessageMiddlewareQueue("rabbitmq", "to_join_items")  # Envía al joiner cuando termine
+                # Envía END message al joiner cuando termine
+                self.middleware_exchange_sender = MessageMiddlewareExchange("rabbitmq", "SECOND_END_MESSAGE", [""], exchange_type="fanout")
                 self.expected_partial_maximizers = 3  # Sabemos que son 3: rango 1, 4, 7
             else:
                 # Maximizers parciales - envían al absolute max
@@ -133,18 +134,17 @@ class Maximizer:
                     # Para absolute max: detectar cuándo termina cada maximizer parcial
                     if self.is_absolute_max():
                         # Contar maximizers parciales únicos que han enviado datos
-                        unique_ranges = set()
                         for row in chunk.rows:
                             if hasattr(row, 'transaction_id') and row.transaction_id:
                                 if 'range_1' in row.transaction_id:
-                                    unique_ranges.add('1')
+                                    self.received_ranges.add('1')
                                 elif 'range_4' in row.transaction_id:
-                                    unique_ranges.add('4')
+                                    self.received_ranges.add('4')
                                 elif 'range_7' in row.transaction_id:
-                                    unique_ranges.add('7')
+                                    self.received_ranges.add('7')
                         
-                        self.partial_maximizers_finished = len(unique_ranges)
-                        logging.info(f"action: absolute_max_tracking | partial_maximizers_seen:{self.partial_maximizers_finished}/{self.expected_partial_maximizers}")
+                        self.partial_maximizers_finished = len(self.received_ranges)
+                        logging.info(f"action: absolute_max_tracking | partial_maximizers_seen:{self.partial_maximizers_finished}/{self.expected_partial_maximizers} | received_ranges:{sorted(self.received_ranges)}")
                         
                         # Si recibimos datos de todos los maximizers parciales, podemos terminar
                         if self.partial_maximizers_finished >= self.expected_partial_maximizers:
@@ -171,11 +171,14 @@ class Maximizer:
             if self.is_absolute_max():
                 # Absolute max: enviar resultados finales al joiner
                 self.publish_absolute_max_results()
-                # Enviar resultados al joiner usando queue
+                # Enviar END message al joiner
                 try:
-                    logging.info(f"action: sent_results_to_joiner | client_id:{self.client_id or 1}")
+                    end_msg = f"client_id:{self.client_id or 1}"
+                    self.middleware_exchange_sender.send(end_msg)
+                    self.middleware_exchange_sender.close()
+                    logging.info(f"action: sent_end_message_to_joiner | client_id:{self.client_id or 1}")
                 except Exception as e:
-                    logging.error(f"action: error_sending_to_joiner | error:{e}")
+                    logging.error(f"action: error_sending_end_to_joiner | error:{e}")
             else:
                 # Maximizers parciales: enviar máximos al absolute max
                 self.publish_partial_max_results()
