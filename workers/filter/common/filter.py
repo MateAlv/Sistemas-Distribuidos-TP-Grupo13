@@ -141,7 +141,7 @@ class Filter:
                             stats_msg = FilterStatsMessage(self.id, client_id, table_type, 1, 0 if filtered_rows else 1)
 
                         if self._can_send_end_message(total_expected, client_id, table_type):
-                            self._send_end_message(chunk, client_id, table_type, total_expected, total_not_sent)
+                            self._send_end_message(client_id, table_type, total_expected, total_not_sent)
                         
                 except:
                     end_message = MessageEnd.decode(msg)

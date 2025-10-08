@@ -85,23 +85,32 @@ class Joiner:
             self.data_join_receiver.start_consuming(callback)
 
             for data in results:
-                chunk = ProcessBatchReader.from_bytes(data)
-                logging.info(f"action: receive_data | type:{self.joiner_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()} | rows_in:{len(chunk.rows)}")
-                                 
-                with self.lock:
-                    self.save_data(chunk)
-                    # Check if we're ready to join for this specific client
-                    client_id = chunk.client_id()
-                    if self.is_ready_to_join_for_client(client_id):
-                        logging.info(f"action: ready_to_join | type:{self.joiner_type} | client_id:{client_id}")
-                        # Aplica el join
-                        self.apply_for_client(client_id)
-                        # Publica los resultados al to_merge_data
-                        self.publish_results(client_id)
-                        # Mark this client as processed
-                        self.completed_clients.add(client_id)
+                try:
+                    chunk = ProcessBatchReader.from_bytes(data)
+                    logging.info(f"action: receive_data | type:{self.joiner_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()} | rows_in:{len(chunk.rows)}")
+                                     
+                    with self.lock:
+                        self.save_data(chunk)
+                        # Check if we're ready to join for this specific client
+                        client_id = chunk.client_id()
+                        if self.is_ready_to_join_for_client(client_id):
+                            logging.info(f"action: ready_to_join | type:{self.joiner_type} | client_id:{client_id}")
+                            # Aplica el join
+                            self.apply_for_client(client_id)
+                            # Publica los resultados al to_merge_data
+                            self.publish_results(client_id)
+                            # Mark this client as processed
+                            self.completed_clients.add(client_id)
+                        else:
+                            logging.debug(f"action: waiting_join_data | type:{self.joiner_type} | cli_id:{client_id} | file_type:{chunk.table_type()}")
+                except ValueError as e:
+                    if "Datos insuficientes para el header" in str(e):
+                        logging.debug(f"action: received_non_batch_data | type:{self.joiner_type} | data_size:{len(data)} | skipping")
+                        # Skip non-batch data (could be control messages)
                     else:
-                        logging.debug(f"action: waiting_join_data | type:{self.joiner_type} | cli_id:{client_id} | file_type:{chunk.table_type()}")
+                        logging.error(f"action: error_parsing_data | type:{self.joiner_type} | error:{e}")
+                except Exception as e:
+                    logging.error(f"action: unexpected_error | type:{self.joiner_type} | error:{e}")
  
                 results.remove(data)
         

@@ -76,7 +76,7 @@ def main():
 
     filter = Filter(cfg)
 
-    logging.debug(f"filter: ", str(filter))
+    logging.debug(f"filter: {str(filter)}")
 
     filter.run()
 
