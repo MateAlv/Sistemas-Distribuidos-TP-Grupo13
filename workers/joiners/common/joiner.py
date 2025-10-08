@@ -39,9 +39,7 @@ class Joiner:
         
         self.data_sender = MessageMiddlewareQueue("rabbitmq", "to_merge_data")
         self.middleware_exchange_receiver = MessageMiddlewareExchange("rabbitmq", "end_exchange_maximizer_PRODUCTS", [""], exchange_type="fanout")
-        # El joiner NO debe reenviar END messages - solo recibirlos
-        # self.middleware_exchange_sender = MessageMiddlewareExchange("rabbitmq", "end_exchange_maximizer_PRODUCTS", [""], exchange_type="fanout")
-    
+
     def handle_join_data(self):
         """Maneja datos de join (tabla de productos del server)"""
         results = []
@@ -64,8 +62,12 @@ class Joiner:
                     self.save_data_join(chunk)
                 except ValueError as e:
                     if "Datos insuficientes para el header" in str(e):
-                        logging.debug(f"action: received_non_batch_data | type:{self.joiner_type} | data_size:{len(data)} | skipping")
-                        # Skip non-batch data (could be control messages)
+                        # Podría ser un mensaje END del server para menu_items
+                        try:
+                            end_message = MessageEnd.decode(data)
+                            logging.info(f"action: received_server_end_message | type:{self.joiner_type} | client_id:{end_message.client_id()} | table_type:{end_message.table_type()} | count:{end_message.total_chunks()}")
+                        except Exception as parse_error:
+                            logging.debug(f"action: received_non_batch_data | type:{self.joiner_type} | data_size:{len(data)} | skipping | parse_error:{parse_error}")
                     else:
                         logging.error(f"action: error_parsing_join_data | type:{self.joiner_type} | error:{e}")
                 except Exception as e:

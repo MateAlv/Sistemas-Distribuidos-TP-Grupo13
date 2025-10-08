@@ -160,7 +160,6 @@ class Filter:
 
                     logging.info(f"action: end_message_received | type:{self.filter_type} | cli_id:{client_id} | file_type:{table_type} | total_chunks_received:{self.number_of_chunks_received_per_client[client_id][table_type]}")
                     
-                    
                     self._ensure_dict_entry(self.number_of_chunks_not_sent_per_client, client_id, table_type)
                     self.number_of_chunks_to_receive[client_id] = {table_type: total_expected}
 
