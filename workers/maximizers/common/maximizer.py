@@ -33,9 +33,9 @@ class Maximizer:
                 self.data_sender = MessageMiddlewareQueue("rabbitmq", "to_absolute_max")
                 if self.maximizer_range == "1":
                     self.data_receiver = MessageMiddlewareQueue("rabbitmq", "to_max_1_3")
-                elif self.maximizer_range == "2":
+                elif self.maximizer_range == "4":
                     self.data_receiver = MessageMiddlewareQueue("rabbitmq", "to_max_4_6")
-                elif self.maximizer_range == "3":
+                elif self.maximizer_range == "7":
                     self.data_receiver = MessageMiddlewareQueue("rabbitmq", "to_max_7_8")
                 else:
                     raise ValueError(f"Rango de maximizer inválido: {self.maximizer_range}")

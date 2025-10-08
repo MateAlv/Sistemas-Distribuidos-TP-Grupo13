@@ -13,16 +13,29 @@ logging.getLogger('pika').setLevel(logging.CRITICAL)
 logging.getLogger('pika').disabled = True
 
 def initialize_config():
-
     try:
-        logging_level = os.getenv("LOGGING_LEVEL", "DEBUG")
-        max_type = os.getenv("MAXIMIZER_TYPE")
-        max_range = os.getenv("MAXIMIZER_RANGE")
-
-        if max_type != "MAX" and max_type != "TOP3":
-            raise ValueError(f"Tipo de maximizer inválido: {max_type}")
-        if max_range not in ["0", "1", "2", "3"] :
+        config = ConfigParser()
+        config.read('config.ini')
+        
+        logging_level = config['DEFAULT']['LOGGING_LEVEL']
+        max_type = config['DEFAULT']['MAXIMIZER_TYPE']
+        max_range = os.getenv('MAXIMIZER_RANGE')
+        
+        if max_range is None:
             raise ValueError(f"Rango de maximizer inválido: {max_range}")
+        
+        # Validar que sea uno de los rangos válidos
+        valid_ranges = ["0", "1", "4", "7"]
+        if max_range not in valid_ranges:
+            raise ValueError(f"Rango de maximizer inválido: {max_range}")
+        
+        logging.info(f"action: config | result: success | max_type:{max_type} | max_range:{max_range} | log_level:{logging_level}")
+        
+        return (logging_level, max_type, max_range)
+        
+    except Exception as e:
+        logging.error(f"Error cargando configuración: {e}")
+        raise ValueError(f"Error de parseo. {e}. Abortando.")
 
     except KeyError as e:
         raise KeyError(f"Key no encontrada. Error: {e}. Abortando.")

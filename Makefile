@@ -63,3 +63,9 @@ images-clean:
 
 
 .PHONY: images-clean
+
+hard-down:
+	- docker compose -f ${DOCKER} down --remove-orphans --timeout 20
+	- docker kill $$(docker ps -q --filter "name=tp-distribuidos-grupo13") 
+	- docker rm -f $$(docker ps -aq --filter "name=tp-distribuidos-grupo13")
+.PHONY: hard-down
