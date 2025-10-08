@@ -32,7 +32,8 @@ class Aggregator:
         # Exchange para coordinación entre aggregators del mismo tipo
         self.middleware_stats_exchange = MessageMiddlewareExchange("rabbitmq", f"end_exchange_aggregator_{self.aggregator_type}", [""], "fanout")
         
-        # No necesitamos acumuladores globales - todo se procesa por chunks
+        # Acumuladores globales para mantener estado hasta el final
+        self.global_accumulator = {}  # Por client_id: datos acumulados
         
         if self.aggregator_type == "PRODUCTS":
             self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", "to_agg_1+2")
@@ -135,32 +136,25 @@ class Aggregator:
                     self._ensure_dict_entry(self.chunks_processed_per_client, client_id, table_type)
                     self.chunks_received_per_client[client_id][table_type] += 1
                     
-                    # Procesar según tipo de aggregator
+                    # Procesar según tipo de aggregator - ACUMULAR no enviar
                     has_output = False
                     if self.aggregator_type == "PRODUCTS":
                         aggregated_chunks = self.apply_products(chunk)
                         if aggregated_chunks:
                             rows_1_3, rows_4_6, rows_7_8 = aggregated_chunks
-                            if rows_1_3:
-                                self.publish_results_1_3(chunk, rows_1_3)
-                                has_output = True
-                            if rows_4_6:
-                                self.publish_results_4_6(chunk, rows_4_6)
-                                has_output = True
-                            if rows_7_8:
-                                self.publish_results_7_8(chunk, rows_7_8)
-                                has_output = True
+                            self.accumulate_products(client_id, rows_1_3, rows_4_6, rows_7_8)
+                            has_output = True
                                 
                     elif self.aggregator_type == "PURCHASES":
                         aggregated_chunk = self.apply_purchases(chunk)
                         if aggregated_chunk:
-                            self.publish_purchases_chunk(aggregated_chunk)
+                            self.accumulate_purchases(client_id, aggregated_chunk)
                             has_output = True
                             
                     elif self.aggregator_type == "TPV":
                         aggregated_chunk = self.apply_tpv(chunk)
                         if aggregated_chunk:
-                            self.publish_tpv_chunk(aggregated_chunk)
+                            self.accumulate_tpv(client_id, aggregated_chunk)
                             has_output = True
                     
                     # Solo contar como procesado si generó output
@@ -242,7 +236,6 @@ class Aggregator:
                         key = (row.item_id, dt.year, dt.month)
                         chunk_sellings[key] += row.quantity
                         chunk_profit[key] += row.subtotal
-                        logging.debug(f"action: aggregate_product | item_id:{row.item_id} | year:{dt.year} | month:{dt.month} | qty:{row.quantity} | profit:{row.subtotal}")
 
         # Crear las listas de salida divididas por rangos
         if not chunk_sellings:
@@ -302,7 +295,6 @@ class Aggregator:
                 if dt.year in YEARS:
                     key = (int(row.store_id), int(row.user_id))
                     chunk_accumulator[key] += 1
-                    logging.debug(f"action: count_purchase | store_id:{row.store_id} | user_id:{row.user_id} | year:{dt.year}")
 
         # Crear chunk de salida con los datos agregados de este chunk
         if not chunk_accumulator:
@@ -361,7 +353,6 @@ class Aggregator:
                     
                     key = (dt.year, semester, int(row.store_id))
                     chunk_accumulator[key] += amount
-                    logging.debug(f"action: sum_tpv | store_id:{row.store_id} | year:{dt.year} | semester:{semester} | amount:{amount}")
 
         # Crear chunk de salida con los datos agregados de este chunk
         if not chunk_accumulator:
@@ -454,6 +445,9 @@ class Aggregator:
         """Envía END message a maximizers cuando todos los aggregators terminaron"""
         logging.info(f"action: sending_end_message | type:{self.aggregator_type} | cli_id:{client_id} | file_type:{table_type.name} | total_chunks:{total_processed}")
         
+        # AHORA SÍ: Publicar resultados finales acumulados
+        self.publish_final_results(client_id, table_type)
+        
         # Enviar END a maximizers
         try:
             end_msg = MessageEnd(client_id, table_type, total_processed)
@@ -498,6 +492,224 @@ class Aggregator:
                     
             if (stats_end.client_id, stats_end.table_type) in self.already_sent_stats:
                 del self.already_sent_stats[(stats_end.client_id, stats_end.table_type)]
+            
+            # Limpiar acumulador global
+            if stats_end.client_id in self.global_accumulator:
+                del self.global_accumulator[stats_end.client_id]
+                logging.info(f"action: cleanup_accumulator | client_id:{stats_end.client_id} | aggregator_id:{self.aggregator_id}")
                 
         except KeyError:
             pass  # Ya estaba limpio
+
+    def accumulate_products(self, client_id, rows_1_3, rows_4_6, rows_7_8):
+        """Acumula productos agregados en memoria para envío final"""
+        if client_id not in self.global_accumulator:
+            self.global_accumulator[client_id] = {
+                'products_1_3': defaultdict(lambda: {'quantity': 0, 'subtotal': 0.0}),
+                'products_4_6': defaultdict(lambda: {'quantity': 0, 'subtotal': 0.0}),
+                'products_7_8': defaultdict(lambda: {'quantity': 0, 'subtotal': 0.0})
+            }
+        
+        # Acumular rows_1_3
+        for row in rows_1_3:
+            key = (row.item_id, row.created_at.date.year, row.created_at.date.month)
+            self.global_accumulator[client_id]['products_1_3'][key]['quantity'] += row.quantity
+            self.global_accumulator[client_id]['products_1_3'][key]['subtotal'] += row.subtotal
+            
+        # Acumular rows_4_6  
+        for row in rows_4_6:
+            key = (row.item_id, row.created_at.date.year, row.created_at.date.month)
+            self.global_accumulator[client_id]['products_4_6'][key]['quantity'] += row.quantity
+            self.global_accumulator[client_id]['products_4_6'][key]['subtotal'] += row.subtotal
+            
+        # Acumular rows_7_8
+        for row in rows_7_8:
+            key = (row.item_id, row.created_at.date.year, row.created_at.date.month)
+            self.global_accumulator[client_id]['products_7_8'][key]['quantity'] += row.quantity
+            self.global_accumulator[client_id]['products_7_8'][key]['subtotal'] += row.subtotal
+
+    def accumulate_purchases(self, client_id, aggregated_chunk):
+        """Acumula compras agregadas en memoria para envío final"""
+        if client_id not in self.global_accumulator:
+            self.global_accumulator[client_id] = {
+                'purchases': defaultdict(int)  # (store_id, user_id) -> count
+            }
+        
+        for row in aggregated_chunk.rows:
+            key = (int(row.store_id), int(row.user_id))
+            self.global_accumulator[client_id]['purchases'][key] += int(row.final_amount)
+
+    def accumulate_tpv(self, client_id, aggregated_chunk):
+        """Acumula TPV agregado en memoria para envío final"""
+        if client_id not in self.global_accumulator:
+            self.global_accumulator[client_id] = {
+                'tpv': defaultdict(float)  # (year, semester, store_id) -> total_tpv
+            }
+        
+        for row in aggregated_chunk.rows:
+            # Extraer año y semestre de la fecha
+            year = row.created_at.year
+            semester = 1 if row.created_at.month <= 6 else 2
+            key = (year, semester, int(row.store_id))
+            self.global_accumulator[client_id]['tpv'][key] += float(row.final_amount)
+
+    def publish_final_results(self, client_id, table_type):
+        """Publica los resultados finales acumulados"""
+        if client_id not in self.global_accumulator:
+            logging.warning(f"action: publish_final_results | client_id:{client_id} | warning: no_accumulated_data")
+            return
+        
+        logging.info(f"action: publish_final_results | type:{self.aggregator_type} | client_id:{client_id}")
+        
+        if self.aggregator_type == "PRODUCTS":
+            self._publish_final_products(client_id)
+        elif self.aggregator_type == "PURCHASES":
+            self._publish_final_purchases(client_id)
+        elif self.aggregator_type == "TPV":
+            self._publish_final_tpv(client_id)
+
+    def _publish_final_products(self, client_id):
+        """Publica resultados finales de productos"""
+        data = self.global_accumulator[client_id]
+        
+        # Crear header base
+        from utils.file_utils.process_chunk import ProcessChunkHeader
+        from utils.file_utils.table_type import TableType
+        header = ProcessChunkHeader(client_id=client_id, table_type=TableType.TRANSACTION_ITEMS)
+        
+        # Publicar rangos 1-3
+        if data['products_1_3']:
+            rows_1_3 = []
+            for (item_id, year, month), totals in data['products_1_3'].items():
+                created_at = DateTime(datetime.date(year, month, 1), datetime.time(0, 0))
+                row = TransactionItemsProcessRow(
+                    transaction_id="",
+                    item_id=item_id,
+                    quantity=totals['quantity'],
+                    subtotal=totals['subtotal'],
+                    created_at=created_at
+                )
+                rows_1_3.append(row)
+            
+            queue = MessageMiddlewareQueue("rabbitmq", "to_max_1_3")
+            chunk_data = ProcessChunk(header, rows_1_3).serialize()
+            queue.send(chunk_data)
+            queue.close()
+            logging.info(f"action: publish_final_products_1_3 | client_id:{client_id} | rows:{len(rows_1_3)} | bytes_sent:{len(chunk_data)} | queue:to_max_1_3")
+        
+        # Publicar rangos 4-6
+        if data['products_4_6']:
+            rows_4_6 = []
+            for (item_id, year, month), totals in data['products_4_6'].items():
+                created_at = DateTime(datetime.date(year, month, 1), datetime.time(0, 0))
+                row = TransactionItemsProcessRow(
+                    transaction_id="",
+                    item_id=item_id,
+                    quantity=totals['quantity'],
+                    subtotal=totals['subtotal'],
+                    created_at=created_at
+                )
+                rows_4_6.append(row)
+            
+            queue = MessageMiddlewareQueue("rabbitmq", "to_max_4_6")
+            chunk_data = ProcessChunk(header, rows_4_6).serialize()
+            queue.send(chunk_data)
+            queue.close()
+            logging.info(f"action: publish_final_products_4_6 | client_id:{client_id} | rows:{len(rows_4_6)} | bytes_sent:{len(chunk_data)} | queue:to_max_4_6")
+        
+        # Publicar rangos 7-8
+        if data['products_7_8']:
+            rows_7_8 = []
+            for (item_id, year, month), totals in data['products_7_8'].items():
+                created_at = DateTime(datetime.date(year, month, 1), datetime.time(0, 0))
+                row = TransactionItemsProcessRow(
+                    transaction_id="",
+                    item_id=item_id,
+                    quantity=totals['quantity'],
+                    subtotal=totals['subtotal'],
+                    created_at=created_at
+                )
+                rows_7_8.append(row)
+            
+            queue = MessageMiddlewareQueue("rabbitmq", "to_max_7_8")
+            chunk_data = ProcessChunk(header, rows_7_8).serialize()
+            queue.send(chunk_data)
+            queue.close()
+            logging.info(f"action: publish_final_products_7_8 | client_id:{client_id} | rows:{len(rows_7_8)} | bytes_sent:{len(chunk_data)} | queue:to_max_7_8")
+
+    def _publish_final_purchases(self, client_id):
+        """Publica resultados finales de compras"""
+        data = self.global_accumulator[client_id]
+        
+        if not data['purchases']:
+            return
+        
+        rows = []
+        marker_date = datetime.date(2024, 1, 1)
+        
+        for (store_id, user_id), count in data['purchases'].items():
+            row = TransactionsProcessRow(
+                transaction_id="",
+                store_id=store_id,
+                user_id=user_id,
+                final_amount=float(count),
+                created_at=marker_date,
+            )
+            rows.append(row)
+        
+        from utils.file_utils.process_chunk import ProcessChunkHeader
+        from utils.file_utils.table_type import TableType
+        header = ProcessChunkHeader(client_id=client_id, table_type=TableType.TRANSACTIONS)
+        chunk = ProcessChunk(header, rows)
+        
+        import base64
+        queue = MessageMiddlewareQueue("rabbitmq", "transactions_sum_by_client")
+        chunk_data = chunk.serialize()
+        payload_b64 = base64.b64encode(chunk_data).decode("utf-8")
+        queue.send(payload_b64)
+        queue.close()
+        
+        logging.info(f"action: publish_final_purchases | client_id:{client_id} | rows:{len(rows)} | bytes_sent:{len(chunk_data)} | queue:transactions_sum_by_client")
+
+    def _publish_final_tpv(self, client_id):
+        """Publica resultados finales de TPV"""
+        data = self.global_accumulator[client_id]
+        
+        if not data['tpv']:
+            return
+        
+        rows = []
+        
+        for (year, semester, store_id), total_tpv in data['tpv'].items():
+            # Crear fecha representativa del semestre
+            first_month = 1 if semester == 1 else 7
+            created_date = datetime.date(year, first_month, 1)
+            
+            row = TransactionsProcessRow(
+                transaction_id="",
+                store_id=store_id,
+                user_id=0,  # Valor dummy para TPV
+                final_amount=total_tpv,
+                created_at=created_date,
+            )
+            rows.append(row)
+        
+        from utils.file_utils.process_chunk import ProcessChunkHeader
+        from utils.file_utils.table_type import TableType
+        header = ProcessChunkHeader(client_id=client_id, table_type=TableType.TRANSACTIONS)
+        chunk = ProcessChunk(header, rows)
+        
+        import base64
+        queue = MessageMiddlewareQueue("rabbitmq", "results_query_3")
+        chunk_data = chunk.serialize()
+        payload_b64 = base64.b64encode(chunk_data).decode("utf-8")
+        queue.send(payload_b64)
+        queue.close()
+        
+        logging.info(f"action: publish_final_tpv | client_id:{client_id} | rows:{len(rows)} | bytes_sent:{len(chunk_data)} | queue:results_query_3")
+        
+        # Cerrar conexiones
+        try:
+            self.middleware_queue_receiver.close()
+        except:
+            pass

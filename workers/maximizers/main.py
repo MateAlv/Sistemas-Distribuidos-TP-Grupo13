@@ -18,11 +18,19 @@ def initialize_config():
         config.read('config.ini')
         
         logging_level = config['DEFAULT']['LOGGING_LEVEL']
-        max_type = config['DEFAULT']['MAXIMIZER_TYPE']
+        max_type = os.getenv('MAXIMIZER_TYPE')
         max_range = os.getenv('MAXIMIZER_RANGE')
+        
+        if max_type is None:
+            raise ValueError(f"Tipo de maximizer inválido: {max_type}")
         
         if max_range is None:
             raise ValueError(f"Rango de maximizer inválido: {max_range}")
+        
+        # Validar que sea uno de los tipos válidos
+        valid_types = ["MAX", "TOP3"]
+        if max_type not in valid_types:
+            raise ValueError(f"Tipo de maximizer inválido: {max_type}")
         
         # Validar que sea uno de los rangos válidos
         valid_ranges = ["0", "1", "4", "7"]
@@ -41,8 +49,6 @@ def initialize_config():
         raise KeyError(f"Key no encontrada. Error: {e}. Abortando.")
     except ValueError as e:
         raise ValueError(f"Error de parseo. {e}. Abortando.")
-
-    return (logging_level, max_type, max_range)
 
 
 def initialize_log(logging_level):
