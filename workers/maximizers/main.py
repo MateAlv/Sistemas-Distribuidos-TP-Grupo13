@@ -37,7 +37,7 @@ def initialize_config():
         if max_range not in valid_ranges:
             raise ValueError(f"Rango de maximizer inválido: {max_range}")
         
-        logging.info(f"action: config | result: success | max_type:{max_type} | max_range:{max_range} | log_level:{logging_level}")
+        # No loggear aquí porque logging aún no está configurado
         
         return (logging_level, max_type, max_range)
         
@@ -76,7 +76,7 @@ def main():
     (logging_level, max_type, max_range) = initialize_config()
     initialize_log(logging_level)
 
-    logging.debug(f"action: config | result: success | max_type:{max_type} | max_range:{max_range} | log_level:{logging_level}")
+    logging.info(f"action: config | result: success | max_type:{max_type} | max_range:{max_range} | log_level:{logging_level}")
 
     maximizer = Maximizer(max_type, max_range)
 

@@ -299,9 +299,15 @@ class Maximizer:
         if self.maximizer_type == "MAX":
             self.update_max(chunk.rows)
             if self.is_absolute_max():
-                logging.info(f"action: maximizer_result | type:{self.maximizer_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()} | results_out: Sellings_max: {self.sellings_max} - Profit_max: {self.profit_max}")
+                # Formatear los diccionarios de máximos para logging legible
+                selling_summary = {f"item_{item_id}_({month.month}/{month.year})": qty for (item_id, month), qty in self.sellings_max.items()}
+                profit_summary = {f"item_{item_id}_({month.month}/{month.year})": profit for (item_id, month), profit in self.profit_max.items()}
+                logging.info(f"action: maximizer_result | type:{self.maximizer_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()} | sellings_max: {selling_summary} | profit_max: {profit_summary}")
             else:
-                logging.info(f"action: maximizer_partial_result | type:{self.maximizer_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()} | results_out: Sellings_max_partial: {self.sellings_max} - Profit_max_partial: {self.profit_max}")
+                # Formatear los diccionarios de máximos para logging legible
+                selling_summary = {f"item_{item_id}_({month.month}/{month.year})": qty for (item_id, month), qty in self.sellings_max.items()}
+                profit_summary = {f"item_{item_id}_({month.month}/{month.year})": profit for (item_id, month), profit in self.profit_max.items()}
+                logging.info(f"action: maximizer_partial_result | type:{self.maximizer_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()} | sellings_max_partial: {selling_summary} | profit_max_partial: {profit_summary}")
             return True
         elif self.maximizer_type == "TOP3":
             self.update_top3(chunk.rows)
