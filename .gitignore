@@ -1,5 +1,12 @@
 middleware/__pycache__/
 .data/
+.data-reduced/
+.data-test/
+.data-test-reduced/
+.kaggle_results/
+.kaggle_reduced_results/
+.results/
 .vscode/
 .venv/
+docker-compose.yaml
 __pycache__/

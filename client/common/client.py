@@ -171,6 +171,11 @@ class Client:
                         logging.info("Cliente %s: señal FINISHED recibida, terminando recepción", self.id)
                         break
                         
+                    elif header == 4:  # H_ID_OK - ACK del server, archivos recibidos correctamente
+                        logging.info("Cliente %s: ACK recibido del server, archivos procesados correctamente, continuando...", self.id)
+                        # Seguir esperando resultados, no hacer break
+                        continue
+                        
                     else:
                         # Otro tipo de mensaje, terminar
                         logging.info("Cliente %s: mensaje no reconocido como resultado: %d", self.id, header)

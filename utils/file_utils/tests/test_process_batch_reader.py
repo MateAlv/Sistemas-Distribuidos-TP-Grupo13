@@ -10,7 +10,7 @@ def test_process_batch_from_file_rows():
     date = DateTime(datetime.date(2023, 5, 1), datetime.time(0, 0))
     row = TransactionsFileRow("tx1", 1, 2, 3, 4, 100, 0, 100, date)
     serialized = row.serialize()
-    batch = ProcessBatchReader.from_file_rows(serialized, "transactions/tx.csv", client_id=111)
+    batch = ProcessBatchReader.from_file_rows(serialized, "transactions/transactions.csv", client_id=111)
     assert len(batch.rows) == 1
     assert batch.header.client_id == 111
     assert batch.header.table_type == TableType.TRANSACTIONS
@@ -34,7 +34,7 @@ def test_process_batch_from_many_file_rows():
     ]
     
     serialized = b"".join(r.serialize() for r in rows)
-    batch = ProcessBatchReader.from_file_rows(serialized, "users/tx.csv", client_id=111)
+    batch = ProcessBatchReader.from_file_rows(serialized, "users/users.csv", client_id=111)
     
     assert batch.header.client_id == 111
     assert batch.header.table_type == TableType.USERS
@@ -57,7 +57,7 @@ def test_process_batch_serialize_deserialize_many():
     ]
     
     serialized = b"".join(r.serialize() for r in rows)
-    batch = ProcessBatchReader.from_file_rows(serialized, "users/tx.csv", client_id=111)
+    batch = ProcessBatchReader.from_file_rows(serialized, "users/users.csv", client_id=111)
     serialized_batch = batch.serialize()
 
     deserialized_batch = ProcessBatchReader.from_bytes(serialized_batch)
@@ -75,4 +75,4 @@ def test_process_batch_serialize_deserialize_many():
 
 def test_process_batch_from_file_rows_empty():
     with pytest.raises(ValueError):
-        ProcessBatchReader.from_file_rows(b"", "transactions/tx.csv", client_id=111)
+        ProcessBatchReader.from_file_rows(b"", "transactions/transactions.csv", client_id=111)
