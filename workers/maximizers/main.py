@@ -6,7 +6,7 @@ import argparse
 from configparser import ConfigParser
 
 # Importar Maximizer
-from common.maximizer import Maximizer
+from common import Maximizer
     
 # Configurar logging de pika MUY temprano y de forma agresiva
 logging.getLogger('pika').setLevel(logging.CRITICAL)
@@ -67,38 +67,20 @@ def initialize_log(logging_level):
     logging.getLogger('pika').setLevel(logging.ERROR)
     # También silenciar otros loggers verbosos
     logging.getLogger('urllib3').setLevel(logging.WARNING)
-    
-    # Test log inmediato
-    logging.info("action: logging_initialized | result: success")
 
 
 def main():
-    print("MAXIMIZER: Starting up...")  # Print inmediato para debug
-    
-    try:
-        parser = argparse.ArgumentParser(description="Procesador de transacciones con maximizador.")
-        args = parser.parse_args()
+    parser = argparse.ArgumentParser(description="Procesador de transacciones con maximizador.")
+    args = parser.parse_args()
 
-        print("MAXIMIZER: Loading config...")
-        (logging_level, max_type, max_range) = initialize_config()
-        
-        print("MAXIMIZER: Initializing logging...")
-        initialize_log(logging_level)
+    (logging_level, max_type, max_range) = initialize_config()
+    initialize_log(logging_level)
 
-        logging.info(f"action: maximizer_startup | result: success | max_type:{max_type} | max_range:{max_range} | log_level:{logging_level}")
+    logging.debug(f"action: config | result: success | max_type:{max_type} | max_range:{max_range} | log_level:{logging_level}")
 
-        print(f"MAXIMIZER: Creating instance - type:{max_type} range:{max_range}")
-        maximizer = Maximizer(max_type, max_range)
+    maximizer = Maximizer(max_type, max_range)
 
-        logging.info(f"action: maximizer_created | type:{max_type} | range:{max_range}")
-        print(f"MAXIMIZER: Starting run loop...")
-        maximizer.run()
-        
-    except Exception as e:
-        print(f"MAXIMIZER ERROR: {e}")
-        import traceback
-        print(f"MAXIMIZER TRACEBACK: {traceback.format_exc()}")
-        raise
+    maximizer.run()
 
 
 if __name__ == "__main__":

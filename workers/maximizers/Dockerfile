@@ -13,5 +13,3 @@ ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/workers/
 
 WORKDIR /workers/maximizers
-
-CMD ["python", "main.py"]

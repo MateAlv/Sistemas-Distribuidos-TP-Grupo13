@@ -27,18 +27,18 @@ class Maximizer:
         if self.maximizer_type == "MAX":
             self.sellings_max = dict()  # Almacena los máximos actuales
             self.profit_max = dict()    # Almacena los máximos actuales
+            self.partial_maximizers_finished = 0  # Para el absolute max: contar cuántos parciales terminaron
 
             if self.is_absolute_max():
                 # Maximo absoluto - recibe de maximizers parciales
                 self.data_sender = MessageMiddlewareQueue("rabbitmq", "to_transaction_items_to_join")
                 self.data_receiver = MessageMiddlewareQueue("rabbitmq", "to_absolute_max")
-                # Escucha END de los maximizers parciales
-                self.middleware_exchange_receiver = MessageMiddlewareExchange("rabbitmq", "THIRD_END_MESSAGE", [""], exchange_type="fanout")
-                self.middleware_exchange_sender = MessageMiddlewareExchange("rabbitmq", "FOURTH_END_MESSAGE", [""], exchange_type="fanout")
+                # NO necesita exchange para END - simplemente cuenta cuando recibe datos de los 3 maximizers parciales
+                self.middleware_exchange_sender = MessageMiddlewareQueue("rabbitmq", "to_join_items")  # Envía al joiner cuando termine
+                self.expected_partial_maximizers = 3  # Sabemos que son 3: rango 1, 4, 7
             else:
                 # Maximizers parciales - envían al absolute max
                 self.data_sender = MessageMiddlewareQueue("rabbitmq", "to_absolute_max")
-                self.end_sender = MessageMiddlewareExchange("rabbitmq", "THIRD_END_MESSAGE", [""], exchange_type="fanout")
                 if self.maximizer_range == "1":
                     self.data_receiver = MessageMiddlewareQueue("rabbitmq", "to_max_1_3")
                 elif self.maximizer_range == "4":
@@ -47,16 +47,17 @@ class Maximizer:
                     self.data_receiver = MessageMiddlewareQueue("rabbitmq", "to_max_7_8")
                 else:
                     raise ValueError(f"Rango de maximizer inválido: {self.maximizer_range}")
-                # Escucha END de los aggregators
-                self.middleware_exchange_receiver = MessageMiddlewareExchange("rabbitmq", "SECOND_END_MESSAGE", [""], exchange_type="fanout")
+                # Escucha END de los aggregators - usando convención consistente
+                self.middleware_exchange_receiver = MessageMiddlewareExchange("rabbitmq", "end_exchange_aggregator_PRODUCTS", [""], exchange_type="fanout")
                     
         elif self.maximizer_type == "TOP3":
             # Para TOP3 clientes por store (Query 4)
             self.top3_by_store = defaultdict(list)  # store_id -> [(count, user_id), ...]
             self.data_receiver = MessageMiddlewareQueue("rabbitmq", "transactions_sum_by_client")
             self.data_sender = MessageMiddlewareQueue("rabbitmq", "top3_clients_by_store")
-            self.middleware_exchange_receiver = MessageMiddlewareExchange("rabbitmq", "SECOND_END_MESSAGE", [""], exchange_type="fanout")
-            self.middleware_exchange_sender = MessageMiddlewareExchange("rabbitmq", "THIRD_END_MESSAGE", [""], exchange_type="fanout")
+            # Escucha END del aggregator de PURCHASES - usando convención consistente
+            self.middleware_exchange_receiver = MessageMiddlewareExchange("rabbitmq", "end_exchange_aggregator_PURCHASES", [""], exchange_type="fanout")
+            self.middleware_exchange_sender = MessageMiddlewareExchange("rabbitmq", "end_exchange_maximizer_TOP3", [""], exchange_type="fanout")
         else:
             raise ValueError(f"Tipo de maximizer inválido: {self.maximizer_type}")
 
@@ -64,7 +65,7 @@ class Maximizer:
         return self.maximizer_range == "0"
     
     def run(self):
-        logging.info(f"Maximizer iniciado. Tipo: {self.maximizer_type}, Rango: {self.maximizer_range}")
+        logging.info(f"Maximizer iniciado. Tipo: {self.maximizer_type}, Rango: {self.maximizer_range}, Reciever: {self.data_receiver.queue_name}")
         
         results = []
         end_messages = []
@@ -86,23 +87,25 @@ class Maximizer:
         # Iniciar el consumer de END messages en background
         import threading
         def check_end_messages():
-            while not self.end_received:
-                try:
-                    self.middleware_exchange_receiver.connection.call_later(0.1, end_stop)
-                    self.middleware_exchange_receiver.start_consuming(end_callback)
-                except:
-                    pass  # Timeout es normal
-                
-                # Procesar END messages recibidos
-                for end_msg in end_messages:
-                    self.end_received = True
-                    logging.info(f"action: processing_end_message | type:{self.maximizer_type} | range:{self.maximizer_range}")
-                    end_messages.remove(end_msg)
-                    break
+            if not self.is_absolute_max():  # Solo los maximizers parciales escuchan SECOND_END_MESSAGE
+                while not self.end_received:
+                    try:
+                        self.middleware_exchange_receiver.connection.call_later(0.1, end_stop)
+                        self.middleware_exchange_receiver.start_consuming(end_callback)
+                    except:
+                        pass  # Timeout es normal
+                    
+                    # Procesar END messages recibidos
+                    for end_msg in end_messages:
+                        self.end_received = True
+                        logging.info(f"action: processing_end_message | type:{self.maximizer_type} | range:{self.maximizer_range}")
+                        end_messages.remove(end_msg)
+                        break
         
-        end_thread = threading.Thread(target=check_end_messages)
-        end_thread.daemon = True
-        end_thread.start()
+        if not self.is_absolute_max():
+            end_thread = threading.Thread(target=check_end_messages)
+            end_thread.daemon = True
+            end_thread.start()
 
         # Loop principal para procesar datos
         while not self.end_received:
@@ -125,6 +128,27 @@ class Maximizer:
                     
                     self.apply(chunk)
                     
+                    # Para absolute max: detectar cuándo termina cada maximizer parcial
+                    if self.is_absolute_max():
+                        # Contar maximizers parciales únicos que han enviado datos
+                        unique_ranges = set()
+                        for row in chunk.rows:
+                            if hasattr(row, 'transaction_id') and row.transaction_id:
+                                if 'range_1' in row.transaction_id:
+                                    unique_ranges.add('1')
+                                elif 'range_4' in row.transaction_id:
+                                    unique_ranges.add('4')
+                                elif 'range_7' in row.transaction_id:
+                                    unique_ranges.add('7')
+                        
+                        self.partial_maximizers_finished = len(unique_ranges)
+                        logging.info(f"action: absolute_max_tracking | partial_maximizers_seen:{self.partial_maximizers_finished}/{self.expected_partial_maximizers}")
+                        
+                        # Si recibimos datos de todos los maximizers parciales, podemos terminar
+                        if self.partial_maximizers_finished >= self.expected_partial_maximizers:
+                            self.end_received = True
+                            logging.info(f"action: absolute_max_ready | all_partial_maximizers_received:{self.partial_maximizers_finished}")
+                    
                     # Los maximizers parciales NO envían resultados hasta recibir END
                     # Solo el absolute max envía resultados finales
                     if self.maximizer_type == "TOP3":
@@ -145,25 +169,16 @@ class Maximizer:
             if self.is_absolute_max():
                 # Absolute max: enviar resultados finales al joiner
                 self.publish_absolute_max_results()
-                # Enviar END al joiner
+                # Enviar resultados al joiner usando queue
                 try:
-                    end_msg = f"client_id:{self.client_id or 1}"
-                    self.middleware_exchange_sender.send(end_msg)
-                    self.middleware_exchange_sender.close()
-                    logging.info(f"action: sent_end_to_joiner | client_id:{self.client_id or 1}")
+                    logging.info(f"action: sent_results_to_joiner | client_id:{self.client_id or 1}")
                 except Exception as e:
-                    logging.error(f"action: error_sending_end_to_joiner | error:{e}")
+                    logging.error(f"action: error_sending_to_joiner | error:{e}")
             else:
                 # Maximizers parciales: enviar máximos al absolute max
                 self.publish_partial_max_results()
-                # Enviar END a absolute max
-                try:
-                    end_msg = f"client_id:{self.client_id or 1},range:{self.maximizer_range}"
-                    self.end_sender.send(end_msg)
-                    self.end_sender.close()
-                    logging.info(f"action: sent_end_to_absolute_max | range:{self.maximizer_range} | client_id:{self.client_id or 1}")
-                except Exception as e:
-                    logging.error(f"action: error_sending_end_to_absolute_max | error:{e}")
+                # NO necesitan enviar END message ya que el absolute max detecta automáticamente
+                logging.info(f"action: partial_maximizer_finished | range:{self.maximizer_range} | client_id:{self.client_id or 1}")
         elif self.maximizer_type == "TOP3":
             # Enviar resultados finales de TOP3
             self.publish_top3_final_results()

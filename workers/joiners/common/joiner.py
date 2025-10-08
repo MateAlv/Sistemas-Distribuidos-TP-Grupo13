@@ -38,7 +38,8 @@ class Joiner:
         
         self.data_sender = MessageMiddlewareQueue("rabbitmq", "to_merge_data")
         self.middleware_exchange_receiver = MessageMiddlewareExchange("rabbitmq", "SECOND_END_MESSAGE", [""], exchange_type="fanout")
-        self.middleware_exchange_sender = MessageMiddlewareExchange("rabbitmq", "SECOND_END_MESSAGE", [""], exchange_type="fanout")
+        # El joiner NO debe reenviar END messages - solo recibirlos
+        # self.middleware_exchange_sender = MessageMiddlewareExchange("rabbitmq", "SECOND_END_MESSAGE", [""], exchange_type="fanout")
     
     def handle_join_data(self):
         

@@ -38,15 +38,18 @@ class Aggregator:
         if self.aggregator_type == "PRODUCTS":
             self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", "to_agg_1+2")
             self.middleware_exchange_receiver = MessageMiddlewareExchange("rabbitmq", "FIRST_END_MESSAGE", [""], exchange_type="fanout")
-            self.middleware_exchange_sender = MessageMiddlewareExchange("rabbitmq", "SECOND_END_MESSAGE", [""], exchange_type="fanout")
+            # Exchange específico para enviar END a maximizers - siguiendo convención de filters
+            self.middleware_exchange_sender = MessageMiddlewareExchange("rabbitmq", f"end_exchange_aggregator_{self.aggregator_type}", [""], exchange_type="fanout")
         elif self.aggregator_type == "PURCHASES":
             self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", "transactions")
             self.middleware_exchange_receiver = MessageMiddlewareExchange("rabbitmq", "FIRST_END_MESSAGE", [""], exchange_type="fanout")
-            self.middleware_exchange_sender = MessageMiddlewareExchange("rabbitmq", "SECOND_END_MESSAGE", [""], exchange_type="fanout")
+            # Exchange específico para PURCHASES
+            self.middleware_exchange_sender = MessageMiddlewareExchange("rabbitmq", f"end_exchange_aggregator_{self.aggregator_type}", [""], exchange_type="fanout")
         elif self.aggregator_type == "TPV":
             self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", "transactions")
             self.middleware_exchange_receiver = MessageMiddlewareExchange("rabbitmq", "FIRST_END_MESSAGE", [""], exchange_type="fanout")
-            self.middleware_exchange_sender = MessageMiddlewareExchange("rabbitmq", "SECOND_END_MESSAGE", [""], exchange_type="fanout")
+            # Exchange específico para TPV  
+            self.middleware_exchange_sender = MessageMiddlewareExchange("rabbitmq", f"end_exchange_aggregator_{self.aggregator_type}", [""], exchange_type="fanout")
         else:
             raise ValueError(f"Tipo de agregador inválido: {self.aggregator_type}")
 
@@ -445,7 +448,7 @@ class Aggregator:
         """Envía END message a maximizers cuando todos los aggregators terminaron"""
         logging.info(f"action: sending_end_message | type:{self.aggregator_type} | cli_id:{client_id} | file_type:{table_type.name} | total_chunks:{total_processed}")
         
-        # AHORA SÍ: Publicar resultados finales acumulados
+        # Enviar resultados finales acumulados
         self.publish_final_results(client_id, table_type)
         
         # Enviar END a maximizers

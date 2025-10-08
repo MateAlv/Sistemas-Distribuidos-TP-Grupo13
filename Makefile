@@ -69,3 +69,8 @@ hard-down:
 	- docker kill $$(docker ps -q --filter "name=tp-distribuidos-grupo13") 
 	- docker rm -f $$(docker ps -aq --filter "name=tp-distribuidos-grupo13")
 .PHONY: hard-down
+
+prune:
+	docker image prune -a -f
+	docker system prune -f
+.PHONY: prune
