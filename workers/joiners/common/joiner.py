@@ -236,8 +236,19 @@ class Joiner:
         # Check if we haven't already processed this client
         not_processed = client_id not in self.completed_clients
         
+        # Detailed logging to debug join readiness
+        logging.info(f"action: checking_join_readiness | type:{self.joiner_type} | client_id:{client_id} | has_maximizer_data:{has_maximizer_data} | has_end_message:{has_end_message} | not_processed:{not_processed}")
+        logging.info(f"action: join_state_details | type:{self.joiner_type} | client_id:{client_id} | joiner_data_chunks_keys:{list(self.joiner_data_chunks.keys())} | end_messages_received:{list(self.client_end_messages_received)} | completed_clients:{list(self.completed_clients)}")
+        
         if has_maximizer_data and has_end_message and not_processed:
             logging.info(f"action: ready_to_join | client_id:{client_id} | has_data:{has_maximizer_data} | has_end:{has_end_message}")
+        else:
+            if not has_maximizer_data:
+                logging.info(f"action: not_ready_to_join | reason:no_maximizer_data | client_id:{client_id}")
+            if not has_end_message:
+                logging.info(f"action: not_ready_to_join | reason:no_end_message | client_id:{client_id}")
+            if not not_processed:
+                logging.info(f"action: not_ready_to_join | reason:already_processed | client_id:{client_id}")
         
         return has_maximizer_data and has_end_message and not_processed
     

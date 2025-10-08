@@ -177,7 +177,6 @@ class Maximizer:
                 try:
                     end_msg = MessageEnd(self.client_id or 1, TableType.TRANSACTION_ITEMS, 1)
                     self.middleware_exchange_sender.send(end_msg.encode())
-                    self.middleware_exchange_sender.close()
                     logging.info(f"action: sent_end_message_to_joiner | client_id:{self.client_id or 1} | format:END;{self.client_id or 1};{TableType.TRANSACTION_ITEMS.value};1")
                 except Exception as e:
                     logging.error(f"action: error_sending_end_to_joiner | error:{e}")
@@ -411,7 +410,6 @@ class Maximizer:
             try:
                 end_msg = MessageEnd(self.client_id or 1, TableType.TRANSACTIONS, 1)
                 self.middleware_exchange_sender.send(end_msg.encode())
-                self.middleware_exchange_sender.close()
                 logging.info(f"action: sent_top3_end_message | client_id:{self.client_id or 1} | format:END;{self.client_id or 1};{TableType.TRANSACTIONS.value};1")
             except Exception as e:
                 logging.error(f"action: error_sending_top3_end_message | error:{e}")
