@@ -76,18 +76,50 @@ class Joiner:
                 results.remove(data)
                 
     def handle_data(self):
-        """Maneja datos del maximizer"""
+        """Maneja datos del maximizer y END messages del exchange"""
         results = []
+        end_results = []
         
         def callback(msg): results.append(msg)
+        def end_callback(msg): end_results.append(msg)
         def stop():
             self.data_receiver.stop_consuming()
+        def end_stop():
+            self.middleware_exchange_receiver.stop_consuming()
 
         while True:
-            # Escuchar datos del maximizer
+            # Escuchar END messages del exchange con timeout
+            self.middleware_exchange_receiver.connection.call_later(TIMEOUT, end_stop)
+            self.middleware_exchange_receiver.start_consuming(end_callback)
+            
+            # Escuchar datos del maximizer con timeout
             self.data_receiver.connection.call_later(TIMEOUT, stop)
             self.data_receiver.start_consuming(callback)
 
+            # Procesar END messages primero
+            for end_data in end_results:
+                try:
+                    end_message = MessageEnd.decode(end_data)
+                    client_id = end_message.client_id()
+                    table_type = end_message.table_type()
+                    
+                    with self.lock:
+                        self.client_end_messages_received.add(client_id)
+                        logging.info(f"action: received_end_message | type:{self.joiner_type} | client_id:{client_id} | table_type:{table_type} | count:{end_message.total_chunks()}")
+                        
+                        # Check if any clients are now ready to join
+                        for existing_client in self.joiner_data_chunks.keys():
+                            if self.is_ready_to_join_for_client(existing_client):
+                                logging.info(f"action: ready_to_join_after_end | type:{self.joiner_type} | client_id:{existing_client}")
+                                self.apply_for_client(existing_client)
+                                self.publish_results(existing_client)
+                                self.completed_clients.add(existing_client)
+                        
+                except Exception as e:
+                    logging.error(f"action: error_parsing_end_message | type:{self.joiner_type} | error:{e} | msg:{end_data}")
+                end_results.remove(end_data)
+
+            # Procesar datos del maximizer
             for data in results:
                 try:
                     chunk = ProcessBatchReader.from_bytes(data)
@@ -174,45 +206,13 @@ class Joiner:
     
     def run(self):
         logging.info(f"Joiner iniciado. Tipo: {self.joiner_type}")
-        # Iniciar hilos para manejar data y join_data
+        # Iniciar hilos para manejar data y join_data (eliminamos end_message_handler_thread)
         data_handler_thread = threading.Thread(target=self.handle_data, name="DataHandler")
         join_data_handler_thread = threading.Thread(target=self.handle_join_data, name="JoinDataHandler")
-        end_message_handler_thread = threading.Thread(target=self.handle_end_messages, name="EndMessageHandler")
         
         data_handler_thread.start() 
         join_data_handler_thread.start()
-        end_message_handler_thread.start()
     
-    def handle_end_messages(self):
-        """Handle end messages from the maximizer pipeline"""
-        logging.info(f"action: start_end_message_handler | type:{self.joiner_type} | listening_on:end_exchange_maximizer_PRODUCTS")
-        
-        def end_callback(msg):
-            # Parse the client_id from the end message using MessageEnd format
-            logging.info(f"action: received_raw_end_message | type:{self.joiner_type} | msg_size:{len(msg)} | msg_preview:{msg[:100] if len(msg) > 100 else msg}")
-            try:
-                # Parse using MessageEnd format: END;{client_id};{table_type};{count}
-                end_message = MessageEnd.decode(msg)
-                client_id = end_message.client_id()
-                table_type = end_message.table_type()
-                
-                with self.lock:
-                    self.client_end_messages_received.add(client_id)
-                    logging.info(f"action: received_end_message | type:{self.joiner_type} | client_id:{client_id} | table_type:{table_type} | count:{end_message.total_chunks()}")
-                    
-            except Exception as e:
-                logging.error(f"action: error_parsing_end_message | type:{self.joiner_type} | error:{e} | msg:{msg}")
-        
-        # Listen for end messages without timeout - blocking until message arrives
-        try:
-            logging.info(f"action: exchange_start_consuming | type:{self.joiner_type} | exchange:{self.middleware_exchange_receiver.exchange_name}")
-            self.middleware_exchange_receiver.start_consuming(end_callback)
-            logging.info(f"action: exchange_consuming_started | type:{self.joiner_type} | exchange:{self.middleware_exchange_receiver.exchange_name}")
-        except Exception as e:
-            logging.error(f"action: end_message_handler_failed | type:{self.joiner_type} | error:{e}")
-            # If listening fails, the joiner should probably exit or restart
-            raise
-
     def define_queues(self):
         raise NotImplementedError("Subclasses must implement define_queues method")
 
