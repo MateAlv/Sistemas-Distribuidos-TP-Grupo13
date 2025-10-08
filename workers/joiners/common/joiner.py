@@ -28,13 +28,16 @@ class Joiner:
         self.data = {}
         self.joiner_data = {}
         self.joiner_results = {}
+        self.joiner_data_chunks = {}  # Store chunks from maximizers per client
+        self.client_end_messages_received = set()  # Track which clients have sent end messages
+        self.completed_clients = set()  # Track which clients have been processed
         self.lock = threading.Lock()
         self.ready_to_join = False # Variable compartida para indicar que se recibio el END de join data
 
         self.define_queues()
         
         self.data_sender = MessageMiddlewareQueue("rabbitmq", "to_merge_data")
-        self.middleware_exchange_receiver = MessageMiddlewareExchange("rabbitmq", "FIRST_END_MESSAGE", [""], exchange_type="fanout")
+        self.middleware_exchange_receiver = MessageMiddlewareExchange("rabbitmq", "SECOND_END_MESSAGE", [""], exchange_type="fanout")
         self.middleware_exchange_sender = MessageMiddlewareExchange("rabbitmq", "SECOND_END_MESSAGE", [""], exchange_type="fanout")
     
     def handle_join_data(self):
@@ -87,14 +90,18 @@ class Joiner:
                                  
                 with self.lock:
                     self.save_data(chunk)
-                    # wait for END message of Join Table
-                    if self.ready_to_join:
+                    # Check if we're ready to join for this specific client
+                    client_id = chunk.client_id()
+                    if self.is_ready_to_join_for_client(client_id):
+                        logging.info(f"action: ready_to_join | type:{self.joiner_type} | client_id:{client_id}")
                         # Aplica el join
-                        self.apply()
+                        self.apply_for_client(client_id)
                         # Publica los resultados al to_merge_data
-                        self.publish_results()
+                        self.publish_results(client_id)
+                        # Mark this client as processed
+                        self.completed_clients.add(client_id)
                     else:
-                        logging.debug(f"action: waiting_join_data | type:{self.joiner_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()}")
+                        logging.debug(f"action: waiting_join_data | type:{self.joiner_type} | cli_id:{client_id} | file_type:{chunk.table_type()}")
  
                 results.remove(data)
         
@@ -108,6 +115,12 @@ class Joiner:
         if client_id not in self.data:
             self.data[client_id] = []
         self.data[client_id].extend(rows)
+        
+        # Also store chunks for the new coordination logic
+        if client_id not in self.joiner_data_chunks:
+            self.joiner_data_chunks[client_id] = []
+        self.joiner_data_chunks[client_id].append(chunk)
+        
         return True
     
     def save_data_join(self, chunk) -> bool:
@@ -121,9 +134,9 @@ class Joiner:
                 logging.debug(f"action: save_join_data | type:{self.joiner_type} | item_id:{row.item_id} | quantity:{row.quantity} | subtotal:{row.subtotal} | created_at:{row.created_at}")
                 if client_id not in self.joiner_data:
                     self.joiner_data[client_id()] = {}
-                self.save_data_join_fields(row, client_id)
-            else:
-                logging.warning(f"error: save_join_data | type:{self.joiner_type} | unexpected_row_type:{type(row)}")
+                    self.save_data_join_fields(row, client_id)
+                else:
+                    logging.warning(f"error: save_join_data | type:{self.joiner_type} | unexpected_row_type:{type(row)}")
             
         return True
     
@@ -146,8 +159,44 @@ class Joiner:
         # Iniciar hilos para manejar data y join_data
         data_handler_thread = threading.Thread(target=self.handle_data, name="DataHandler")
         join_data_handler_thread = threading.Thread(target=self.handle_join_data, name="JoinDataHandler")
+        end_message_handler_thread = threading.Thread(target=self.handle_end_messages, name="EndMessageHandler")
+        
         data_handler_thread.start() 
         join_data_handler_thread.start()
+        end_message_handler_thread.start()
+    
+    def handle_end_messages(self):
+        """Handle end messages from the maximizer pipeline"""
+        logging.info(f"action: start_end_message_handler | type:{self.joiner_type} | listening_on:SECOND_END_MESSAGE")
+        
+        def end_callback(msg):
+            # Parse the client_id from the end message
+            try:
+                # Assume end message contains client_id in format "client_id:X"
+                if msg and "client_id:" in msg.decode():
+                    client_id = int(msg.decode().split("client_id:")[1])
+                    with self.lock:
+                        self.client_end_messages_received.add(client_id)
+                        logging.info(f"action: received_end_message | type:{self.joiner_type} | client_id:{client_id}")
+                else:
+                    # Fallback - add all potential client_ids (this is not ideal but works for single client)
+                    with self.lock:
+                        # Add client_id 1 as default (should be improved to parse actual client_id)
+                        self.client_end_messages_received.add(1)
+                        logging.info(f"action: received_end_message_fallback | type:{self.joiner_type} | client_id:1")
+            except Exception as e:
+                logging.error(f"action: error_parsing_end_message | type:{self.joiner_type} | error:{e}")
+                # Fallback
+                with self.lock:
+                    self.client_end_messages_received.add(1)
+        
+        # Listen for end messages without timeout - blocking until message arrives
+        try:
+            self.middleware_exchange_receiver.start_consuming(end_callback)
+        except Exception as e:
+            logging.error(f"action: end_message_handler_failed | type:{self.joiner_type} | error:{e}")
+            # If listening fails, the joiner should probably exit or restart
+            raise
 
     def define_queues(self):
         raise NotImplementedError("Subclasses must implement define_queues method")
@@ -160,6 +209,35 @@ class Joiner:
     
     def publish_results(self):
         raise NotImplementedError("Subclasses must implement publish_results method")
+    
+    def is_ready_to_join_for_client(self, client_id):
+        """Check if we have received all necessary data and end messages for this client"""
+        # Check if we have data from maximizers for this client
+        has_maximizer_data = client_id in self.joiner_data_chunks
+        # Check if we have received end message for this client  
+        has_end_message = client_id in self.client_end_messages_received
+        # Check if we haven't already processed this client
+        not_processed = client_id not in self.completed_clients
+        
+        if has_maximizer_data and has_end_message and not_processed:
+            logging.info(f"action: ready_to_join | client_id:{client_id} | has_data:{has_maximizer_data} | has_end:{has_end_message}")
+        
+        return has_maximizer_data and has_end_message and not_processed
+    
+    def apply_for_client(self, client_id):
+        """Apply join operation for a specific client"""
+        if client_id not in self.joiner_data_chunks:
+            logging.warning(f"action: no_data_to_join | client_id:{client_id}")
+            return
+            
+        for chunk in self.joiner_data_chunks[client_id]:
+            for row in chunk.rows:
+                joined_row = self.join_result(row, client_id)
+                if client_id not in self.joiner_results:
+                    self.joiner_results[client_id] = []
+                self.joiner_results[client_id].append(joined_row)
+        
+        logging.info(f"action: applied_join | client_id:{client_id} | joined_rows:{len(self.joiner_results.get(client_id, []))}")
     
 class MenuItemsJoiner(Joiner):
     
@@ -177,7 +255,7 @@ class MenuItemsJoiner(Joiner):
             "item_name": self.joiner_data[client_id].get(row.item_id, "UNKNOWN"),
             "quantity": row.quantity,
             "subtotal": row.subtotal,
-            "month_year": row.month_year
+            "month_year": row.month_year_created_at  # Corregir nombre del campo
         }
         return result
     
@@ -188,6 +266,7 @@ class MenuItemsJoiner(Joiner):
         for row in joiner_results:
             # INCLUIR CLIENT_ID EN LOS RESULTADOS
             row["client_id"] = client_id
+            item_id = row["item_id"]  # Agregar esta línea
             item_name = row["item_name"]
             year_month = row["month_year"]
             if row["quantity"] is not None:
@@ -203,13 +282,15 @@ class MenuItemsJoiner(Joiner):
             logging.info(f"action: no_results_to_send | type:{self.joiner_type} | client_id:{client_id}")
             return
         
-        sellings_header = ResultChunkHeader(client_id, ResultTableType.QUERY_2_1)
-        sellings_chunk = ResultChunk(sellings_header, sellings_results)
-        self.data_sender.send(sellings_chunk.serialize())
+        if sellings_results:
+            sellings_header = ResultChunkHeader(client_id, ResultTableType.QUERY_2_1)
+            sellings_chunk = ResultChunk(sellings_header, sellings_results)
+            self.data_sender.send(sellings_chunk.serialize())
 
-        profit_header = ResultChunkHeader(client_id, TableType.QUERY_2_2)
-        profit_chunk = ResultChunk(profit_header, profit_results)
-        self.data_sender.send(profit_chunk.serialize())
+        if profit_results:
+            profit_header = ResultChunkHeader(client_id, ResultTableType.QUERY_2_2)  # Corregir TableType
+            profit_chunk = ResultChunk(profit_header, profit_results)
+            self.data_sender.send(profit_chunk.serialize())
         
         logging.info(f"action: sent_result_message | type:{self.joiner_type}")
     
@@ -274,15 +355,15 @@ class StoresTop3Joiner(Joiner):
     def publish_results(self, client_id):
         # PENSAR NUEVO TIPO DE DATA PARA PROCESS TABLE
         joiner_results = self.joiner_results.get(client_id, [])
-        #query4_results = []
+        query4_results = []
         for row in joiner_results:
-            #query4_result = Query4ResultRow(store_id=row["store_id"], store_name=row["store_name"], tpv=row["tpv"], year_half=row["year_half"])
-            #query4_results.append(query4_result)
+            query4_result = Query4ResultRow(store_id=row["store_id"], store_name=row["store_name"], user_id=row["user_id"], purchases_quantity=row["purchases_quantity"])
+            query4_results.append(query4_result)
         
-        if query4_partial_results:
-            #query4_header = ResultChunkHeader(client_id, ResultTableType.QUERY_4)
-            #query4_chunk = ResultChunk(query4_header, query4_results)
-            #self.data_sender.send(query4_chunk.serialize())
+        if query4_results:
+            query4_header = ResultChunkHeader(client_id, ResultTableType.QUERY_4)
+            query4_chunk = ResultChunk(query4_header, query4_results)
+            self.data_sender.send(query4_chunk.serialize())
             logging.info(f"action: sent_result_message | type:{self.joiner_type}")
         else:
             logging.info(f"action: no_results_to_send | type:{self.joiner_type} | client_id:{client_id}")

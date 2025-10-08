@@ -42,14 +42,24 @@ test:
 .PHONY: test
 
 images-clean:
-	docker rmi tp-distribuidos-grupo13-server:latest 
-	docker rmi tp-distribuidos-grupo13-client_id_1:latest 
-	docker rmi tp-distribuidos-grupo13-filter_year_id_1_service:latest   
-	docker rmi tp-distribuidos-grupo13-aggregator_products_id_1_service:latest 
-	docker rmi tp-distribuidos-grupo13-joiner_items_id_1_service:latest 
-	docker rmi tp-distribuidos-grupo13-maximizer_max_1_3_id_1_service:latest 
-	docker rmi tp-distribuidos-grupo13-maximizer_max_4_6_id_1_service:latest 
-	docker rmi tp-distribuidos-grupo13-maximizer_max_7_8_id_1_service:latest 
-	docker rmi tp-distribuidos-grupo13-maximizer_max_absolute_id_1_service:latest
+	# Stop and remove all containers first
+	docker compose -f ${DOCKER} down --remove-orphans || true
+	docker container prune -f || true
+	
+	# Remove images with force and ignore errors if they don't exist
+	docker rmi -f tp-distribuidos-grupo13-server:latest || true
+	docker rmi -f tp-distribuidos-grupo13-client1:latest || true
+	docker rmi -f tp-distribuidos-grupo13-filter_year:latest || true
+	docker rmi -f tp-distribuidos-grupo13-filter_amount:latest || true
+	docker rmi -f tp-distribuidos-grupo13-filter_hour:latest || true
+	docker rmi -f tp-distribuidos-grupo13-aggregator_products_service:latest || true
+	docker rmi -f tp-distribuidos-grupo13-joiner_items_service:latest || true
+	docker rmi -f tp-distribuidos-grupo13-maximizer_products_1_service:latest || true
+	docker rmi -f tp-distribuidos-grupo13-maximizer_products_2_service:latest || true
+	docker rmi -f tp-distribuidos-grupo13-maximizer_products_3_service:latest || true
+	docker rmi -f tp-distribuidos-grupo13-maximizer_absolute_service:latest || true
+	# Clean up any dangling images
+	docker image prune -f || true
+
 
 .PHONY: images-clean

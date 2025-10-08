@@ -156,6 +156,32 @@ services:
       - ./middleware:/workers/middleware:ro
     networks:
       - testing_net
+    depends_on:
+      server:
+        condition: service_started
+
+  # -------------------------
+  # JOINERS
+  # -------------------------
+  joiner_items:
+    build:
+      context: .
+      dockerfile: workers/joiners/Dockerfile
+    container_name: joiner_items_service
+    command: ["python", "main.py"]
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOGGING_LEVEL=DEBUG
+      - JOINER_TYPE=ITEMS
+    volumes:
+      - ./utils:/workers/utils:ro
+      - ./middleware:/workers/middleware:ro
+    networks:
+      - testing_net
+    depends_on:
+      server:
+        condition: service_started
+
   client1:
     container_name: client1
     build:

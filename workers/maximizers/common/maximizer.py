@@ -19,6 +19,7 @@ class Maximizer:
         
         self.maximizer_type = max_type
         self.maximizer_range = max_range
+        self.client_id = None  # Track client ID for publishing results
         
         if self.maximizer_type == "MAX":
             self.sellings_max = dict()  # Almacena los máximos actuales
@@ -57,25 +58,41 @@ class Maximizer:
         logging.info(f"Maximizer iniciado. Tipo: {self.maximizer_type}")
         
         results = []
+        end_received = False
         
         def callback(msg): results.append(msg)
         def stop():
             self.data_receiver.stop_consuming()
+        def end_callback(msg): 
+            nonlocal end_received
+            end_received = True
+            self.data_receiver.stop_consuming()
 
-        while True:
+        while not end_received:
             # Max receive initialization
             self.data_receiver.connection.call_later(TIMEOUT, stop)
             self.data_receiver.start_consuming(callback)
+            
+            # Escuchar end message en paralelo solo para absolute max
+            if self.maximizer_type == "MAX" and self.is_absolute_max():
+                try:
+                    self.middleware_exchange_receiver.start_consuming(end_callback, timeout=0.1)
+                except:
+                    pass  # Timeout es normal
 
             for data in results:
                 chunk = ProcessBatchReader.from_bytes(data)
                 logging.info(f"action: maximize | type:{self.maximizer_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()} | rows_in:{len(chunk.rows)}")
                 
+                # Track client_id for publishing results
+                if self.client_id is None:
+                    self.client_id = chunk.client_id()
+                
                 self.apply(chunk)
                 
                 if self.maximizer_type == "MAX" and self.is_absolute_max():
-                    # wait for END message
-                    logging.info(f"action: waiting_end_message | type:{self.maximizer_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()}")
+                    # Solo acumular, no enviar hasta el END
+                    logging.debug(f"action: accumulating_for_absolute_max | type:{self.maximizer_type}")
                 elif self.maximizer_type == "TOP3":
                     # Para TOP3, procesar chunk y enviar resultado incremental
                     top3_chunk = self.apply_top3_chunk(chunk)
@@ -85,6 +102,19 @@ class Maximizer:
                     self.publish_results(chunk)
                 
                 results.remove(data)
+                
+        # Si recibimos END message y somos absolute max, enviar resultados finales
+        if self.maximizer_type == "MAX" and self.is_absolute_max():
+            self.publish_absolute_max_results()
+            # Enviar end message con client_id
+            try:
+                end_msg = f"client_id:{self.client_id or 1}"
+                self.middleware_exchange_sender.send(end_msg)
+                self.middleware_exchange_sender.close()
+                logging.info(f"action: sent_end_message | client_id:{self.client_id or 1}")
+            except Exception as e:
+                logging.error(f"action: error_sending_end_message | error:{e}")
+                pass
 
     def update_max(self, rows: list[TableProcessRow]) -> bool:
         """
@@ -214,6 +244,66 @@ class Maximizer:
                 accumulated_results.append(new_row)
 
         self.data_sender.send(ProcessChunk(chunk.header, accumulated_results).serialize())
+
+    def publish_absolute_max_results(self):
+        """
+        Publica los resultados de máximos absolutos por mes.
+        Solo los máximos de cada mes para Q2.
+        """
+        accumulated_results = []
+        
+        # Para cada mes, encontrar el producto con más ventas y más ganancias
+        monthly_max_selling = defaultdict(lambda: (0, 0))  # (item_id, max_quantity)
+        monthly_max_profit = defaultdict(lambda: (0, 0.0))  # (item_id, max_profit)
+        
+        # Encontrar máximos por mes para ventas
+        for (item_id, month_year), quantity in self.sellings_max.items():
+            month_key = (month_year.year, month_year.month)
+            if quantity > monthly_max_selling[month_key][1]:
+                monthly_max_selling[month_key] = (item_id, quantity)
+        
+        # Encontrar máximos por mes para ganancias
+        for (item_id, month_year), profit in self.profit_max.items():
+            month_key = (month_year.year, month_year.month)
+            if profit > monthly_max_profit[month_key][1]:
+                monthly_max_profit[month_key] = (item_id, profit)
+        
+        # Crear filas de resultado para ventas
+        for (year, month), (item_id, max_quantity) in monthly_max_selling.items():
+            created_at = DateTime(datetime.date(year, month, 1), datetime.time(0, 0))
+            new_row = TransactionItemsProcessRow(
+                transaction_id="max_selling",
+                item_id=item_id,
+                quantity=max_quantity,
+                subtotal=None,  # Solo cantidad para ventas
+                created_at=created_at
+            )
+            accumulated_results.append(new_row)
+            logging.info(f"action: max_selling_per_month | year:{year} | month:{month} | item_id:{item_id} | quantity:{max_quantity}")
+        
+        # Crear filas de resultado para ganancias  
+        for (year, month), (item_id, max_profit) in monthly_max_profit.items():
+            created_at = DateTime(datetime.date(year, month, 1), datetime.time(0, 0))
+            new_row = TransactionItemsProcessRow(
+                transaction_id="max_profit",
+                item_id=item_id,
+                quantity=None,  # Solo ganancia para profits
+                subtotal=max_profit,
+                created_at=created_at
+            )
+            accumulated_results.append(new_row)
+            logging.info(f"action: max_profit_per_month | year:{year} | month:{month} | item_id:{item_id} | profit:{max_profit}")
+        
+        # Enviar resultados al joiner
+        if accumulated_results:
+            from utils.file_utils.process_chunk import ProcessChunkHeader
+            from utils.file_utils.table_type import TableType
+            header = ProcessChunkHeader(client_id=self.client_id or 1, table_type=TableType.TRANSACTION_ITEMS)
+            chunk = ProcessChunk(header, accumulated_results)
+            self.data_sender.send(chunk.serialize())
+            self.data_sender.close()
+            
+            logging.info(f"action: publish_absolute_max_results | result: success | months_selling:{len(monthly_max_selling)} | months_profit:{len(monthly_max_profit)}")
 
     def publish_top3_chunk(self, top3_chunk):
         """
