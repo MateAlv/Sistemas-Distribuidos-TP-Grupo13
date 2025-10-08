@@ -46,22 +46,22 @@ images-clean:
 	docker compose -f ${DOCKER} down --remove-orphans || true
 	docker container prune -f || true
 	
-	# Remove images with force and ignore errors if they don't exist
-	docker rmi -f tp-distribuidos-grupo13-server:latest || true
-	docker rmi -f tp-distribuidos-grupo13-client1:latest || true
-	docker rmi -f tp-distribuidos-grupo13-filter_year:latest || true
-	docker rmi -f tp-distribuidos-grupo13-filter_amount:latest || true
-	docker rmi -f tp-distribuidos-grupo13-filter_hour:latest || true
-	docker rmi -f tp-distribuidos-grupo13-aggregator_products_service:latest || true
-	docker rmi -f tp-distribuidos-grupo13-joiner_items_service:latest || true
-	docker rmi -f tp-distribuidos-grupo13-maximizer_products_1_service:latest || true
-	docker rmi -f tp-distribuidos-grupo13-maximizer_products_2_service:latest || true
-	docker rmi -f tp-distribuidos-grupo13-maximizer_products_3_service:latest || true
-	docker rmi -f tp-distribuidos-grupo13-maximizer_absolute_service:latest || true
+	# Remove all images from this project by name pattern
+	docker images --format "table {{.Repository}}:{{.Tag}}" | grep -E "tp-distribuidos-grupo13|server|client|filter|aggregator|joiner|maximizer" | xargs -r docker rmi -f || true
+	
+	# Remove specific images that might remain
+	docker rmi -f tp-distribuidos-grupo13-server || true
+	docker rmi -f tp-distribuidos-grupo13-client1 || true
+	docker rmi -f tp-distribuidos-grupo13-filter_year_1 || true
+	docker rmi -f tp-distribuidos-grupo13-aggregator_products || true
+	docker rmi -f tp-distribuidos-grupo13-maximizer_products_1 || true
+	docker rmi -f tp-distribuidos-grupo13-maximizer_products_4 || true
+	docker rmi -f tp-distribuidos-grupo13-maximizer_products_7 || true
+	docker rmi -f tp-distribuidos-grupo13-maximizer_absolute || true
+	docker rmi -f tp-distribuidos-grupo13-joiner_items || true
+	
 	# Clean up any dangling images
 	docker image prune -f || true
-
-
 .PHONY: images-clean
 
 hard-down:
@@ -69,3 +69,8 @@ hard-down:
 	- docker kill $$(docker ps -q --filter "name=tp-distribuidos-grupo13") 
 	- docker rm -f $$(docker ps -aq --filter "name=tp-distribuidos-grupo13")
 .PHONY: hard-down
+
+prune:
+	docker image prune -a -f
+	docker system prune -f
+.PHONY: prune
