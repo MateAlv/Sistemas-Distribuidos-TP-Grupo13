@@ -197,7 +197,7 @@ class Client:
         except Exception as e:
             logging.error("Cliente %s: error esperando resultados: %s", self.id, e)
     
-    def _obtain_csv_header(query_type: ResultTableType) -> str:
+    def _obtain_csv_header(self, query_type: ResultTableType) -> str:
         if query_type == ResultTableType.QUERY_1:
             return "transaction_id,final_amount\n"
         elif query_type == ResultTableType.QUERY_2_1:
