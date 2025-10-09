@@ -161,7 +161,10 @@ class Client:
                                    self.id, results_received, result_chunk.query_type().name, 
                                    len(result_chunk.rows), len(full_chunk_data))
 
-                        output_path = f"results_{result_chunk.query_type().name.lower()}"
+                        output_path = os.path.join(
+                                        self.output_dir,
+                                        f"results_{result_chunk.query_type().name.lower()}.csv"
+                                    )
                         csv_header = self._obtain_csv_header(result_chunk.query_type())
                         self._save_process_chunk_as_csv(result_chunk, output_path, csv_header)
                         
