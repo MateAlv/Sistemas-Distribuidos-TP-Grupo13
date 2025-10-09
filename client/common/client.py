@@ -161,7 +161,10 @@ class Client:
                                    self.id, results_received, result_chunk.query_type().name, 
                                    len(result_chunk.rows), len(full_chunk_data))
 
-                        output_path = f"results_{result_chunk.query_type().name.lower()}"
+                        output_path = os.path.join(
+                                        self.output_dir,
+                                        f"results_{result_chunk.query_type().name.lower()}.csv"
+                                    )
                         csv_header = self._obtain_csv_header(result_chunk.query_type())
                         self._save_process_chunk_as_csv(result_chunk, output_path, csv_header)
                         
@@ -197,7 +200,7 @@ class Client:
         except Exception as e:
             logging.error("Cliente %s: error esperando resultados: %s", self.id, e)
     
-    def _obtain_csv_header(query_type: ResultTableType) -> str:
+    def _obtain_csv_header(self, query_type: ResultTableType) -> str:
         if query_type == ResultTableType.QUERY_1:
             return "transaction_id,final_amount\n"
         elif query_type == ResultTableType.QUERY_2_1:
@@ -219,9 +222,9 @@ class Client:
         except FileNotFoundError:
             file_exists = False
 
-        with open(output_path, "a") as f:
+        with open(output_path, "ab") as f:
             if not file_exists:
-                f.write(csv_header)
+                f.write(csv_header.encode())
             for row in process_chunk.rows:
                 data = row.serialize()
                 if not data.endswith(b'\n'):

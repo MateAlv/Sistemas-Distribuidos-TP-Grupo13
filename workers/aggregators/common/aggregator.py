@@ -37,18 +37,14 @@ class Aggregator:
         
         if self.aggregator_type == "PRODUCTS":
             self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", "to_agg_1+2")
-            self.middleware_exchange_receiver = MessageMiddlewareExchange("rabbitmq", "FIRST_END_MESSAGE", [""], exchange_type="fanout")
-            # Exchange específico para enviar END a maximizers - siguiendo convención de filters
-            self.middleware_exchange_sender = MessageMiddlewareExchange("rabbitmq", f"end_exchange_aggregator_{self.aggregator_type}", [""], exchange_type="fanout")
+            self.middleware_queue_sender["to_max_1_3"] = MessageMiddlewareQueue("rabbitmq", "to_max_1_3")
+            self.middleware_queue_sender["to_max_4_6"] = MessageMiddlewareQueue("rabbitmq", "to_max_4_6")
+            self.middleware_queue_sender["to_max_7_8"] = MessageMiddlewareQueue("rabbitmq", "to_max_7_8")
         elif self.aggregator_type == "PURCHASES":
             self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", "transactions")
-            self.middleware_exchange_receiver = MessageMiddlewareExchange("rabbitmq", "FIRST_END_MESSAGE", [""], exchange_type="fanout")
-            # Exchange específico para PURCHASES
             self.middleware_exchange_sender = MessageMiddlewareExchange("rabbitmq", f"end_exchange_aggregator_{self.aggregator_type}", [""], exchange_type="fanout")
         elif self.aggregator_type == "TPV":
             self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", "transactions")
-            self.middleware_exchange_receiver = MessageMiddlewareExchange("rabbitmq", "FIRST_END_MESSAGE", [""], exchange_type="fanout")
-            # Exchange específico para TPV  
             self.middleware_exchange_sender = MessageMiddlewareExchange("rabbitmq", f"end_exchange_aggregator_{self.aggregator_type}", [""], exchange_type="fanout")
         else:
             raise ValueError(f"Tipo de agregador inválido: {self.aggregator_type}")
@@ -382,23 +378,24 @@ class Aggregator:
         header = ProcessChunkHeader(client_id=chunk.header.client_id, table_type=TableType.TRANSACTIONS)
         return ProcessChunk(header, rows)
     
-    def publish_results_1_3(self, chunk, aggregated_rows: list[TableProcessRow]):
-        # Enviar los resultados a la cola correspondiente
-        queue = MessageMiddlewareQueue("rabbitmq", "to_max_1_3")
-        logging.info(f"action: sending_to_queue | type:{self.aggregator_type} | queue:to_max_products_1_3 | rows:{len(aggregated_rows)}")
-        queue.send(ProcessChunk(chunk.header, aggregated_rows).serialize())
+    #TODO: Delete this
+    # def publish_results_1_3(self, chunk, aggregated_rows: list[TableProcessRow]):
+    #     # Enviar los resultados a la cola correspondiente
+    #     queue = MessageMiddlewareQueue("rabbitmq", "to_max_1_3")
+    #     logging.info(f"action: sending_to_queue | type:{self.aggregator_type} | queue:to_max_products_1_3 | rows:{len(aggregated_rows)}")
+    #     queue.send(ProcessChunk(chunk.header, aggregated_rows).serialize())
 
-    def publish_results_4_6(self, chunk, aggregated_rows: list[TableProcessRow]):
-        # Enviar los resultados a la cola correspondiente
-        queue = MessageMiddlewareQueue("rabbitmq", "to_max_4_6")
-        logging.info(f"action: sending_to_queue | type:{self.aggregator_type} | queue:to_max_products_4_6 | rows:{len(aggregated_rows)}")
-        queue.send(ProcessChunk(chunk.header, aggregated_rows).serialize())
+    # def publish_results_4_6(self, chunk, aggregated_rows: list[TableProcessRow]):
+    #     # Enviar los resultados a la cola correspondiente
+    #     queue = MessageMiddlewareQueue("rabbitmq", "to_max_4_6")
+    #     logging.info(f"action: sending_to_queue | type:{self.aggregator_type} | queue:to_max_products_4_6 | rows:{len(aggregated_rows)}")
+    #     queue.send(ProcessChunk(chunk.header, aggregated_rows).serialize())
     
-    def publish_results_7_8(self, chunk, aggregated_rows: list[TableProcessRow]):
-        # Enviar los resultados a la cola correspondiente
-        queue = MessageMiddlewareQueue("rabbitmq", "to_max_7_8")
-        logging.info(f"action: sending_to_queue | type:{self.aggregator_type} | queue:to_max_products_7_8 | rows:{len(aggregated_rows)}")
-        queue.send(ProcessChunk(chunk.header, aggregated_rows).serialize())
+    # def publish_results_7_8(self, chunk, aggregated_rows: list[TableProcessRow]):
+    #     # Enviar los resultados a la cola correspondiente
+    #     queue = MessageMiddlewareQueue("rabbitmq", "to_max_7_8")
+    #     logging.info(f"action: sending_to_queue | type:{self.aggregator_type} | queue:to_max_products_7_8 | rows:{len(aggregated_rows)}")
+    #     queue.send(ProcessChunk(chunk.header, aggregated_rows).serialize())
 
     def publish_purchases_chunk(self, aggregated_chunk):
         """
@@ -454,10 +451,9 @@ class Aggregator:
         # Enviar END a maximizers
         try:
             end_msg = MessageEnd(client_id, table_type, total_processed)
-            # Para PRODUCTS, enviamos a los exchanges que van a maximizers
-            if self.aggregator_type == "PRODUCTS":
-                self.middleware_exchange_sender.send(end_msg.encode())
-                logging.info(f"action: sent_end_to_maximizers | type:{self.aggregator_type} | chunks:{total_processed}")
+            for queue in self.middleware_queue_sender.values():
+                queue.send(end_msg.encode()) 
+            logging.info(f"action: sent_end_to_maximizers | type:{self.aggregator_type} | chunks:{total_processed}")
         except Exception as e:
             logging.error(f"action: error_sending_end_message | error:{e}")
         
@@ -593,11 +589,10 @@ class Aggregator:
                     created_at=created_at
                 )
                 rows_1_3.append(row)
-            
-            queue = MessageMiddlewareQueue("rabbitmq", "to_max_1_3")
+
+            queue = self.middleware_queue_sender["to_max_1_3"]
             chunk_data = ProcessChunk(header, rows_1_3).serialize()
             queue.send(chunk_data)
-            queue.close()
             logging.info(f"action: publish_final_products_1_3 | client_id:{client_id} | rows:{len(rows_1_3)} | bytes_sent:{len(chunk_data)} | queue:to_max_1_3")
         
         # Publicar rangos 4-6
@@ -614,10 +609,9 @@ class Aggregator:
                 )
                 rows_4_6.append(row)
             
-            queue = MessageMiddlewareQueue("rabbitmq", "to_max_4_6")
+            queue = self.middleware_queue_sender["to_max_4_6"]
             chunk_data = ProcessChunk(header, rows_4_6).serialize()
             queue.send(chunk_data)
-            queue.close()
             logging.info(f"action: publish_final_products_4_6 | client_id:{client_id} | rows:{len(rows_4_6)} | bytes_sent:{len(chunk_data)} | queue:to_max_4_6")
         
         # Publicar rangos 7-8
@@ -634,10 +628,9 @@ class Aggregator:
                 )
                 rows_7_8.append(row)
             
-            queue = MessageMiddlewareQueue("rabbitmq", "to_max_7_8")
+            queue = self.middleware_queue_sender["to_max_7_8"]
             chunk_data = ProcessChunk(header, rows_7_8).serialize()
             queue.send(chunk_data)
-            queue.close()
             logging.info(f"action: publish_final_products_7_8 | client_id:{client_id} | rows:{len(rows_7_8)} | bytes_sent:{len(chunk_data)} | queue:to_max_7_8")
 
     def _publish_final_purchases(self, client_id):

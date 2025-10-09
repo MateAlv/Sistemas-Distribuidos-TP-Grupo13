@@ -80,117 +80,104 @@ class Maximizer:
         def stop():
             self.data_receiver.stop_consuming()
             
-        def end_callback(msg): 
-            end_messages.append(msg)
-            logging.info(f"action: end_message_received | type:{self.maximizer_type} | range:{self.maximizer_range} | msg_size:{len(msg)} | msg_preview:{msg[:100] if len(msg) > 100 else msg}")
-            
-        def end_stop():
-            self.middleware_exchange_receiver.stop_consuming()
-
         # Iniciar el consumer de END messages en background
-        import threading
-        def check_end_messages():
-            if not self.is_absolute_max():  # Solo los maximizers parciales escuchan END_MESSAGE
-                logging.info(f"action: starting_end_message_listener | type:{self.maximizer_type} | range:{self.maximizer_range} | exchange:{self.middleware_exchange_receiver.exchange_name}")
-                while not self.end_received:
-                    try:
-                        self.middleware_exchange_receiver.connection.call_later(TIMEOUT, end_stop)
-                        self.middleware_exchange_receiver.start_consuming(end_callback)
-                    except Exception as e:
-                        logging.debug(f"action: end_message_timeout | type:{self.maximizer_type} | range:{self.maximizer_range} | error:{e}")
+        # import threading
+        # def check_end_messages():
+        #     if not self.is_absolute_max():  # Solo los maximizers parciales escuchan END_MESSAGE
+        #         logging.info(f"action: starting_end_message_listener | type:{self.maximizer_type} | range:{self.maximizer_range} | exchange:{self.middleware_exchange_receiver.exchange_name}")
+        #         while not self.end_received:
+        #             try:
+        #                 self.middleware_exchange_receiver.connection.call_later(TIMEOUT, end_stop)
+        #                 self.middleware_exchange_receiver.start_consuming(end_callback)
+        #             except Exception as e:
+        #                 logging.debug(f"action: end_message_timeout | type:{self.maximizer_type} | range:{self.maximizer_range} | error:{e}")
                     
-                    # Procesar END messages recibidos
-                    for end_msg in end_messages:
-                        logging.info(f"action: processing_end_message | type:{self.maximizer_type} | range:{self.maximizer_range} | setting_end_received_true")
-                        self.end_received = True
-                        end_messages.remove(end_msg)
-                        break
+        #             # Procesar END messages recibidos
+        #             for end_msg in end_messages:
+        #                 logging.info(f"action: processing_end_message | type:{self.maximizer_type} | range:{self.maximizer_range} | setting_end_received_true")
+        #                 self.end_received = True
+        #                 end_messages.remove(end_msg)
+        #                 break
         
-        if not self.is_absolute_max():
-            end_thread = threading.Thread(target=check_end_messages)
-            end_thread.daemon = True
-            end_thread.start()
-            logging.info(f"action: end_message_listener_started | type:{self.maximizer_type} | range:{self.maximizer_range}")
 
         # Loop principal para procesar datos
-        while not self.end_received:
+        while True:
             # Escuchar datos con timeout
-            try:
-                self.data_receiver.connection.call_later(TIMEOUT, stop)
-                self.data_receiver.start_consuming(callback)
-            except:
-                pass  # Timeout es normal
+            self.data_receiver.connection.call_later(TIMEOUT, stop)
+            self.data_receiver.start_consuming(callback)
 
             # Procesar datos recibidos
             for data in results:
                 try:
-                    chunk = ProcessBatchReader.from_bytes(data)
-                    logging.info(f"action: maximize | type:{self.maximizer_type} | range:{self.maximizer_range} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()} | rows_in:{len(chunk.rows)}")
-                    
-                    # Track client_id for publishing results
-                    if self.client_id is None:
-                        self.client_id = chunk.client_id()
-                    
-                    self.apply(chunk)
-                    
-                    # Para absolute max: detectar cuándo termina cada maximizer parcial
-                    if self.is_absolute_max():
-                        # Contar maximizers parciales únicos que han enviado datos
-                        for row in chunk.rows:
-                            if hasattr(row, 'transaction_id') and row.transaction_id:
-                                if 'range_1' in row.transaction_id:
-                                    self.received_ranges.add('1')
-                                elif 'range_4' in row.transaction_id:
-                                    self.received_ranges.add('4')
-                                elif 'range_7' in row.transaction_id:
-                                    self.received_ranges.add('7')
-                        
-                        self.partial_maximizers_finished = len(self.received_ranges)
-                        logging.info(f"action: absolute_max_tracking | partial_maximizers_seen:{self.partial_maximizers_finished}/{self.expected_partial_maximizers} | received_ranges:{sorted(self.received_ranges)}")
-                        
-                        # Si recibimos datos de todos los maximizers parciales, podemos terminar
-                        if self.partial_maximizers_finished >= self.expected_partial_maximizers:
-                            self.end_received = True
-                            logging.info(f"action: absolute_max_ready | all_partial_maximizers_received:{self.partial_maximizers_finished}")
-                    
-                    # Los maximizers parciales NO envían resultados hasta recibir END
-                    # Solo el absolute max envía resultados finales
-                    if self.maximizer_type == "TOP3":
-                        # Para TOP3, procesar chunk y enviar resultado incremental
-                        top3_chunk = self.apply_top3_chunk(chunk)
-                        if top3_chunk:
-                            self.publish_top3_chunk(top3_chunk)
+                    if data.startswith(b"END;"):
+                        logging.info(f"action: end_received_processing_final | type:{self.maximizer_type} | range:{self.maximizer_range}")
+        
+                        if self.maximizer_type == "MAX":
+                            if self.is_absolute_max():
+                                # Absolute max: enviar resultados finales al joiner
+                                self.publish_absolute_max_results()
+                                # Enviar END message al joiner
+                            else:
+                                # Maximizers parciales: enviar máximos al absolute max
+                                self.publish_partial_max_results()
+                                # NO necesitan enviar END message ya que el absolute max detecta automáticamente
+                                logging.info(f"action: partial_maximizer_finished | range:{self.maximizer_range} | client_id:{self.client_id or 1}")
+
+                            try:
+                                logging.info(f"action: sending_end_message_to_joiner | client_id:{self.client_id or 1} ")
+                                end_msg = MessageEnd(self.client_id or 1, TableType.TRANSACTION_ITEMS, 1)
+                                self.data_sender.send(end_msg.encode())
+                                logging.info(f"action: sent_end_message_to_joiner | client_id:{self.client_id or 1} | format:END;{self.client_id or 1};{TableType.TRANSACTION_ITEMS.value};1")
+                            except Exception as e:
+                                logging.error(f"action: error_sending_end_to_joiner | error:{e}")
+                                
+                        elif self.maximizer_type == "TOP3":
+                            # Enviar resultados finales de TOP3
+                            self.publish_top3_final_results()
                             
+                        logging.info(f"action: maximizer_finished | type:{self.maximizer_type} | range:{self.maximizer_range}")
+                    else:
+                        chunk = ProcessBatchReader.from_bytes(data)
+                        logging.info(f"action: maximize | type:{self.maximizer_type} | range:{self.maximizer_range} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()} | rows_in:{len(chunk.rows)}")
+                        
+                        # Track client_id for publishing results
+                        if self.client_id is None:
+                            self.client_id = chunk.client_id()
+                        
+                        self.apply(chunk)
+                        
+                        # Para absolute max: detectar cuándo termina cada maximizer parcial
+                        if self.is_absolute_max():
+                            # Contar maximizers parciales únicos que han enviado datos
+                            for row in chunk.rows:
+                                if hasattr(row, 'transaction_id') and row.transaction_id:
+                                    if 'range_1' in row.transaction_id:
+                                        self.received_ranges.add('1')
+                                    elif 'range_4' in row.transaction_id:
+                                        self.received_ranges.add('4')
+                                    elif 'range_7' in row.transaction_id:
+                                        self.received_ranges.add('7')
+                            
+                            self.partial_maximizers_finished = len(self.received_ranges)
+                            logging.info(f"action: absolute_max_tracking | partial_maximizers_seen:{self.partial_maximizers_finished}/{self.expected_partial_maximizers} | received_ranges:{sorted(self.received_ranges)}")
+                            
+                            # Si recibimos datos de todos los maximizers parciales, podemos terminar
+                            if self.partial_maximizers_finished >= self.expected_partial_maximizers:
+                                self.end_received = True
+                                logging.info(f"action: absolute_max_ready | all_partial_maximizers_received:{self.partial_maximizers_finished}")
+                        
+                        # Los maximizers parciales NO envían resultados hasta recibir END
+                        # Solo el absolute max envía resultados finales
+                        if self.maximizer_type == "TOP3":
+                            # Para TOP3, procesar chunk y enviar resultado incremental
+                            top3_chunk = self.apply_top3_chunk(chunk)
+                            if top3_chunk:
+                                self.publish_top3_chunk(top3_chunk)
+                                
                 except Exception as e:
                     logging.error(f"action: error_processing_data | type:{self.maximizer_type} | range:{self.maximizer_range} | error:{e}")
-                
+                    
                 results.remove(data)
-                
-        # Procesar resultados finales después de END message
-        logging.info(f"action: end_received_processing_final | type:{self.maximizer_type} | range:{self.maximizer_range}")
-        
-        if self.maximizer_type == "MAX":
-            if self.is_absolute_max():
-                # Absolute max: enviar resultados finales al joiner
-                self.publish_absolute_max_results()
-                # Enviar END message al joiner
-                try:
-                    logging.info(f"action: sending_end_message_to_joiner | client_id:{self.client_id or 1} | exchange:{self.middleware_exchange_sender.exchange_name}")
-                    end_msg = MessageEnd(self.client_id or 1, TableType.TRANSACTION_ITEMS, 1)
-                    self.middleware_exchange_sender.send(end_msg.encode())
-                    logging.info(f"action: sent_end_message_to_joiner | client_id:{self.client_id or 1} | format:END;{self.client_id or 1};{TableType.TRANSACTION_ITEMS.value};1")
-                except Exception as e:
-                    logging.error(f"action: error_sending_end_to_joiner | error:{e}")
-            else:
-                # Maximizers parciales: enviar máximos al absolute max
-                self.publish_partial_max_results()
-                # NO necesitan enviar END message ya que el absolute max detecta automáticamente
-                logging.info(f"action: partial_maximizer_finished | range:{self.maximizer_range} | client_id:{self.client_id or 1}")
-        elif self.maximizer_type == "TOP3":
-            # Enviar resultados finales de TOP3
-            self.publish_top3_final_results()
-            
-        logging.info(f"action: maximizer_finished | type:{self.maximizer_type} | range:{self.maximizer_range}")
 
     def update_max(self, rows: list[TableProcessRow]) -> bool:
         """
@@ -490,7 +477,6 @@ class Maximizer:
             header = ProcessChunkHeader(client_id=self.client_id or 1, table_type=TableType.TRANSACTION_ITEMS)
             chunk = ProcessChunk(header, accumulated_results)
             self.data_sender.send(chunk.serialize())
-            self.data_sender.close()
             
             logging.info(f"action: publish_absolute_max_results | result: success | client_id:{self.client_id or 1} | months_selling:{len(monthly_max_selling)} | months_profit:{len(monthly_max_profit)} | total_rows:{len(accumulated_results)}")
         else:
@@ -502,7 +488,6 @@ class Maximizer:
         """
         payload_b64 = base64.b64encode(top3_chunk.serialize()).decode("utf-8")
         self.data_sender.send(payload_b64)
-        self.data_sender.close()
         
         logging.info(f"action: publish_top3_chunk | result: success | candidates:{len(top3_chunk.rows)}")
 
