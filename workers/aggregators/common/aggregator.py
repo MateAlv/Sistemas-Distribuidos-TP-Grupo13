@@ -160,6 +160,7 @@ class Aggregator:
                         self._ensure_dict_entry(self.chunks_received_per_client, client_id, table_type)
                         self._ensure_dict_entry(self.chunks_processed_per_client, client_id, table_type)
                         self.chunks_received_per_client[client_id][table_type] += 1
+                        logging.info(f"Count: {self.chunks_received_per_client[client_id][table_type]}")
                         
                         # Procesar según tipo de aggregator - ACUMULAR no enviar
                         has_output = False
@@ -372,25 +373,6 @@ class Aggregator:
         from utils.file_utils.table_type import TableType
         header = ProcessChunkHeader(client_id=chunk.header.client_id, table_type=TableType.TRANSACTIONS)
         return ProcessChunk(header, rows)
-    
-    #TODO: Delete this
-    # def publish_results_1_3(self, chunk, aggregated_rows: list[TableProcessRow]):
-    #     # Enviar los resultados a la cola correspondiente
-    #     queue = MessageMiddlewareQueue("rabbitmq", "to_max_1_3")
-    #     logging.info(f"action: sending_to_queue | type:{self.aggregator_type} | queue:to_max_products_1_3 | rows:{len(aggregated_rows)}")
-    #     queue.send(ProcessChunk(chunk.header, aggregated_rows).serialize())
-
-    # def publish_results_4_6(self, chunk, aggregated_rows: list[TableProcessRow]):
-    #     # Enviar los resultados a la cola correspondiente
-    #     queue = MessageMiddlewareQueue("rabbitmq", "to_max_4_6")
-    #     logging.info(f"action: sending_to_queue | type:{self.aggregator_type} | queue:to_max_products_4_6 | rows:{len(aggregated_rows)}")
-    #     queue.send(ProcessChunk(chunk.header, aggregated_rows).serialize())
-    
-    # def publish_results_7_8(self, chunk, aggregated_rows: list[TableProcessRow]):
-    #     # Enviar los resultados a la cola correspondiente
-    #     queue = MessageMiddlewareQueue("rabbitmq", "to_max_7_8")
-    #     logging.info(f"action: sending_to_queue | type:{self.aggregator_type} | queue:to_max_products_7_8 | rows:{len(aggregated_rows)}")
-    #     queue.send(ProcessChunk(chunk.header, aggregated_rows).serialize())
 
     def publish_purchases_chunk(self, aggregated_chunk):
         """

@@ -66,7 +66,7 @@ class Filter:
                             stats_results.remove(stats_msg)
                             continue
                         logging.debug(f"action: stats_end_received | type:{self.filter_type} | filter_id:{stats_end.filter_id} | cli_id:{stats_end.client_id} | table_type:{stats_end.table_type}")
-                        self.delete_client_data(stats_end)
+                        # self.delete_client_data(stats_end)
                     else:
                         stats = FilterStatsMessage.decode(stats_msg)
                         if stats.filter_id == self.id:
@@ -214,7 +214,7 @@ class Filter:
             queue.send(msg_to_send.encode())
         end_msg = FilterStatsEndMessage(self.id, client_id, table_type)
         self.middleware_end_exchange.send(end_msg.encode())
-        self.delete_client_data(end_msg)
+        # self.delete_client_data(end_msg)
 
     def _end_message_to_send(self, client_id, table_type, total_expected, total_not_sent):
         if self.filter_type != "amount":

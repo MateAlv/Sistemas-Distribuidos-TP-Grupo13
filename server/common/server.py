@@ -314,9 +314,9 @@ class Server:
         maximum_chunks = self._max_number_of_chunks_in_batch()
         all_data_received = False
         all_data_received_per_query = {
-            ResultTableType.QUERY_1: True,  # No habilitado
-            ResultTableType.QUERY_2_1: False,  # Habilitar Query 2.1 (productos más vendidos)
-            ResultTableType.QUERY_2_2: False,  # Habilitar Query 2.2 (productos más rentables)
+            ResultTableType.QUERY_1: False,  # No habilitado
+            ResultTableType.QUERY_2_1: True,  # Habilitar Query 2.1 (productos más vendidos)
+            ResultTableType.QUERY_2_2: True,  # Habilitar Query 2.2 (productos más rentables)
             ResultTableType.QUERY_3: True,
             ResultTableType.QUERY_4: True,
         }
