@@ -64,7 +64,7 @@ class Filter:
                     if stats.filter_id == self.id:
                         stats_results.remove(stats_msg)
                         continue
-                    logging.info(f"action: stats_received | type:{self.filter_type} | filter_id:{stats.filter_id} | cli_id:{stats.client_id} | file_type:{stats.table_type} | chunks_received:{stats.chunks_received} | chunks_not_sent:{stats.chunks_not_sent}")
+                    logging.debug(f"action: stats_received | type:{self.filter_type} | filter_id:{stats.filter_id} | cli_id:{stats.client_id} | file_type:{stats.table_type} | chunks_received:{stats.chunks_received} | chunks_not_sent:{stats.chunks_not_sent}")
                     if stats.client_id not in self.end_message_received:
                         self.end_message_received[stats.client_id] = {}
                     self.end_message_received[stats.client_id][stats.table_type] = True
@@ -90,7 +90,7 @@ class Filter:
                     if stats_end.filter_id == self.id:
                         stats_results.remove(stats_msg)
                         continue
-                    logging.info(f"action: stats_end_received | type:{self.filter_type} | filter_id:{stats_end.filter_id} | cli_id:{stats_end.client_id} | table_type:{stats_end.table_type}")
+                    logging.debug(f"action: stats_end_received | type:{self.filter_type} | filter_id:{stats_end.filter_id} | cli_id:{stats_end.client_id} | table_type:{stats_end.table_type}")
                     self.delete_client_data(stats_end)
                     stats_results.remove(stats_msg)
 
@@ -98,27 +98,24 @@ class Filter:
                 try:
                     chunk = ProcessBatchReader.from_bytes(msg)
                     client_id = chunk.client_id()
-
+                    
                     if self.filter_type == "amount" and client_id not in self.middleware_queue_sender:
                         self.middleware_queue_sender[f"to_merge_data_{client_id}"] = MessageMiddlewareQueue("rabbitmq", f"to_merge_data_{client_id}")
 
                     table_type = chunk.table_type()
-                    logging.info(f"action: filter | type:{self.filter_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()} | rows_in:{len(chunk.rows)}")
+                    logging.debug(f"action: filter | type:{self.filter_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()} | rows_in:{len(chunk.rows)}")
                     filtered_rows = [tx for tx in chunk.rows if self.apply(tx)]
-                    logging.info(f"action: filter_result | type:{self.filter_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()} | rows_out:{len(filtered_rows)}")
+                    logging.debug(f"action: filter_result | type:{self.filter_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()} | rows_out:{len(filtered_rows)}")
                     if filtered_rows:
                         for queue_name, queue in self.middleware_queue_sender.items():
-                            logging.info(f"action: sending_to_queue | type:{self.filter_type} | queue:{queue_name} | rows:{len(filtered_rows)}")
+                            logging.debug(f"action: sending_to_queue | type:{self.filter_type} | queue:{queue_name} | rows:{len(filtered_rows)/len(chunk.rows):.2%} | cli_id:{chunk.client_id()}")
                             if self._should_skip_queue(table_type, queue_name):
                                 continue
                             if self.filter_type != "amount":
                                 queue.send(ProcessChunk(chunk.header, filtered_rows).serialize())
                             else:
                                 from utils.file_utils.result_table import Query1ResultRow
-                                converted_rows = [
-                                    Query1ResultRow(tx.transaction_id, tx.final_amount)
-                                    for tx in filtered_rows
-                                ]
+                                converted_rows = [ Query1ResultRow(tx.transaction_id, tx.final_amount) for tx in filtered_rows]
                                 queue.send(ResultChunk(ResultChunkHeader(client_id, ResultTableType.QUERY_1), converted_rows).serialize())
                     else:
                         logging.info(f"action: no_rows_to_send | type:{self.filter_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()}")
@@ -158,7 +155,11 @@ class Filter:
                     total_expected = end_message.total_chunks()
                     self._ensure_dict_entry(self.number_of_chunks_received_per_client, client_id, table_type)
 
-                    logging.info(f"action: end_message_received | type:{self.filter_type} | cli_id:{client_id} | file_type:{table_type} | total_chunks_received:{self.number_of_chunks_received_per_client[client_id][table_type]}")
+                    logging.info("action: end_message_received | type:%s | cli_id:%s | file_type:%s | chunks_received:%d | chunks_not_sent:%d | chunks_expected:%d",
+                                self.filter_type, client_id, table_type, 
+                                self.number_of_chunks_received_per_client[client_id][table_type],
+                                self.number_of_chunks_not_sent_per_client.get(client_id, {}).get(table_type, 0),
+                                total_expected)
                     
                     self._ensure_dict_entry(self.number_of_chunks_not_sent_per_client, client_id, table_type)
                     self.number_of_chunks_to_receive[client_id] = {table_type: total_expected}

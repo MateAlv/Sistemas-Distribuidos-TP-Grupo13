@@ -45,7 +45,7 @@ services:
     container_name: filter_year_service
     environment:
     - PYTHONUNBUFFERED=1
-    - LOGGING_LEVEL=DEBUG
+    - LOGGING_LEVEL=INFO
     volumes:
     - ./workers/filter/config/config_year.ini:/workers/filter/config/config_year.ini:ro
     - ./utils:/workers/utils:ro
@@ -65,7 +65,7 @@ services:
     container_name: filter_hour_service
     environment:
     - PYTHONUNBUFFERED=1
-    - LOGGING_LEVEL=DEBUG
+    - LOGGING_LEVEL=INFO
     volumes:
     - ./workers/filter/config/config_hour.ini:/workers/filter/config/config_hour.ini:ro
     - ./utils:/workers/utils:ro
@@ -85,7 +85,7 @@ services:
     container_name: filter_amount_service
     environment:
     - PYTHONUNBUFFERED=1
-    - LOGGING_LEVEL=DEBUG
+    - LOGGING_LEVEL=INFO
     volumes:
     - ./workers/filter/config/config_amount.ini:/workers/filter/config/config_amount.ini:ro
     - ./utils:/workers/utils:ro

@@ -22,6 +22,8 @@ class Client:
     def __init__(self, config: Dict, default_data_dir: str = "/data", default_output_dir: str = None) -> None:
         # Identidad del cliente
         self.id: str = str(config.get("id", ""))
+        
+        self.query_chunks = dict()  # query_type -> chunks amount for query
 
         # Tamaño de batch (bytes) para leer/enviar en chunks (se mantiene configurable)
         mp = config.get("message_protocol", {}) or {}
@@ -78,13 +80,10 @@ class Client:
                 
                 # Envío de batches (iterativo)
                 for chunk in self.reader.iter():
-                    logging.info("Cliente %s: enviando chunk: file=%s bytes=%s last=%s",
-                                 self.id, chunk.path(), chunk.payload_size(), chunk.is_last_file_chunk())
+                    logging.debug("Cliente %s: enviando chunk: file=%s bytes=%s", self.id, chunk.path(), chunk.payload_size())
                     sender.send_file_chunk(chunk.serialize())
-                    if chunk.is_last_file_chunk():
-                        # Espera ACK de fin de archivo
-                        sender.wait_end_file_ack()
-                        logging.info("Cliente %s: archivo completado: %s", self.id, chunk.path())
+                    # Espera ACK de fin de archivo
+                    sender.wait_end_file_ack()
 
                 # Señal de fin - Todos los archivos enviados
                 sender.send_finished()
@@ -166,9 +165,11 @@ class Client:
                                         f"results_{result_chunk.query_type().name.lower()}.csv"
                                     )
                         csv_header = self._obtain_csv_header(result_chunk.query_type())
+                        self.query_chunks[result_chunk.query_type()] = self.query_chunks.get(result_chunk.query_type(), 0) + 1
+                        
                         self._save_process_chunk_as_csv(result_chunk, output_path, csv_header)
                         
-                        logging.info("Cliente %s: resultado guardado en: %s", self.id, output_path)
+                        logging.debug("Cliente %s: resultado guardado en: %s", self.id, output_path)
                         
                     elif header == 3:  # H_ID_FINISH - fin de resultados
                         logging.info("Cliente %s: señal FINISHED recibida, terminando recepción", self.id)

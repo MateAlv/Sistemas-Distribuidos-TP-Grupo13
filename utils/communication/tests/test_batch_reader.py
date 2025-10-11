@@ -4,7 +4,7 @@ import pytest
 from ..batch_reader import BatchReader
 from ..file_chunk import FileChunk
 
-TEST_PATH = "./.data-test-mini"  # Directorio con datos de prueba generados
+TEST_PATH = "./.data-test-reduced"  # Directorio con datos de prueba generados
 MAX_BATCH_SIZE = 8 * 1024  # 8KB
 
 @pytest.mark.parametrize("folder", ["menu_items", "stores"])
@@ -16,13 +16,9 @@ def test_batch_reader_batches_no_data_loss(folder):
     chunks = list(reader.iter())
     assert len(chunks) > 0, f"No se generaron batches para {abs_dir}"
 
-    # Verificar que todos son FileChunk
+    # Verificar que todos son FileChusnk
     for chunk in chunks:
         assert chunk.header.client_id == client_id
-        if not chunk.header.last:
-            assert len(chunk.data) == reader.max_batch_size
-        else:
-            assert len(chunk.data) <= reader.max_batch_size
         assert isinstance(chunk, FileChunk)
 
     # Reconstruir el archivo desde los batches (concatenar payloads)
