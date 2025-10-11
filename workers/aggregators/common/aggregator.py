@@ -42,7 +42,9 @@ class Aggregator:
             self.middleware_queue_sender["to_max_7_8"] = MessageMiddlewareQueue("rabbitmq", "to_max_7_8")
         elif self.aggregator_type == "PURCHASES":
             self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", "to_agg_4")
-            self.middleware_exchange_sender = MessageMiddlewareExchange("rabbitmq", f"end_exchange_aggregator_{self.aggregator_type}", [""], exchange_type="fanout")
+            self.middleware_queue_sender["to_top_1_3"] = MessageMiddlewareQueue("rabbitmq", "to_top_1_3")
+            self.middleware_queue_sender["to_top_4_6"] = MessageMiddlewareQueue("rabbitmq", "to_top_4_6")
+            self.middleware_queue_sender["to_top_7_10"] = MessageMiddlewareQueue("rabbitmq", "to_top_7_10")
         elif self.aggregator_type == "TPV":
             self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", "transactions")
             self.middleware_exchange_sender = MessageMiddlewareExchange("rabbitmq", f"end_exchange_aggregator_{self.aggregator_type}", [""], exchange_type="fanout")
@@ -377,25 +379,6 @@ class Aggregator:
         from utils.file_utils.table_type import TableType
         header = ProcessChunkHeader(client_id=chunk.header.client_id, table_type=TableType.TRANSACTIONS)
         return ProcessChunk(header, rows)
-    
-    #TODO: Delete this
-    # def publish_results_1_3(self, chunk, aggregated_rows: list[TableProcessRow]):
-    #     # Enviar los resultados a la cola correspondiente
-    #     queue = MessageMiddlewareQueue("rabbitmq", "to_max_1_3")
-    #     logging.info(f"action: sending_to_queue | type:{self.aggregator_type} | queue:to_max_products_1_3 | rows:{len(aggregated_rows)}")
-    #     queue.send(ProcessChunk(chunk.header, aggregated_rows).serialize())
-
-    # def publish_results_4_6(self, chunk, aggregated_rows: list[TableProcessRow]):
-    #     # Enviar los resultados a la cola correspondiente
-    #     queue = MessageMiddlewareQueue("rabbitmq", "to_max_4_6")
-    #     logging.info(f"action: sending_to_queue | type:{self.aggregator_type} | queue:to_max_products_4_6 | rows:{len(aggregated_rows)}")
-    #     queue.send(ProcessChunk(chunk.header, aggregated_rows).serialize())
-    
-    # def publish_results_7_8(self, chunk, aggregated_rows: list[TableProcessRow]):
-    #     # Enviar los resultados a la cola correspondiente
-    #     queue = MessageMiddlewareQueue("rabbitmq", "to_max_7_8")
-    #     logging.info(f"action: sending_to_queue | type:{self.aggregator_type} | queue:to_max_products_7_8 | rows:{len(aggregated_rows)}")
-    #     queue.send(ProcessChunk(chunk.header, aggregated_rows).serialize())
 
     def publish_purchases_chunk(self, aggregated_chunk):
         """
@@ -531,12 +514,14 @@ class Aggregator:
         """Acumula compras agregadas en memoria para envío final"""
         if client_id not in self.global_accumulator:
             self.global_accumulator[client_id] = {
-                'purchases': defaultdict(int)  # (store_id, user_id) -> count
+                'purchases': defaultdict(lambda: defaultdict(int))  # store_id -> {user_id -> count}
             }
         
         for row in aggregated_chunk.rows:
-            key = (int(row.store_id), int(row.user_id))
-            self.global_accumulator[client_id]['purchases'][key] += int(row.final_amount)
+            store_id = int(row.store_id)
+            user_id = int(row.user_id)
+            count = int(row.final_amount)
+            self.global_accumulator[client_id]['purchases'][store_id][user_id] += count
 
     def accumulate_tpv(self, client_id, aggregated_chunk):
         """Acumula TPV agregado en memoria para envío final"""
@@ -634,38 +619,69 @@ class Aggregator:
             logging.info(f"action: publish_final_products_7_8 | client_id:{client_id} | rows:{len(rows_7_8)} | bytes_sent:{len(chunk_data)} | queue:to_max_7_8")
 
     def _publish_final_purchases(self, client_id):
-        """Publica resultados finales de compras"""
+        """Publica resultados finales de compras a maximizers según rangos de store_id"""
         data = self.global_accumulator[client_id]
         
         if not data['purchases']:
             return
         
-        rows = []
+        # Separar por rangos de store_id
+        stores_1_3 = []
+        stores_4_6 = []
+        stores_7_10 = []
+        
         marker_date = datetime.date(2024, 1, 1)
         
-        for (store_id, user_id), count in data['purchases'].items():
-            row = TransactionsProcessRow(
-                transaction_id="",
-                store_id=store_id,
-                user_id=user_id,
-                final_amount=float(count),
-                created_at=marker_date,
-            )
-            rows.append(row)
+        for store_id, users_data in data['purchases'].items():
+            # Crear filas con user_id y su conteo de transacciones para este store
+            rows_for_store = []
+            for user_id, count in users_data.items():
+                row = TransactionsProcessRow(
+                    transaction_id="",
+                    store_id=store_id,
+                    user_id=user_id,
+                    final_amount=float(count),
+                    created_at=marker_date,
+                )
+                rows_for_store.append(row)
+            
+            # Asignar a la lista correspondiente según el rango de store_id
+            if 1 <= store_id <= 3:
+                stores_1_3.extend(rows_for_store)
+            elif 4 <= store_id <= 6:
+                stores_4_6.extend(rows_for_store)
+            elif 7 <= store_id <= 10:
+                stores_7_10.extend(rows_for_store)
         
         from utils.file_utils.process_chunk import ProcessChunkHeader
         from utils.file_utils.table_type import TableType
-        header = ProcessChunkHeader(client_id=client_id, table_type=TableType.TRANSACTIONS)
-        chunk = ProcessChunk(header, rows)
         
-        import base64
-        queue = MessageMiddlewareQueue("rabbitmq", "transactions_sum_by_client")
-        chunk_data = chunk.serialize()
-        payload_b64 = base64.b64encode(chunk_data).decode("utf-8")
-        queue.send(payload_b64)
-        queue.close()
+        # Enviar a top 1-3
+        if stores_1_3:
+            header = ProcessChunkHeader(client_id=client_id, table_type=TableType.TRANSACTIONS)
+            chunk = ProcessChunk(header, stores_1_3)
+            chunk_data = chunk.serialize()
+            queue = self.middleware_queue_sender["to_top_1_3"]
+            queue.send(chunk_data)
+            logging.info(f"action: publish_final_purchases_1_3 | client_id:{client_id} | rows:{len(stores_1_3)} | bytes_sent:{len(chunk_data)} | queue:to_top_1_3")
         
-        logging.info(f"action: publish_final_purchases | client_id:{client_id} | rows:{len(rows)} | bytes_sent:{len(chunk_data)} | queue:transactions_sum_by_client")
+        # Enviar a top 4-6
+        if stores_4_6:
+            header = ProcessChunkHeader(client_id=client_id, table_type=TableType.TRANSACTIONS)
+            chunk = ProcessChunk(header, stores_4_6)
+            chunk_data = chunk.serialize()
+            queue = self.middleware_queue_sender["to_top_4_6"]
+            queue.send(chunk_data)
+            logging.info(f"action: publish_final_purchases_4_6 | client_id:{client_id} | rows:{len(stores_4_6)} | bytes_sent:{len(chunk_data)} | queue:to_top_4_6")
+        
+        # Enviar a top 7-10
+        if stores_7_10:
+            header = ProcessChunkHeader(client_id=client_id, table_type=TableType.TRANSACTIONS)
+            chunk = ProcessChunk(header, stores_7_10)
+            chunk_data = chunk.serialize()
+            queue = self.middleware_queue_sender["to_top_7_10"]
+            queue.send(chunk_data)
+            logging.info(f"action: publish_final_purchases_7_10 | client_id:{client_id} | rows:{len(stores_7_10)} | bytes_sent:{len(chunk_data)} | queue:to_top_7_10")
 
     def _publish_final_tpv(self, client_id):
         """Publica resultados finales de TPV"""
