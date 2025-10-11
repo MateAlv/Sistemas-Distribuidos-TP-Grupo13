@@ -94,8 +94,8 @@ def get_filter_config_path(nodo: str):
 def is_filter(nodo: str):
     return nodo.startswith("FILTER_")
 
-def define_filter(meta: dict, compose: dict, nodo: str, index: int):
-    service_name = f"{nodo.lower()}_id_{index}_service"
+def define_filter(meta: dict, compose: dict, nodo: str):
+    service_name = f"{nodo.lower()}_service"
     config_path = get_filter_config_path(nodo)
     compose["services"][service_name] = {
         "build": {
@@ -119,12 +119,13 @@ def define_filter(meta: dict, compose: dict, nodo: str, index: int):
             "rabbitmq": {"condition": "service_healthy"},
         }
     }
+    return service_name
 
 def is_aggregator(nodo: str):
     return nodo.startswith("AGGREGATOR_")
 
-def define_aggregator(meta: dict, compose: dict, nodo: str, index: int):
-    service_name = f"{nodo.lower()}_id_{index}_service"
+def define_aggregator(meta: dict, compose: dict, nodo: str):
+    service_name = f"{nodo.lower()}_service"
     compose["services"][service_name] = {
         "build": {
             "context": ".",             # project root
@@ -148,7 +149,8 @@ def define_aggregator(meta: dict, compose: dict, nodo: str, index: int):
             "rabbitmq": {"condition": "service_healthy"},
         }
     }
-
+    return service_name
+    
 def get_maximizer_range(nodo: str):
     # MAXIMIZER_MAX_ABSOLUTE -> 0
     # MAXIMIZER_MAX_1_3 -> 1
@@ -182,8 +184,8 @@ def get_maximizer_range(nodo: str):
 def is_maximizer(nodo: str):
     return nodo.startswith("MAXIMIZER_")
 
-def define_maximizer(meta: dict, compose: dict, nodo: str, index: int):
-    service_name = f"{nodo.lower()}_id_{index}_service"
+def define_maximizer(meta: dict, compose: dict, nodo: str):
+    service_name = f"{nodo.lower()}_service"
     compose["services"][service_name] = {
         "build": {
             "context": ".",             # project root
@@ -207,6 +209,7 @@ def define_maximizer(meta: dict, compose: dict, nodo: str, index: int):
             "rabbitmq": {"condition": "service_healthy"},
         }
     }
+    return service_name
 
 def is_joiner(nodo: str):
     # JOINER_ITEMS
@@ -222,8 +225,8 @@ def get_joiner_type(nodo: str):
     # JOINER_USERS -> USERS
     return nodo.split("_", 1)[1].upper()
 
-def define_joiner(meta: dict, compose: dict, nodo: str, index: int):
-    service_name = f"{nodo.lower()}_id_{index}_service"
+def define_joiner(meta: dict, compose: dict, nodo: str):
+    service_name = f"{nodo.lower()}_service"
     compose["services"][service_name] = {
         "build": {
             "context": ".",             # project root
@@ -246,12 +249,13 @@ def define_joiner(meta: dict, compose: dict, nodo: str, index: int):
             "rabbitmq": {"condition": "service_healthy"},
         }
     }
+    return service_name
 
 def is_client(nodo: str):
     return nodo == "CLIENT"
 
 def define_client(meta: dict, compose: dict, nodo: str, index: int):
-    service_name = f"{nodo.lower()}_id_{index}"
+    service_name = f"{nodo.lower()}-{index}"
     compose["services"][service_name] = {
         "build": {
             "context": ".",             # project root
@@ -262,13 +266,13 @@ def define_client(meta: dict, compose: dict, nodo: str, index: int):
         "environment": [
             f"CLI_ID={index}",
             "CLI_DATA_DIR=/data",
-            "CLI_OUTPUT_DIR=/data/output",
+            "CLI_OUTPUT_DIR=/output",
             "DATA_MODE=tree",
             "SERVER_ADDRESS=server:12345",
         ],
         "volumes": [
             f".{meta['data_path']}:/data:ro",
-            f"./.results/client_{index}:/data/output:rw",
+            f"./.results/client-{index}:/output",
             "./client/config.ini:/config.ini:ro",
             "./utils:/client/utils:ro",
             "./middleware:/client/middleware:ro",
@@ -278,30 +282,35 @@ def define_client(meta: dict, compose: dict, nodo: str, index: int):
             "server": {"condition": "service_started"},
         }
     }
-    return index
 
-def generate_compose(meta: dict, nodes: dict):
+def generate_compose(meta: dict, nodes: dict, services: dict = None):
     compose = {
         "name": meta.get("compose_name", "tp-distribuidos-grupo13"),
         "services": {}
     }
     define_rabbitmq(compose)
+    client_amount = 0
     for nodo, cantidad in nodes.items():
         if cantidad == 0:
             continue
-        for i in range(1, cantidad + 1):
+        
+        if is_client(nodo):
+            for i in range(1, cantidad + 1):
+                define_client(meta, compose, nodo, i)
+            client_amount = cantidad
+        else: 
             if is_filter(nodo):
-                define_filter(meta, compose, nodo, i)
+                service_name = define_filter(meta, compose, nodo)
             elif is_aggregator(nodo):
-                define_aggregator(meta, compose, nodo, i)
+                service_name = define_aggregator(meta, compose, nodo)
             elif is_maximizer(nodo):
-                define_maximizer(meta, compose, nodo, i)
+                service_name = define_maximizer(meta, compose, nodo)
             elif is_joiner(nodo):
-                define_joiner(meta, compose, nodo, i)
-            elif is_client(nodo):
-                client_amount = define_client(meta, compose, nodo, i)
+                service_name = define_joiner(meta, compose, nodo)
             else:
                 raise ValueError(f"Tipo de nodo inválido: {nodo}")
+            
+            services[service_name] = cantidad
     if client_amount == 0:
         raise ValueError("Debe haber al menos un cliente.")
     define_server(compose, client_amount) 
@@ -319,19 +328,39 @@ def main():
         required=True,       # obligatorio
         help="Archivo de configuración a usar"
     )
-
+     # Definimos el argumento --run
+    parser.add_argument(
+        "--run",          # nombre del parámetro
+        required=False,       # NO obligatorio
+        help="Ejecutar el docker-compose generado y los escala"
+    )
     args = parser.parse_args()
 
     meta, nodes = read_config(args.config)
-    compose = generate_compose(meta, nodes)
-
+    
     output_file = meta.get("output_file", "docker-compose.yaml")
+
+    services = {}
+
+    compose = generate_compose(meta, nodes, services)
+
 
     with open(output_file, "w") as f:
         yaml.dump(compose, f, sort_keys=False)
-
+        
     print(f"Archivo '{output_file}' generado correctamente.")
+    
+    print("Servicios definidos y sus cantidades:")
+    
+    services_scale = ""
+    for service, cantidad in services.items():
+        print(f"  - {service}: {cantidad}")
+        if cantidad > 1:
+            services_scale += f" --scale {service}={cantidad}"
 
+    if not args.run:
+        return
+    os.system(f"docker compose -f {output_file} up -d --build {services_scale}")
 
 if __name__ == "__main__":
     main()
