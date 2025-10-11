@@ -1,6 +1,6 @@
 from functools import partial
 from logging import log
-from utils.file_utils.process_table import TransactionItemsProcessRow, TransactionsProcessRow
+from utils.file_utils.process_table import TransactionItemsProcessRow, TransactionsProcessRow, PurchasesPerUserStoreRow
 import logging
 import threading
 from utils.file_utils.process_table import TableProcessRow
@@ -56,15 +56,39 @@ class Maximizer:
         elif self.maximizer_type == "TOP3":
             # Para TOP3 clientes por store (Query 4)
             self.top3_by_store = defaultdict(list)  # store_id -> [(count, user_id), ...]
-            self.data_receiver = MessageMiddlewareQueue("rabbitmq", "transactions_sum_by_client")
-            self.data_sender = MessageMiddlewareQueue("rabbitmq", "top3_clients_by_store")
-            # Escucha END del aggregator de PURCHASES - usando convención consistente
-            self.middleware_exchange_receiver = MessageMiddlewareExchange("rabbitmq", "end_exchange_aggregator_PURCHASES", [""], exchange_type="fanout")
-            self.middleware_exchange_sender = MessageMiddlewareExchange("rabbitmq", "end_exchange_maximizer_TOP3", [""], exchange_type="fanout")
+            
+            if self.is_absolute_top3():
+                # TOP3 absoluto - recibe de TOP3 parciales
+                self.data_sender = MessageMiddlewareQueue("rabbitmq", "to_purchases_joiner")
+                self.data_receiver = MessageMiddlewareQueue("rabbitmq", "to_top3_absolute")
+                # Envía END message al joiner cuando termine
+                self.middleware_exchange_sender = MessageMiddlewareExchange("rabbitmq", "end_exchange_maximizer_TOP3", [""], exchange_type="fanout")
+                self.expected_partial_top3 = 3  # Sabemos que son 3: rango 1, 4, 7
+                self.partial_top3_finished = 0  # Para contar cuántos parciales terminaron
+                self.received_ranges = set()  # Para trackear qué rangos han enviado datos
+            else:
+                # TOP3 parciales - envían al absoluto
+                self.data_sender = MessageMiddlewareQueue("rabbitmq", "to_top3_absolute")
+                
+                # Configurar receiver basado en el rango
+                if self.maximizer_range == "1":
+                    self.data_receiver = MessageMiddlewareQueue("rabbitmq", "to_top_1_3")
+                elif self.maximizer_range == "4":
+                    self.data_receiver = MessageMiddlewareQueue("rabbitmq", "to_top_4_6")
+                elif self.maximizer_range == "7":
+                    self.data_receiver = MessageMiddlewareQueue("rabbitmq", "to_top_7_10")
+                else:
+                    raise ValueError(f"Rango de maximizer TOP3 inválido: {self.maximizer_range}")
+                    
+                # Escucha END del aggregator de PURCHASES - usando convención consistente
+                self.middleware_exchange_receiver = MessageMiddlewareExchange("rabbitmq", "end_exchange_aggregator_PURCHASES", [""], exchange_type="fanout")
         else:
             raise ValueError(f"Tipo de maximizer inválido: {self.maximizer_type}")
 
     def is_absolute_max(self):
+        return self.maximizer_range == "0"
+    
+    def is_absolute_top3(self):
         return self.maximizer_range == "0"
     
     def run(self):
@@ -132,8 +156,22 @@ class Maximizer:
                                 logging.error(f"action: error_sending_end_to_joiner | error:{e}")
                                 
                         elif self.maximizer_type == "TOP3":
-                            # Enviar resultados finales de TOP3
-                            self.publish_top3_final_results()
+                            if self.is_absolute_top3():
+                                # TOP3 absoluto: enviar resultados finales al joiner
+                                self.publish_absolute_top3_results()
+                                # Enviar END message al joiner
+                                try:
+                                    logging.info(f"action: sending_end_message_to_joiner | client_id:{self.client_id or 1}")
+                                    end_msg = MessageEnd(self.client_id or 1, TableType.PURCHASES_PER_USER_STORE, 1)
+                                    self.data_sender.send(end_msg.encode())
+                                    logging.info(f"action: sent_end_message_to_joiner | client_id:{self.client_id or 1} | format:END;{self.client_id or 1};{TableType.PURCHASES_PER_USER_STORE.value};1")
+                                except Exception as e:
+                                    logging.error(f"action: error_sending_end_to_joiner | error:{e}")
+                            else:
+                                # TOP3 parciales: enviar top 3 locales al absoluto
+                                self.publish_partial_top3_results()
+                                # NO necesitan enviar END message ya que el absoluto detecta automáticamente
+                                logging.info(f"action: partial_top3_finished | range:{self.maximizer_range} | client_id:{self.client_id or 1}")
                             
                         logging.info(f"action: maximizer_finished | type:{self.maximizer_type} | range:{self.maximizer_range}")
                     else:
@@ -166,10 +204,31 @@ class Maximizer:
                                 self.end_received = True
                                 logging.info(f"action: absolute_max_ready | all_partial_maximizers_received:{self.partial_maximizers_finished}")
                         
+                        # Para absolute TOP3: detectar cuándo termina cada TOP3 parcial
+                        if self.is_absolute_top3():
+                            # Contar TOP3 parciales únicos que han enviado datos
+                            for row in chunk.rows:
+                                if isinstance(row, PurchasesPerUserStoreRow):
+                                    # Detectar rango basado en store_id
+                                    if 1 <= row.store_id <= 3:
+                                        self.received_ranges.add('1')
+                                    elif 4 <= row.store_id <= 6:
+                                        self.received_ranges.add('4')
+                                    elif 7 <= row.store_id <= 10:
+                                        self.received_ranges.add('7')
+                            
+                            self.partial_top3_finished = len(self.received_ranges)
+                            logging.info(f"action: absolute_top3_tracking | partial_top3_seen:{self.partial_top3_finished}/{self.expected_partial_top3} | received_ranges:{sorted(self.received_ranges)}")
+                            
+                            # Si recibimos datos de todos los TOP3 parciales, podemos terminar
+                            if self.partial_top3_finished >= self.expected_partial_top3:
+                                self.end_received = True
+                                logging.info(f"action: absolute_top3_ready | all_partial_top3_received:{self.partial_top3_finished}")
+                        
                         # Los maximizers parciales NO envían resultados hasta recibir END
                         # Solo el absolute max envía resultados finales
-                        if self.maximizer_type == "TOP3":
-                            # Para TOP3, procesar chunk y enviar resultado incremental
+                        if self.maximizer_type == "TOP3" and not self.is_absolute_top3():
+                            # Para TOP3 parciales, procesar chunk y enviar resultado incremental al absoluto
                             top3_chunk = self.apply_top3_chunk(chunk)
                             if top3_chunk:
                                 self.publish_top3_chunk(top3_chunk)
@@ -222,10 +281,10 @@ class Maximizer:
         Actualiza los top 3 clientes por store basado en el número de compras.
         """
         for row in rows:
-            if hasattr(row, 'store_id') and hasattr(row, 'user_id') and hasattr(row, 'final_amount'):
+            if isinstance(row, PurchasesPerUserStoreRow):
                 store_id = int(row.store_id)
                 user_id = int(row.user_id)
-                purchase_count = int(row.final_amount)  # El count está en final_amount
+                purchase_count = int(row.purchases_made)
                 
                 # Mantener solo los top 3 usando un heap
                 if len(self.top3_by_store[store_id]) < 3:
@@ -245,10 +304,10 @@ class Maximizer:
         chunk_top3_by_store = defaultdict(list)
         
         for row in chunk.rows:
-            if hasattr(row, 'store_id') and hasattr(row, 'user_id') and hasattr(row, 'final_amount'):
+            if isinstance(row, PurchasesPerUserStoreRow):
                 store_id = int(row.store_id)
                 user_id = int(row.user_id)
-                purchase_count = int(row.final_amount)
+                purchase_count = int(row.purchases_made)
                 
                 # Mantener solo los top 3 del chunk usando un heap
                 if len(chunk_top3_by_store[store_id]) < 3:
@@ -272,18 +331,18 @@ class Maximizer:
             top3_list = sorted(top3_heap, key=lambda x: x[0], reverse=True)
             
             for rank, (purchase_count, user_id) in enumerate(top3_list, 1):
-                row = TransactionsProcessRow(
-                    transaction_id=f"candidate_rank_{rank}",
+                row = PurchasesPerUserStoreRow(
                     store_id=store_id,
+                    store_name="",  # Placeholder - lo llenará el joiner
                     user_id=user_id,
-                    final_amount=float(purchase_count),  # Mantener el count original, no el rank
-                    created_at=marker_date,
+                    user_birthdate=marker_date,  # Placeholder - lo llenará el joiner
+                    purchases_made=purchase_count,
                 )
                 rows.append(row)
         
         from utils.file_utils.process_chunk import ProcessChunkHeader
         from utils.file_utils.table_type import TableType
-        header = ProcessChunkHeader(client_id=chunk.header.client_id, table_type=TableType.TRANSACTIONS)
+        header = ProcessChunkHeader(client_id=chunk.header.client_id, table_type=TableType.PURCHASES_PER_USER_STORE)
         return ProcessChunk(header, rows)
     
     def apply(self, chunk) -> bool:
@@ -359,9 +418,9 @@ class Maximizer:
         
         # NO cerrar la conexión aquí para permitir que otros maximizers usen la misma queue
 
-    def publish_top3_final_results(self):
+    def publish_partial_top3_results(self):
         """
-        Publica los resultados finales de TOP3 después del END message.
+        Publica los resultados parciales de TOP3 al TOP3 absoluto después del END message.
         """
         accumulated_results = []
         marker_date = datetime.date(2024, 1, 1)  # Fecha marca
@@ -371,38 +430,80 @@ class Maximizer:
             top3_list = sorted(top3_heap, key=lambda x: x[0], reverse=True)
             
             for rank, (purchase_count, user_id) in enumerate(top3_list, 1):
-                # Usar TransactionsProcessRow para enviar los datos
-                # store_id = store, user_id = cliente, final_amount = rank (1, 2, 3)
-                row = TransactionsProcessRow(
-                    transaction_id=f"top3_final_rank_{rank}",
+                # Usar PurchasesPerUserStoreRow para enviar los datos al TOP3 absoluto
+                row = PurchasesPerUserStoreRow(
                     store_id=store_id,
+                    store_name="",  # Placeholder - lo llenará el joiner
                     user_id=user_id,
-                    final_amount=float(rank),  # Ranking (1, 2, 3)
-                    created_at=marker_date,
+                    user_birthdate=marker_date,  # Placeholder - lo llenará el joiner
+                    purchases_made=purchase_count,  # Cantidad real de compras, no el rank
                 )
                 accumulated_results.append(row)
                 
-                logging.debug(f"action: top3_final_client | store_id:{store_id} | user_id:{user_id} | rank:{rank} | purchases:{purchase_count}")
+                logging.debug(f"action: partial_top3_client | store_id:{store_id} | user_id:{user_id} | rank:{rank} | purchases:{purchase_count}")
         
         if accumulated_results:
             from utils.file_utils.process_chunk import ProcessChunkHeader
             from utils.file_utils.table_type import TableType
-            header = ProcessChunkHeader(client_id=self.client_id or 1, table_type=TableType.TRANSACTIONS)
+            header = ProcessChunkHeader(client_id=self.client_id or 1, table_type=TableType.PURCHASES_PER_USER_STORE)
             chunk = ProcessChunk(header, accumulated_results)
             self.data_sender.send(chunk.serialize())
             self.data_sender.close()
             
-            logging.info(f"action: publish_top3_final_results | result: success | stores:{len(self.top3_by_store)} | total_clients:{len(accumulated_results)}")
-            
-            # Enviar END message
-            try:
-                end_msg = MessageEnd(self.client_id or 1, TableType.TRANSACTIONS, 1)
-                self.middleware_exchange_sender.send(end_msg.encode())
-                logging.info(f"action: sent_top3_end_message | client_id:{self.client_id or 1} | format:END;{self.client_id or 1};{TableType.TRANSACTIONS.value};1")
-            except Exception as e:
-                logging.error(f"action: error_sending_top3_end_message | error:{e}")
+            logging.info(f"action: publish_partial_top3_results | result: success | stores:{len(self.top3_by_store)} | total_clients:{len(accumulated_results)}")
         else:
-            logging.warning(f"action: no_top3_results_to_send | client_id:{self.client_id or 1}")
+            logging.warning(f"action: no_partial_top3_results_to_send | client_id:{self.client_id or 1}")
+
+    def publish_absolute_top3_results(self):
+        """
+        Publica los resultados finales del TOP3 absoluto consolidando todas las tiendas.
+        Encuentra el TOP 3 global considerando todas las tiendas.
+        """
+        logging.info(f"action: calculating_absolute_top3 | stores_processed:{len(self.top3_by_store)}")
+        
+        # Consolidar todos los candidatos de todas las tiendas
+        all_candidates = []
+        
+        for store_id, top3_heap in self.top3_by_store.items():
+            # Convertir heap a lista
+            top3_list = list(top3_heap)
+            
+            for purchase_count, user_id in top3_list:
+                all_candidates.append((purchase_count, user_id, store_id))
+                logging.debug(f"action: candidate_consolidated | store_id:{store_id} | user_id:{user_id} | purchases:{purchase_count}")
+        
+        # Ordenar todos los candidatos por cantidad de compras (descendente)
+        all_candidates.sort(key=lambda x: x[0], reverse=True)
+        
+        # Tomar los TOP 3 globales
+        global_top3 = all_candidates[:3]
+        
+        accumulated_results = []
+        marker_date = datetime.date(2024, 1, 1)
+        
+        for rank, (purchase_count, user_id, store_id) in enumerate(global_top3, 1):
+            row = PurchasesPerUserStoreRow(
+                store_id=store_id,
+                store_name="",  # Placeholder - lo llenará el joiner
+                user_id=user_id,
+                user_birthdate=marker_date,  # Placeholder - lo llenará el joiner
+                purchases_made=purchase_count,
+            )
+            accumulated_results.append(row)
+            
+            logging.info(f"action: global_top3_client | rank:{rank} | store_id:{store_id} | user_id:{user_id} | purchases:{purchase_count}")
+        
+        if accumulated_results:
+            from utils.file_utils.process_chunk import ProcessChunkHeader
+            from utils.file_utils.table_type import TableType
+            header = ProcessChunkHeader(client_id=self.client_id or 1, table_type=TableType.PURCHASES_PER_USER_STORE)
+            chunk = ProcessChunk(header, accumulated_results)
+            self.data_sender.send(chunk.serialize())
+            self.data_sender.close()
+            
+            logging.info(f"action: publish_absolute_top3_results | result: success | global_top3_count:{len(accumulated_results)} | total_candidates:{len(all_candidates)}")
+        else:
+            logging.warning(f"action: no_absolute_top3_results | client_id:{self.client_id or 1}")
 
     def publish_results(self, chunk):
         """
