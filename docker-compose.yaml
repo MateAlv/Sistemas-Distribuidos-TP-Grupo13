@@ -27,7 +27,7 @@ services:
     - DATA_MODE=tree
     - SERVER_ADDRESS=server:12345
     volumes:
-    - ./.data-reduced:/data:ro
+    - ./.data-test:/data:ro
     - ./.results/client-1:/output
     - ./client/config.ini:/config.ini:ro
     - ./utils:/client/utils:ro
@@ -57,17 +57,17 @@ services:
         condition: service_started
       rabbitmq:
         condition: service_healthy
-  filter_hour_service:
+  aggregator_purchases_service:
     build:
       context: .
-      dockerfile: workers/filter/Dockerfile
-    entrypoint: [python3, main.py, --filter, hour]
-    container_name: filter_hour_service
+      dockerfile: workers/aggregators/Dockerfile
+    entrypoint: [python3, main.py]
+    container_name: aggregator_purchases_service
     environment:
     - PYTHONUNBUFFERED=1
     - LOGGING_LEVEL=DEBUG
+    - AGGREGATOR_TYPE=PURCHASES
     volumes:
-    - ./workers/filter/config/config_hour.ini:/workers/filter/config/config_hour.ini:ro
     - ./utils:/workers/utils:ro
     - ./middleware:/workers/middleware:ro
     networks:
@@ -77,17 +77,121 @@ services:
         condition: service_started
       rabbitmq:
         condition: service_healthy
-  filter_amount_service:
+  maximizer_top3_1_service:
     build:
       context: .
-      dockerfile: workers/filter/Dockerfile
-    entrypoint: [python3, main.py, --filter, amount]
-    container_name: filter_amount_service
+      dockerfile: workers/maximizers/Dockerfile
+    entrypoint: [python3, main.py]
+    container_name: maximizer_top3_1_service
     environment:
     - PYTHONUNBUFFERED=1
     - LOGGING_LEVEL=DEBUG
+    - MAXIMIZER_TYPE=TOP3
+    - MAXIMIZER_RANGE=1
     volumes:
-    - ./workers/filter/config/config_amount.ini:/workers/filter/config/config_amount.ini:ro
+    - ./utils:/workers/utils:ro
+    - ./middleware:/workers/middleware:ro
+    networks:
+    - testing_net
+    depends_on:
+      server:
+        condition: service_started
+      rabbitmq:
+        condition: service_healthy
+  maximizer_top3_2_service:
+    build:
+      context: .
+      dockerfile: workers/maximizers/Dockerfile
+    entrypoint: [python3, main.py]
+    container_name: maximizer_top3_2_service
+    environment:
+    - PYTHONUNBUFFERED=1
+    - LOGGING_LEVEL=DEBUG
+    - MAXIMIZER_TYPE=TOP3
+    - MAXIMIZER_RANGE=2
+    volumes:
+    - ./utils:/workers/utils:ro
+    - ./middleware:/workers/middleware:ro
+    networks:
+    - testing_net
+    depends_on:
+      server:
+        condition: service_started
+      rabbitmq:
+        condition: service_healthy
+  maximizer_top3_3_service:
+    build:
+      context: .
+      dockerfile: workers/maximizers/Dockerfile
+    entrypoint: [python3, main.py]
+    container_name: maximizer_top3_3_service
+    environment:
+    - PYTHONUNBUFFERED=1
+    - LOGGING_LEVEL=DEBUG
+    - MAXIMIZER_TYPE=TOP3
+    - MAXIMIZER_RANGE=3
+    volumes:
+    - ./utils:/workers/utils:ro
+    - ./middleware:/workers/middleware:ro
+    networks:
+    - testing_net
+    depends_on:
+      server:
+        condition: service_started
+      rabbitmq:
+        condition: service_healthy
+  maximizer_top3_absolute_service:
+    build:
+      context: .
+      dockerfile: workers/maximizers/Dockerfile
+    entrypoint: [python3, main.py]
+    container_name: maximizer_top3_absolute_service
+    environment:
+    - PYTHONUNBUFFERED=1
+    - LOGGING_LEVEL=DEBUG
+    - MAXIMIZER_TYPE=TOP3
+    - MAXIMIZER_RANGE=0
+    volumes:
+    - ./utils:/workers/utils:ro
+    - ./middleware:/workers/middleware:ro
+    networks:
+    - testing_net
+    depends_on:
+      server:
+        condition: service_started
+      rabbitmq:
+        condition: service_healthy
+  joiner_stores_top3_service:
+    build:
+      context: .
+      dockerfile: workers/joiners/Dockerfile
+    entrypoint: [python3, main.py]
+    container_name: joiner_stores_top3_service
+    environment:
+    - PYTHONUNBUFFERED=1
+    - LOGGING_LEVEL=DEBUG
+    - JOINER_TYPE=STORES_TOP3
+    volumes:
+    - ./utils:/workers/utils:ro
+    - ./middleware:/workers/middleware:ro
+    networks:
+    - testing_net
+    depends_on:
+      server:
+        condition: service_started
+      rabbitmq:
+        condition: service_healthy
+  joiner_users_service:
+    build:
+      context: .
+      dockerfile: workers/joiners/Dockerfile
+    entrypoint: [python3, main.py]
+    container_name: joiner_users_service
+    environment:
+    - PYTHONUNBUFFERED=1
+    - LOGGING_LEVEL=DEBUG
+    - JOINER_TYPE=USERS
+    volumes:
     - ./utils:/workers/utils:ro
     - ./middleware:/workers/middleware:ro
     networks:

@@ -1,5 +1,5 @@
 from logging import log
-from utils.file_utils.process_table import TransactionItemsProcessRow, TransactionsProcessRow
+from utils.file_utils.process_table import TransactionItemsProcessRow, TransactionsProcessRow, PurchasesPerUserStoreRow
 import logging
 from utils.file_utils.process_table import TableProcessRow
 from utils.file_utils.process_chunk import ProcessChunk
@@ -630,18 +630,20 @@ class Aggregator:
         stores_4_6 = []
         stores_7_10 = []
         
-        marker_date = datetime.date(2024, 1, 1)
+        placeholder_date = datetime.date(2024, 1, 1)
         
         for store_id, users_data in data['purchases'].items():
             # Crear filas con user_id y su conteo de transacciones para este store
             rows_for_store = []
             for user_id, count in users_data.items():
-                row = TransactionsProcessRow(
-                    transaction_id="",
+                # Usar PurchasesPerUserStoreRow con placeholders para store_name y user_birthdate
+                # Los joiners harán el join después para obtener los datos reales
+                row = PurchasesPerUserStoreRow(
                     store_id=store_id,
+                    store_name="",  # Placeholder - lo llenará el joiner
                     user_id=user_id,
-                    final_amount=float(count),
-                    created_at=marker_date,
+                    user_birthdate=placeholder_date,  # Placeholder - lo llenará el joiner  
+                    purchases_made=count,
                 )
                 rows_for_store.append(row)
             
@@ -658,7 +660,7 @@ class Aggregator:
         
         # Enviar a top 1-3
         if stores_1_3:
-            header = ProcessChunkHeader(client_id=client_id, table_type=TableType.TRANSACTIONS)
+            header = ProcessChunkHeader(client_id=client_id, table_type=TableType.PURCHASES_PER_USER_STORE)
             chunk = ProcessChunk(header, stores_1_3)
             chunk_data = chunk.serialize()
             queue = self.middleware_queue_sender["to_top_1_3"]
@@ -667,7 +669,7 @@ class Aggregator:
         
         # Enviar a top 4-6
         if stores_4_6:
-            header = ProcessChunkHeader(client_id=client_id, table_type=TableType.TRANSACTIONS)
+            header = ProcessChunkHeader(client_id=client_id, table_type=TableType.PURCHASES_PER_USER_STORE)
             chunk = ProcessChunk(header, stores_4_6)
             chunk_data = chunk.serialize()
             queue = self.middleware_queue_sender["to_top_4_6"]
@@ -676,7 +678,7 @@ class Aggregator:
         
         # Enviar a top 7-10
         if stores_7_10:
-            header = ProcessChunkHeader(client_id=client_id, table_type=TableType.TRANSACTIONS)
+            header = ProcessChunkHeader(client_id=client_id, table_type=TableType.PURCHASES_PER_USER_STORE)
             chunk = ProcessChunk(header, stores_7_10)
             chunk_data = chunk.serialize()
             queue = self.middleware_queue_sender["to_top_7_10"]

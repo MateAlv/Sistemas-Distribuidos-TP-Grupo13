@@ -287,4 +287,53 @@ class UsersProcessRow(TableProcessRow):
         
         consumed = len(line.encode("utf-8")) + 1
         return row, consumed
+    
+# =========================================
+# Purchases Per User Store Row
+# - Representa una fila del procesamiento de compras por usuario y tienda para Query 4.
+# - Campos:
+#       - store_id: int
+#       - store_name: str
+#       - user_id: int
+#       - user_birthdate: datetime.date
+#       - purchases_made: int
+# =========================================
+class PurchasesPerUserStoreRow(TableProcessRow):
+    def __init__(self, store_id: int, store_name: str, user_id: int, user_birthdate: datetime.date, purchases_made: int):
+        self.store_id = store_id
+        self.store_name = store_name
+        self.user_id = user_id
+        self.user_birthdate = user_birthdate
+        self.purchases_made = purchases_made
+        
+    def serialize(self) -> bytes:
+        store_id_str = str(self.store_id) if self.store_id is not None else ""
+        store_name_str = self.store_name if self.store_name is not None else ""
+        user_id_str = str(self.user_id) if self.user_id is not None else ""
+        user_birthdate_str = self.user_birthdate.isoformat() if self.user_birthdate is not None else ""
+        purchases_made_str = str(self.purchases_made) if self.purchases_made is not None else ""
+
+        return f"{store_id_str},{store_name_str},{user_id_str},{user_birthdate_str},{purchases_made_str}\n".encode("utf-8")
+
+    @staticmethod
+    def from_file_row(file_row):
+        # Esta función normalmente no se usaría para esta clase 
+        # ya que se construye a partir de datos agregados
+        raise NotImplementedError("PurchasesPerUserStoreRow se construye a partir de datos agregados")
+    
+    @staticmethod
+    def deserialize(data: bytes):
+        line = data.split(b"\n", 1)[0].decode("utf-8")
+        parts = line.split(CSV_DELIMITER)
+
+        store_id = int(float(parts[0])) if len(parts[0]) > 0 else None
+        store_name = parts[1] if len(parts[1]) > 0 else None
+        user_id = int(float(parts[2])) if len(parts[2]) > 0 else None
+        user_birthdate = datetime.date.fromisoformat(parts[3]) if len(parts[3]) > 0 else None
+        purchases_made = int(float(parts[4])) if len(parts[4]) > 0 else None
+
+        row = PurchasesPerUserStoreRow(store_id, store_name, user_id, user_birthdate, purchases_made)
+        
+        consumed = len(line.encode("utf-8")) + 1
+        return row, consumed
 # =========================================

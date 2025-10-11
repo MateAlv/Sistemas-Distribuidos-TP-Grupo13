@@ -137,7 +137,6 @@ def define_aggregator(meta: dict, compose: dict, nodo: str):
             "PYTHONUNBUFFERED=1",
             f"LOGGING_LEVEL={meta['logging_level']}",
             f"AGGREGATOR_TYPE={nodo.split('_')[1].upper()}",
-            f"AGGREGATOR_ID={index}",
         ],
         "volumes": [
             "./utils:/workers/utils:ro",

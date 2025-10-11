@@ -8,6 +8,7 @@ class TableType(Enum):
     MENU_ITEMS = 3
     STORES = 4
     USERS = 5
+    PURCHASES_PER_USER_STORE = 6
     
     def from_path(path: str):
         """
