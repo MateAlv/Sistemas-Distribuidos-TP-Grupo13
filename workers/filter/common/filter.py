@@ -76,6 +76,7 @@ class Filter:
                         if stats.client_id not in self.end_message_received:
                             self.end_message_received[stats.client_id] = {}
                         self.end_message_received[stats.client_id][stats.table_type] = True
+                        self.number_of_chunks_to_receive[stats.client_id][stats.table_type] = stats.total_expected
 
                         self._ensure_dict_entry(self.number_of_chunks_received_per_client, stats.client_id, stats.table_type)
                         self._ensure_dict_entry(self.number_of_chunks_not_sent_per_client, stats.client_id, stats.table_type)
@@ -83,7 +84,7 @@ class Filter:
                         self.number_of_chunks_not_sent_per_client[stats.client_id][stats.table_type] += stats.chunks_not_sent
                         
                         total_received = self.number_of_chunks_received_per_client[stats.client_id][stats.table_type]
-                        total_not_sent= self.number_of_chunks_not_sent_per_client[stats.client_id][stats.table_type]
+                        total_not_sent = self.number_of_chunks_not_sent_per_client[stats.client_id][stats.table_type]
                         
                         if (stats.client_id, stats.table_type) not in self.already_sent_stats:
                             self.already_sent_stats[(stats.client_id, stats.table_type)] = True
@@ -115,7 +116,9 @@ class Filter:
                                     total_expected)
                         
                         self._ensure_dict_entry(self.number_of_chunks_not_sent_per_client, client_id, table_type)
-                        self.number_of_chunks_to_receive[client_id] = {table_type: total_expected}
+                        if client_id not in self.number_of_chunks_to_receive:
+                            self.number_of_chunks_to_receive[client_id] = {}
+                        self.number_of_chunks_to_receive[client_id][table_type] = total_expected
 
                         stats_msg = FilterStatsMessage(self.id, client_id, table_type, total_expected,
                                     self.number_of_chunks_received_per_client[client_id][table_type],
@@ -204,9 +207,9 @@ class Filter:
         logging.info(f"action: sending_end_message | type:{self.filter_type} | cli_id:{client_id} | file_type:{table_type.name} | total_chunks:{total_expected-total_not_sent}")
         
         for queue_name, queue in self.middleware_queue_sender.items():
-            logging.info(f"action: sending_end_to_queue | type:{self.filter_type} | queue:{queue_name} | total_chunks:{total_expected-total_not_sent}")
             if self._should_skip_queue(table_type, queue_name):
                 continue
+            logging.info(f"action: sending_end_to_queue | type:{self.filter_type} | queue:{queue_name} | total_chunks:{total_expected-total_not_sent}")
             msg_to_send = self._end_message_to_send(client_id, table_type, total_expected, total_not_sent)
             queue.send(msg_to_send.encode())
         end_msg = FilterStatsEndMessage(self.id, client_id, table_type)
