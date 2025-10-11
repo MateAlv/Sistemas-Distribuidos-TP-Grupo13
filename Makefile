@@ -34,6 +34,7 @@ rebuild:
 	docker compose -f ${DOCKER} up -d
 
 logs:
+	docker compose -f ${DOCKER} up -d --build
 	docker compose -f ${DOCKER} logs -f > logs.txt 
 .PHONY: docker-compose-logs
 
