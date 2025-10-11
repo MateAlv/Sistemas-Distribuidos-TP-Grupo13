@@ -1,4 +1,5 @@
 # server/common/server.py
+from logging import log
 import os
 import socket
 import threading
@@ -72,12 +73,14 @@ class Server:
         # Lock para acceso seguro a estructuras compartidas
         self.clients_lock = threading.Lock()
         
+        self.received_tables = {}
+        
         self._running = True
         self._server_socket: Optional[socket.socket] = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._server_socket.bind((self.host, self.port))
         self._server_socket.listen(self.listen_backlog)
-        logging.debug(
+        logging.info(
             "action: fd_open | result: success | kind: listen_socket | fd:%s | ip:%s | port:%s",
             self._server_socket.fileno(), self.host, self.port
         )
@@ -235,7 +238,10 @@ class Server:
         # Recibir el FileChunk
         chunk = FileChunk.recv(sock)
         client_id = chunk.client_id()
-        
+        table_type = TableType.from_path(chunk.path())
+
+        self.show_table_stats(table_type, client_id)
+
         logging.debug("action: recv_file_chunk | cli_id:%s | file:%s | bytes:%s ", client_id, chunk.path(), chunk.payload_size())
         
         # Deserializar el batch para convertirlo en ProcessChunk
@@ -280,8 +286,34 @@ class Server:
             self.number_of_chunks_per_file_per_client[client_id][table_type] += 1
 
         return client_id
-    
+
     # ---------------- Internos ----------------
+
+    def show_table_stats(self, table_type: TableType, client_id: int):
+        # Check if this is a new table type
+
+        self.received_tables.setdefault(client_id, [])
+
+        if len(self.received_tables[client_id]) == 0:
+            logging.info("action: new_table_for_client | client_id:%s | table:%s", client_id, table_type)
+            self.received_tables[client_id].append({
+                "table_type": table_type,
+                "chunks": 1
+            })
+        else:
+            last_table = self.received_tables[client_id][-1]
+            if last_table["table_type"] != table_type:
+                logging.info("action: last_chunk_for_table | client_id:%s | table:%s | chunks:%d",
+                             client_id, last_table["table_type"], last_table["chunks"])
+                logging.info("action: new_table_for_client | client_id:%s | table:%s", client_id, table_type)
+                self.received_tables[client_id].append({
+                    "table_type": table_type,
+                    "chunks": 1
+                })
+            else:
+                last_table["chunks"] += 1
+
+
     
     def _recv_header_id(self, sock: socket.socket) -> int:
         """
