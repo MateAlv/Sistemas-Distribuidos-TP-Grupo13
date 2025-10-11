@@ -41,7 +41,7 @@ class Aggregator:
             self.middleware_queue_sender["to_max_4_6"] = MessageMiddlewareQueue("rabbitmq", "to_max_4_6")
             self.middleware_queue_sender["to_max_7_8"] = MessageMiddlewareQueue("rabbitmq", "to_max_7_8")
         elif self.aggregator_type == "PURCHASES":
-            self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", "transactions")
+            self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", "to_agg_4")
             self.middleware_exchange_sender = MessageMiddlewareExchange("rabbitmq", f"end_exchange_aggregator_{self.aggregator_type}", [""], exchange_type="fanout")
         elif self.aggregator_type == "TPV":
             self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", "transactions")
