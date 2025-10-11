@@ -70,12 +70,12 @@ class MessageMiddlewareExchange(MessageMiddleware):
             def callback(ch, method, properties, body):
                 try:
                     on_message_callback(body)
-                    ch.basic_ack(delivery_tag=method.delivery_tag)
+                    # ch.basic_ack(delivery_tag=method.delivery_tag)
                 except Exception as e:
-                    ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+                    # ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
                     raise MessageMiddlewareMessageError(f"Error procesando mensaje: {e}")
 
-            self.channel.basic_consume(queue=queue_name, on_message_callback=callback, auto_ack=False)
+            self.channel.basic_consume(queue=queue_name, on_message_callback=callback, auto_ack=True)
             self.connection.call_later(TIMEOUT, self.channel.stop_consuming)
             self.channel.start_consuming()
         except pika.exceptions.AMQPConnectionError:
@@ -131,12 +131,12 @@ class MessageMiddlewareQueue(MessageMiddleware):
             def callback(ch, method, properties, body):
                 try:
                     on_message_callback(body)
-                    ch.basic_ack(delivery_tag=method.delivery_tag)
+                    # ch.basic_ack(delivery_tag=method.delivery_tag)
                 except Exception as e:
-                    ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+                    # ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
                     raise MessageMiddlewareMessageError(f"Error procesando mensaje: {e}")
 
-            self.channel.basic_consume(queue=self.queue_name, on_message_callback=callback, auto_ack=False)
+            self.channel.basic_consume(queue=self.queue_name, on_message_callback=callback, auto_ack=True)
             self.channel.start_consuming()
         except pika.exceptions.AMQPConnectionError:
             raise MessageMiddlewareDisconnectedError("Conexión perdida con RabbitMQ.")

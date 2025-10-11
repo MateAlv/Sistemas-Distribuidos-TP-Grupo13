@@ -73,42 +73,7 @@ class Aggregator:
             # Procesar mensajes de stats de otros aggregators
             for stats_msg in stats_results:
                 try:
-                    stats = AggregatorStatsMessage.decode(stats_msg)
-                    if stats.aggregator_id == self.aggregator_id:
-                        stats_results.remove(stats_msg)
-                        continue
-                    
-                    logging.info(f"action: stats_received | type:{self.aggregator_type} | agg_id:{stats.aggregator_id} | cli_id:{stats.client_id} | file_type:{stats.table_type} | chunks_received:{stats.chunks_received} | chunks_processed:{stats.chunks_processed}")
-                    
-                    # Marcar que recibimos end message de este client/table
-                    if stats.client_id not in self.end_message_received:
-                        self.end_message_received[stats.client_id] = {}
-                    self.end_message_received[stats.client_id][stats.table_type] = True
-
-                    # Acumular stats de otros aggregators
-                    self._ensure_dict_entry(self.chunks_received_per_client, stats.client_id, stats.table_type)
-                    self._ensure_dict_entry(self.chunks_processed_per_client, stats.client_id, stats.table_type)
-                    
-                    self.chunks_received_per_client[stats.client_id][stats.table_type] += stats.chunks_received
-                    self.chunks_processed_per_client[stats.client_id][stats.table_type] += stats.chunks_processed
-                    
-                    total_received = self.chunks_received_per_client[stats.client_id][stats.table_type]
-                    total_processed = self.chunks_processed_per_client[stats.client_id][stats.table_type]
-                    
-                    # Si aún no envié mis stats, enviarlos ahora
-                    if (stats.client_id, stats.table_type) not in self.already_sent_stats:
-                        self.already_sent_stats[(stats.client_id, stats.table_type)] = True
-                        my_stats_msg = AggregatorStatsMessage(self.aggregator_id, stats.client_id, stats.table_type, 
-                                                             stats.total_expected, total_received, total_processed)
-                        self.middleware_stats_exchange.send(my_stats_msg.encode())
-                        
-                    # Verificar si puedo enviar end message
-                    if self._can_send_end_message(stats.total_expected, stats.client_id, stats.table_type):
-                        self._send_end_message(stats.client_id, stats.table_type, stats.total_expected, total_processed)
-
-                except Exception as e:
-                    try:
-                        # Intentar decodificar como AggregatorStatsEndMessage
+                    if stats_msg.startswith(b"AGG_STATS_END"):
                         stats_end = AggregatorStatsEndMessage.decode(stats_msg)
                         if stats_end.aggregator_id == self.aggregator_id:
                             stats_results.remove(stats_msg)
@@ -116,73 +81,49 @@ class Aggregator:
                         
                         logging.info(f"action: stats_end_received | type:{self.aggregator_type} | agg_id:{stats_end.aggregator_id} | cli_id:{stats_end.client_id} | table_type:{stats_end.table_type}")
                         self.delete_client_data(stats_end)
-                    except Exception as e2:
-                        logging.error(f"action: error_decoding_stats_message | error:{e2}")
+                    else:
+                        stats = AggregatorStatsMessage.decode(stats_msg)
+                        if stats.aggregator_id == self.aggregator_id:
+                            stats_results.remove(stats_msg)
+                            continue
+                        
+                        logging.info(f"action: stats_received | type:{self.aggregator_type} | agg_id:{stats.aggregator_id} | cli_id:{stats.client_id} | file_type:{stats.table_type} | chunks_received:{stats.chunks_received} | chunks_processed:{stats.chunks_processed}")
+                        
+                        # Marcar que recibimos end message de este client/table
+                        if stats.client_id not in self.end_message_received:
+                            self.end_message_received[stats.client_id] = {}
+                        self.end_message_received[stats.client_id][stats.table_type] = True
+
+                        # Acumular stats de otros aggregators
+                        self._ensure_dict_entry(self.chunks_received_per_client, stats.client_id, stats.table_type)
+                        self._ensure_dict_entry(self.chunks_processed_per_client, stats.client_id, stats.table_type)
+                        
+                        self.chunks_received_per_client[stats.client_id][stats.table_type] += stats.chunks_received
+                        self.chunks_processed_per_client[stats.client_id][stats.table_type] += stats.chunks_processed
+                        
+                        total_received = self.chunks_received_per_client[stats.client_id][stats.table_type]
+                        total_processed = self.chunks_processed_per_client[stats.client_id][stats.table_type]
+                        
+                        # Si aún no envié mis stats, enviarlos ahora
+                        if (stats.client_id, stats.table_type) not in self.already_sent_stats:
+                            self.already_sent_stats[(stats.client_id, stats.table_type)] = True
+                            my_stats_msg = AggregatorStatsMessage(self.aggregator_id, stats.client_id, stats.table_type, 
+                                                                stats.total_expected, total_received, total_processed)
+                            self.middleware_stats_exchange.send(my_stats_msg.encode())
+                            
+                        # Verificar si puedo enviar end message
+                        if self._can_send_end_message(stats.total_expected, stats.client_id, stats.table_type):
+                            self._send_end_message(stats.client_id, stats.table_type, stats.total_expected, total_processed)
+
+                except Exception as e:
+                    logging.error(f"action: error_decoding_stats_message | error:{e}")
                     
-                    stats_results.remove(stats_msg)
+                stats_results.remove(stats_msg)
 
             # Procesar datos reales
             for msg in results:
                 try:
-                    chunk = ProcessBatchReader.from_bytes(msg)
-                    client_id = chunk.client_id()
-                    table_type = chunk.table_type()
-                    
-                    logging.info(f"action: aggregate | type:{self.aggregator_type} | cli_id:{client_id} | file_type:{table_type} | rows_in:{len(chunk.rows)}")
-                    
-                    # Contar chunks recibidos y procesados
-                    self._ensure_dict_entry(self.chunks_received_per_client, client_id, table_type)
-                    self._ensure_dict_entry(self.chunks_processed_per_client, client_id, table_type)
-                    self.chunks_received_per_client[client_id][table_type] += 1
-                    
-                    # Procesar según tipo de aggregator - ACUMULAR no enviar
-                    has_output = False
-                    if self.aggregator_type == "PRODUCTS":
-                        aggregated_chunks = self.apply_products(chunk)
-                        if aggregated_chunks:
-                            rows_1_3, rows_4_6, rows_7_8 = aggregated_chunks
-                            self.accumulate_products(client_id, rows_1_3, rows_4_6, rows_7_8)
-                            has_output = True
-                                
-                    elif self.aggregator_type == "PURCHASES":
-                        aggregated_chunk = self.apply_purchases(chunk)
-                        if aggregated_chunk:
-                            self.accumulate_purchases(client_id, aggregated_chunk)
-                            has_output = True
-                            
-                    elif self.aggregator_type == "TPV":
-                        aggregated_chunk = self.apply_tpv(chunk)
-                        if aggregated_chunk:
-                            self.accumulate_tpv(client_id, aggregated_chunk)
-                            has_output = True
-                    
-                    # Solo contar como procesado si generó output
-                    if has_output:
-                        self.chunks_processed_per_client[client_id][table_type] += 1
-                    
-                    # Verificar si ya recibimos end message para este client/table
-                    if client_id not in self.end_message_received:
-                        self.end_message_received[client_id] = {}
-
-                    if self.end_message_received[client_id].get(table_type, False):
-                        total_expected = self.chunks_to_receive[client_id][table_type]
-                        total_received = self.chunks_received_per_client[client_id][table_type]
-                        total_processed = self.chunks_processed_per_client[client_id][table_type]
-
-                        # Enviar stats si aún no lo hice
-                        if (client_id, table_type) not in self.already_sent_stats:
-                            self.already_sent_stats[(client_id, table_type)] = True
-                            stats_msg = AggregatorStatsMessage(self.aggregator_id, client_id, table_type, 
-                                                              total_expected, total_received, total_processed)
-                            self.middleware_stats_exchange.send(stats_msg.encode())
-
-                        # Verificar si puedo enviar end message
-                        if self._can_send_end_message(total_expected, client_id, table_type):
-                            self._send_end_message(client_id, table_type, total_expected, total_processed)
-                        
-                except Exception as e:
-                    try:
-                        # Intentar decodificar como MessageEnd
+                    if msg.startswith(b"END;"):
                         end_message = MessageEnd.decode(msg)
                         client_id = end_message.client_id()
                         table_type = end_message.table_type()
@@ -201,18 +142,72 @@ class Aggregator:
 
                         logging.info(f"action: end_message_received | type:{self.aggregator_type} | cli_id:{client_id} | file_type:{table_type} | total_chunks_expected:{total_expected}")
                         
-                        # Enviar stats message
                         stats_msg = AggregatorStatsMessage(self.aggregator_id, client_id, table_type, total_expected,
                                                           self.chunks_received_per_client[client_id][table_type],
                                                           self.chunks_processed_per_client[client_id][table_type])
                         self.middleware_stats_exchange.send(stats_msg.encode())
 
-                        # Verificar si puedo enviar end message
                         if self._can_send_end_message(total_expected, client_id, table_type):
                             self._send_end_message(client_id, table_type, total_expected, self.chunks_processed_per_client[client_id][table_type])
+                    else:
+                        chunk = ProcessBatchReader.from_bytes(msg)
+                        client_id = chunk.client_id()
+                        table_type = chunk.table_type()
+                        
+                        logging.info(f"action: aggregate | type:{self.aggregator_type} | cli_id:{client_id} | file_type:{table_type} | rows_in:{len(chunk.rows)}")
+                        
+                        # Contar chunks recibidos y procesados
+                        self._ensure_dict_entry(self.chunks_received_per_client, client_id, table_type)
+                        self._ensure_dict_entry(self.chunks_processed_per_client, client_id, table_type)
+                        self.chunks_received_per_client[client_id][table_type] += 1
+                        
+                        # Procesar según tipo de aggregator - ACUMULAR no enviar
+                        has_output = False
+                        if self.aggregator_type == "PRODUCTS":
+                            aggregated_chunks = self.apply_products(chunk)
+                            if aggregated_chunks:
+                                rows_1_3, rows_4_6, rows_7_8 = aggregated_chunks
+                                self.accumulate_products(client_id, rows_1_3, rows_4_6, rows_7_8)
+                                has_output = True
+                                    
+                        elif self.aggregator_type == "PURCHASES":
+                            aggregated_chunk = self.apply_purchases(chunk)
+                            if aggregated_chunk:
+                                self.accumulate_purchases(client_id, aggregated_chunk)
+                                has_output = True
+                                
+                        elif self.aggregator_type == "TPV":
+                            aggregated_chunk = self.apply_tpv(chunk)
+                            if aggregated_chunk:
+                                self.accumulate_tpv(client_id, aggregated_chunk)
+                                has_output = True
+                        
+                        # Solo contar como procesado si generó output
+                        if has_output:
+                            self.chunks_processed_per_client[client_id][table_type] += 1
+                        
+                        # Verificar si ya recibimos end message para este client/table
+                        if client_id not in self.end_message_received:
+                            self.end_message_received[client_id] = {}
+
+                        if self.end_message_received[client_id].get(table_type, False):
+                            total_expected = self.chunks_to_receive[client_id][table_type]
+                            total_received = self.chunks_received_per_client[client_id][table_type]
+                            total_processed = self.chunks_processed_per_client[client_id][table_type]
+
+                            # Enviar stats si aún no lo hice
+                            if (client_id, table_type) not in self.already_sent_stats:
+                                self.already_sent_stats[(client_id, table_type)] = True
+                                stats_msg = AggregatorStatsMessage(self.aggregator_id, client_id, table_type, 
+                                                                total_expected, total_received, total_processed)
+                                self.middleware_stats_exchange.send(stats_msg.encode())
+
+                            # Verificar si puedo enviar end message
+                            if self._can_send_end_message(total_expected, client_id, table_type):
+                                self._send_end_message(client_id, table_type, total_expected, total_processed)
                             
-                    except Exception as e2:
-                        logging.error(f"action: error_decoding_message | error:{e2}")
+                except Exception as e:
+                    logging.error(f"action: error_decoding_message | error:{e}")
 
                 results.remove(msg)
 
