@@ -299,6 +299,9 @@ class Aggregator:
                             logging.warning(f"action: date_parse_error | created_at:{created_at} | type:{type(created_at)}")
                             parsing_errors += 1
                             continue
+                elif hasattr(created_at, 'date'):
+                    # Manejar objetos DateTime con atributo .date
+                    dt = datetime.datetime.combine(created_at.date, created_at.time if hasattr(created_at, 'time') else datetime.time(0, 0))
                 elif hasattr(created_at, 'year'):
                     dt = created_at
                 else:
@@ -365,6 +368,9 @@ class Aggregator:
                         dt = datetime.datetime.fromisoformat(created_at)
                     except ValueError:
                         dt = datetime.datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S")
+                elif hasattr(created_at, 'date'):
+                    # Manejar objetos DateTime con atributo .date
+                    dt = datetime.datetime.combine(created_at.date, created_at.time if hasattr(created_at, 'time') else datetime.time(0, 0))
                 elif hasattr(created_at, 'year'):
                     dt = created_at
                 else:
