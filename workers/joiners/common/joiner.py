@@ -1,5 +1,5 @@
 from utils.file_utils.table_type import TableType, ResultTableType
-from utils.file_utils.process_table import TransactionItemsProcessRow
+from utils.file_utils.process_table import TransactionItemsProcessRow, PurchasesPerUserStoreRow
 from utils.file_utils.result_table import Query2_1ResultRow, Query2_2ResultRow, Query3ResultRow, Query4ResultRow
 from utils.file_utils.process_table import TableProcessRow
 from utils.file_utils.process_chunk import ProcessChunk
@@ -366,75 +366,133 @@ class StoresTpvJoiner(Joiner):
 class StoresTop3Joiner(Joiner):
     
     def define_queues(self):
-        self.data_receiver = MessageMiddlewareQueue("rabbitmq", "to_join_with_stores_top3")
+        # Recibe del TOP3 absoluto
+        self.data_receiver = MessageMiddlewareQueue("rabbitmq", "to_purchases_joiner")
+        # Recibe datos de stores del servidor
         self.data_join_receiver = MessageMiddlewareQueue("rabbitmq", "to_join_stores")
+        # Envía al UsersJoiner
         self.data_sender = MessageMiddlewareQueue("rabbitmq", "to_join_with_users")
 
     def save_data_join_fields(self, row, client_id):
-        self.joiner_data[client_id][row.store_id] = row.store_name
+        # Guarda mapping store_id -> store_name
+        if hasattr(row, 'store_id') and hasattr(row, 'store_name'):
+            self.joiner_data[client_id][row.store_id] = row.store_name
+            logging.debug(f"action: save_store_data | store_id:{row.store_id} | store_name:{row.store_name}")
     
     def join_result(self, row: TableProcessRow, client_id):
-        # REPENSAR TIPO DE DATO PARA CANTIDAD DE COMPRAS -> AGGREGATOR
-        result = {
-            "store_id": row.store_id,
-            "store_name": self.joiner_data[client_id].get(row.store_id, "UNKNOWN"),
-            "user_id": row.user_id,
-            "purchases_quantity": row.quantity,
-        }
-        return result
+        # Procesar PurchasesPerUserStoreRow del TOP3 absoluto
+        if isinstance(row, PurchasesPerUserStoreRow):
+            store_id = row.store_id
+            store_name = self.joiner_data[client_id].get(store_id, f"UNKNOWN_STORE_{store_id}")
+            
+            # Crear nueva fila con store_name llenado
+            joined_row = PurchasesPerUserStoreRow(
+                store_id=store_id,
+                store_name=store_name,  # ¡Ahora con el nombre real!
+                user_id=row.user_id,
+                user_birthdate=row.user_birthdate,  # Sigue siendo placeholder
+                purchases_made=row.purchases_made
+            )
+            
+            logging.debug(f"action: joined_store_data | store_id:{store_id} | store_name:{store_name} | user_id:{row.user_id} | purchases:{row.purchases_made}")
+            return joined_row
+        else:
+            logging.warning(f"action: unexpected_row_type | expected:PurchasesPerUserStoreRow | got:{type(row)}")
+            return row
+    
+    def send_end_query_msg(self, client_id):
+        # Envía END message al UsersJoiner
+        try:
+            end_msg = MessageEnd(client_id, TableType.PURCHASES_PER_USER_STORE, 1)
+            self.data_sender.send(end_msg.encode())
+            logging.info(f"action: sent_end_to_users_joiner | client_id:{client_id}")
+        except Exception as e:
+            logging.error(f"action: error_sending_end_to_users_joiner | error:{e}")
     
     def publish_results(self, client_id):
-        # PENSAR NUEVO TIPO DE DATA PARA PROCESS TABLE
+        # Envía PurchasesPerUserStoreRow con store_name llenado al UsersJoiner
         joiner_results = self.joiner_results.get(client_id, [])
-        query4_results = []
-        for row in joiner_results:
-            query4_result = Query4ResultRow(store_id=row["store_id"], store_name=row["store_name"], user_id=row["user_id"], purchases_quantity=row["purchases_quantity"])
-            query4_results.append(query4_result)
         
-        if query4_results:
-            query4_header = ResultChunkHeader(client_id, ResultTableType.QUERY_4)
-            query4_chunk = ResultChunk(query4_header, query4_results)
-            self.data_sender.send(query4_chunk.serialize())
-            logging.info(f"action: sent_result_message | type:{self.joiner_type}")
+        if joiner_results:
+            # Crear chunk con las filas que tienen store_name llenado
+            from utils.file_utils.process_chunk import ProcessChunkHeader
+            header = ProcessChunkHeader(client_id, TableType.PURCHASES_PER_USER_STORE)
+            chunk = ProcessChunk(header, joiner_results)
+            
+            self.data_sender.send(chunk.serialize())
+            logging.info(f"action: sent_to_users_joiner | type:{self.joiner_type} | client_id:{client_id} | rows:{len(joiner_results)}")
         else:
             logging.info(f"action: no_results_to_send | type:{self.joiner_type} | client_id:{client_id}")
 
 class UsersJoiner(Joiner):
     
     def define_queues(self):
+        # Recibe del StoresTop3Joiner
         self.data_receiver = MessageMiddlewareQueue("rabbitmq", "to_join_with_users")
+        # Recibe datos de users del servidor
         self.data_join_receiver = MessageMiddlewareQueue("rabbitmq", "to_join_users")
+        # Envía resultados finales
         self.data_sender = MessageMiddlewareQueue("rabbitmq", "to_merge_data")
         
     def save_data_join_fields(self, row, client_id):
-        self.joiner_data[client_id][row.user_id] = row.birthdate
+        # Guarda mapping user_id -> birthdate
+        if hasattr(row, 'user_id') and hasattr(row, 'birthdate'):
+            self.joiner_data[client_id][row.user_id] = row.birthdate
+            logging.debug(f"action: save_user_data | user_id:{row.user_id} | birthdate:{row.birthdate}")
+    
+    def send_end_query_msg(self, client_id):
+        # Envía END message final para Query 4
+        try:
+            end_query_msg = MessageQueryEnd(client_id, ResultTableType.QUERY_4, 1)
+            client_queue = MessageMiddlewareQueue("rabbitmq", f"to_merge_data_{client_id}")
+            client_queue.send(end_query_msg.encode())
+            client_queue.close()
+            logging.info(f"action: sent_end_query_4 | client_id:{client_id}")
+        except Exception as e:
+            logging.error(f"action: error_sending_end_query_4 | error:{e}")
     
     def join_result(self, row: TableProcessRow, client_id):
-        result = {
-            "store_id": row.store_id,
-            "store_name": row.store_name,
-            "user_id": row.user_id,
-            "birthdate": self.joiner_data[client_id].get(row.user_id, "UNKNOWN"),
-            "purchases_quatity": row.quantity,
-        }
-        return result
+        # Procesar PurchasesPerUserStoreRow del StoresTop3Joiner
+        if isinstance(row, PurchasesPerUserStoreRow):
+            user_id = row.user_id
+            birthdate = self.joiner_data[client_id].get(user_id, None)
+            
+            if birthdate is None:
+                logging.warning(f"action: user_not_found | user_id:{user_id} | using_placeholder")
+                birthdate = "UNKNOWN"
+            
+            # Crear resultado final para Query 4
+            result = Query4ResultRow(
+                store_id=row.store_id,
+                store_name=row.store_name,
+                user_id=user_id,
+                birthdate=birthdate,
+                purchase_quantity=row.purchases_made
+            )
+            
+            logging.debug(f"action: joined_user_data | store_id:{row.store_id} | store_name:{row.store_name} | user_id:{user_id} | birthdate:{birthdate} | purchases:{row.purchases_made}")
+            return result
+        else:
+            logging.warning(f"action: unexpected_row_type | expected:PurchasesPerUserStoreRow | got:{type(row)}")
+            return None
 
     def publish_results(self, client_id):
+        # Envía resultados finales de Query 4
         joiner_results = self.joiner_results.get(client_id, [])
-        query4_partial_results = []
-        for row in joiner_results:
-            store_id = row["store_id"]
-            store_name = row["store_name"]
-            user_id = row["user_id"]
-            birthdate = row["birthdate"]
-            purchase_quantity = row["purchases_quatity"]
-            query4_result = Query4ResultRow(store_id, store_name, user_id, birthdate, purchase_quantity)
-            query4_partial_results.append(query4_result)
         
-        if query4_partial_results:
+        # Filtrar resultados None
+        query4_results = [result for result in joiner_results if result is not None]
+        
+        if query4_results:
+            # Enviar a cola específica del cliente
+            client_queue = MessageMiddlewareQueue("rabbitmq", f"to_merge_data_{client_id}")
+            
             query4_header = ResultChunkHeader(client_id, ResultTableType.QUERY_4)
-            query4_chunk = ResultChunk(query4_header, query4_partial_results)
-            self.data_sender.send(query4_chunk.serialize())
-            logging.info(f"action: sent_result_message | type:{self.joiner_type}")
+            query4_chunk = ResultChunk(query4_header, query4_results)
+            
+            client_queue.send(query4_chunk.serialize())
+            client_queue.close()
+            
+            logging.info(f"action: sent_query4_results | type:{self.joiner_type} | client_id:{client_id} | results:{len(query4_results)}")
         else:
-            logging.info(f"action: no_results_to_send | type:{self.joiner_type} | client_id:{client_id}")
+            logging.info(f"action: no_query4_results_to_send | type:{self.joiner_type} | client_id:{client_id}")
