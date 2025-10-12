@@ -18,9 +18,7 @@ class TableType(Enum):
         """
         path = path.lower()
         filename = path.split("/")[-1]  # tomar solo el último segmento (archivo)
-
-        # Verificar en orden específico para evitar matches incorrectos
-        # TRANSACTION_ITEMS debe ir antes de TRANSACTIONS para evitar falsos positivos
+        
         if "transaction_items" in filename:
             return TableType.TRANSACTION_ITEMS
         elif "transactions" in filename:

@@ -214,7 +214,7 @@ class Aggregator:
                             self._send_end_message(client_id, table_type, total_expected, self.chunks_processed_per_client[client_id][table_type])
                             
                     except Exception as e2:
-                        logging.error(f"action: error_decoding_message | error:{e2}")
+                        logging.error(f"action: error_decoding_message | type:{self.aggregator_type} | error:{e2} | raw_msg_preview:{msg[:200] if len(msg) > 200 else msg}")
 
                 results.remove(msg)
 
@@ -278,8 +278,6 @@ class Aggregator:
         # Acumulador temporal para este chunk
         chunk_accumulator = defaultdict(int)
         
-        logging.info(f"action: apply_purchases_processing | client_id:{chunk.header.client_id} | rows_in:{len(chunk.rows)}")
-        
         processed_rows = 0
         valid_years = 0
         parsing_errors = 0
@@ -342,8 +340,6 @@ class Aggregator:
                 created_at=marker_date,
             )
             rows.append(row)
-        
-        logging.info(f"action: apply_purchases_output | client_id:{chunk.header.client_id} | output_rows:{len(rows)}")
         
         from utils.file_utils.process_chunk import ProcessChunkHeader
         from utils.file_utils.table_type import TableType
