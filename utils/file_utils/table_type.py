@@ -19,9 +19,18 @@ class TableType(Enum):
         path = path.lower()
         filename = path.split("/")[-1]  # tomar solo el último segmento (archivo)
 
-        for table_type in TableType:
-            if table_type.name.lower() in filename:
-                return table_type
+        # Verificar en orden específico para evitar matches incorrectos
+        # TRANSACTION_ITEMS debe ir antes de TRANSACTIONS para evitar falsos positivos
+        if "transaction_items" in filename:
+            return TableType.TRANSACTION_ITEMS
+        elif "transactions" in filename:
+            return TableType.TRANSACTIONS
+        elif "menu_items" in filename:
+            return TableType.MENU_ITEMS
+        elif "stores" in filename:
+            return TableType.STORES
+        elif "users" in filename:
+            return TableType.USERS
 
         raise ValueError(f"No se pudo determinar el tipo de tabla para el path: {path}")
 # =========================================
