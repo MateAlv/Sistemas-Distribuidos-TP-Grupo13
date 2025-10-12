@@ -379,6 +379,28 @@ class StoresTop3Joiner(Joiner):
             self.joiner_data[client_id][row.store_id] = row.store_name
             logging.debug(f"action: save_store_data | store_id:{row.store_id} | store_name:{row.store_name}")
     
+    def save_data_join(self, chunk) -> bool:
+        """
+        Guarda los datos para la tabla base necesaria para el join (tabla de stores).
+        """
+        client_id = chunk.client_id()
+        rows = chunk.rows
+        
+        # Inicializar diccionario para este cliente si no existe
+        if client_id not in self.joiner_data:
+            self.joiner_data[client_id] = {}
+            
+        # Guardar mapping store_id → store_name
+        for row in rows:
+            if hasattr(row, 'store_id') and hasattr(row, 'store_name'):
+                self.joiner_data[client_id][row.store_id] = row.store_name
+                logging.debug(f"action: save_stores_join_data | type:{self.joiner_type} | store_id:{row.store_id} | store_name:{row.store_name}")
+            else:
+                logging.warning(f"action: invalid_stores_join_row | type:{self.joiner_type} | row_type:{type(row)} | missing_fields | has_store_id:{hasattr(row, 'store_id')} | has_store_name:{hasattr(row, 'store_name')}")
+            
+        logging.info(f"action: saved_stores_join_data | type:{self.joiner_type} | client_id:{client_id} | stores_loaded:{len(self.joiner_data[client_id])}")
+        return True
+    
     def join_result(self, row: TableProcessRow, client_id):
         # Procesar PurchasesPerUserStoreRow del TOP3 absoluto
         if isinstance(row, PurchasesPerUserStoreRow):
@@ -439,6 +461,28 @@ class UsersJoiner(Joiner):
         if hasattr(row, 'user_id') and hasattr(row, 'birthdate'):
             self.joiner_data[client_id][row.user_id] = row.birthdate
             logging.debug(f"action: save_user_data | user_id:{row.user_id} | birthdate:{row.birthdate}")
+    
+    def save_data_join(self, chunk) -> bool:
+        """
+        Guarda los datos para la tabla base necesaria para el join (tabla de users).
+        """
+        client_id = chunk.client_id()
+        rows = chunk.rows
+        
+        # Inicializar diccionario para este cliente si no existe
+        if client_id not in self.joiner_data:
+            self.joiner_data[client_id] = {}
+            
+        # Guardar mapping user_id → birthdate
+        for row in rows:
+            if hasattr(row, 'user_id') and hasattr(row, 'birthdate'):
+                self.joiner_data[client_id][row.user_id] = row.birthdate
+                # logging.debug(f"action: save_user_join_data | type:{self.joiner_type} | user_id:{row.user_id} | birthdate:{row.birthdate}")
+            else:
+                logging.warning(f"action: invalid_users_join_row | type:{self.joiner_type} | row_type:{type(row)} | missing_fields | has_user_id:{hasattr(row, 'user_id')} | has_birthdate:{hasattr(row, 'birthdate')}")
+            
+        logging.info(f"action: saved_users_join_data | type:{self.joiner_type} | client_id:{client_id} | users_loaded:{len(self.joiner_data[client_id])}")
+        return True
     
     def send_end_query_msg(self, client_id):
         # Envía END message final para Query 4

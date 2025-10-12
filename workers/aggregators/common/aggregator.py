@@ -278,7 +278,14 @@ class Aggregator:
         # Acumulador temporal para este chunk
         chunk_accumulator = defaultdict(int)
         
+        logging.info(f"action: apply_purchases_processing | client_id:{chunk.header.client_id} | rows_in:{len(chunk.rows)}")
+        
+        processed_rows = 0
+        valid_years = 0
+        parsing_errors = 0
+        
         for row in chunk.rows:
+            processed_rows += 1
             if hasattr(row, 'store_id') and hasattr(row, 'user_id') and hasattr(row, 'created_at'):
                 # Parsear fecha
                 created_at = row.created_at
@@ -286,19 +293,38 @@ class Aggregator:
                     try:
                         dt = datetime.datetime.fromisoformat(created_at)
                     except ValueError:
-                        dt = datetime.datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S")
+                        try:
+                            dt = datetime.datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S")
+                        except ValueError:
+                            logging.warning(f"action: date_parse_error | created_at:{created_at} | type:{type(created_at)}")
+                            parsing_errors += 1
+                            continue
                 elif hasattr(created_at, 'year'):
                     dt = created_at
                 else:
+                    logging.warning(f"action: invalid_date_format | created_at:{created_at} | type:{type(created_at)}")
+                    parsing_errors += 1
                     continue
                     
                 # Filtrar por años 2024-2025
                 if dt.year in YEARS:
+                    valid_years += 1
                     key = (int(row.store_id), int(row.user_id))
                     chunk_accumulator[key] += 1
+                else:
+                    logging.debug(f"action: year_filtered_out | year:{dt.year} | expected:{YEARS}")
+            else:
+                missing_fields = []
+                if not hasattr(row, 'store_id'): missing_fields.append('store_id')
+                if not hasattr(row, 'user_id'): missing_fields.append('user_id')  
+                if not hasattr(row, 'created_at'): missing_fields.append('created_at')
+                logging.warning(f"action: missing_required_fields | row_type:{type(row)} | missing:{missing_fields}")
+
+        logging.info(f"action: apply_purchases_stats | client_id:{chunk.header.client_id} | processed:{processed_rows} | valid_years:{valid_years} | parsing_errors:{parsing_errors} | accumulated_keys:{len(chunk_accumulator)}")
 
         # Crear chunk de salida con los datos agregados de este chunk
         if not chunk_accumulator:
+            logging.warning(f"action: apply_purchases_no_output | client_id:{chunk.header.client_id} | processed:{processed_rows} | valid_years:{valid_years}")
             return None
             
         rows = []
@@ -313,6 +339,8 @@ class Aggregator:
                 created_at=marker_date,
             )
             rows.append(row)
+        
+        logging.info(f"action: apply_purchases_output | client_id:{chunk.header.client_id} | output_rows:{len(rows)}")
         
         from utils.file_utils.process_chunk import ProcessChunkHeader
         from utils.file_utils.table_type import TableType

@@ -98,17 +98,17 @@ services:
         condition: service_started
       rabbitmq:
         condition: service_healthy
-  maximizer_top3_2_service:
+  maximizer_top3_4_service:
     build:
       context: .
       dockerfile: workers/maximizers/Dockerfile
     entrypoint: [python3, main.py]
-    container_name: maximizer_top3_2_service
+    container_name: maximizer_top3_4_service
     environment:
     - PYTHONUNBUFFERED=1
     - LOGGING_LEVEL=DEBUG
     - MAXIMIZER_TYPE=TOP3
-    - MAXIMIZER_RANGE=2
+    - MAXIMIZER_RANGE=4
     volumes:
     - ./utils:/workers/utils:ro
     - ./middleware:/workers/middleware:ro
@@ -119,17 +119,17 @@ services:
         condition: service_started
       rabbitmq:
         condition: service_healthy
-  maximizer_top3_3_service:
+  maximizer_top3_7_service:
     build:
       context: .
       dockerfile: workers/maximizers/Dockerfile
     entrypoint: [python3, main.py]
-    container_name: maximizer_top3_3_service
+    container_name: maximizer_top3_7_service
     environment:
     - PYTHONUNBUFFERED=1
     - LOGGING_LEVEL=DEBUG
     - MAXIMIZER_TYPE=TOP3
-    - MAXIMIZER_RANGE=3
+    - MAXIMIZER_RANGE=7
     volumes:
     - ./utils:/workers/utils:ro
     - ./middleware:/workers/middleware:ro
