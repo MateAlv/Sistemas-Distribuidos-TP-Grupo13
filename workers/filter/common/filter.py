@@ -236,8 +236,10 @@ class Filter:
             dictionary[client_id][table_type] = default
 
     def _should_skip_queue(self, table_type: TableType, queue_name: str) -> bool:
+        # Omitir TRANSACTION_ITEMS hacia to_filter_2 y to_agg_4 (que necesitan TRANSACTIONS)
         if table_type == TableType.TRANSACTION_ITEMS and queue_name in ["to_filter_2", "to_agg_4"]:
             return True
+        # Omitir TRANSACTIONS hacia to_agg_1+2 (que necesitan TRANSACTION_ITEMS)
         if table_type == TableType.TRANSACTIONS and queue_name in ["to_agg_1+2"]:
             return True
         return False
