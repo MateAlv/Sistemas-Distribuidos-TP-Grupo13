@@ -113,7 +113,7 @@ class MessageMiddlewareExchange(MessageMiddleware):
         try:
             props = pika.BasicProperties(delivery_mode=2)
             for rk in self.route_keys:
-                confirmed = self.channel.basic_publish(
+                self.channel.basic_publish(
                     exchange=self.exchange_name,
                     routing_key=rk,
                     body=message,
