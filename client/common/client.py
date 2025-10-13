@@ -222,9 +222,10 @@ class Client:
         except FileNotFoundError:
             file_exists = False
 
-        with open(output_path, "ab") as f:
-            if not file_exists:
-                f.write(csv_header.encode())
+        # Usar modo "wb" para sobrescribir el archivo completamente en lugar de append
+        with open(output_path, "wb") as f:
+            # Siempre escribir el header al inicio del archivo
+            f.write(csv_header.encode())
             for row in process_chunk.rows:
                 data = row.serialize()
                 if not data.endswith(b'\n'):
