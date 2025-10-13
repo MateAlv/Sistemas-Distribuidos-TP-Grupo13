@@ -16,6 +16,22 @@ Los targets disponibles son:
 | `build` | Compila la aplicación cliente para ejecución en el _host_ en lugar de en Docker. De este modo la compilación es mucho más veloz, pero requiere contar con todo el entorno de Golang y Python instalados en la máquina _host_. |
 
 
+## Queries Disponibles
+
+- 1. Transacciones (Id y monto) realizadas durante 2024 y 2025 entre las 06:00 AM y las
+11:00 PM con monto total mayor o igual a 75.
+
+- 2. Productos más vendidos (nombre y cant) y productos que más ganancias han generado
+(nombre y monto), para cada mes en 2024 y 2025.
+
+- 3. TPV (Total Payment Value) por cada semestre en 2024 y 2025, para cada sucursal, para
+transacciones realizadas entre las 06:00 AM y las 11:00 PM.
+
+- 4. Fecha de cumpleaños de los 3 clientes que han hecho más compras durante 2024 y
+2025, para cada sucursal.
+
+
+
 ## Protocolo de comunicación (Cliente ↔ Servidor)
 
 ### 1. Handshake inicial
@@ -125,4 +141,5 @@ Cuando el cliente termina de enviar todos los archivos:
   - Recibe de Filtro 3
 - Merge Q3:
   - Envia a Join Stores
+
   - Recibe de Agg 3
