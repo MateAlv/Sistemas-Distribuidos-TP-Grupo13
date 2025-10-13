@@ -34,8 +34,12 @@ rebuild:
 	docker compose -f ${DOCKER} up -d
 
 logs:
-	docker compose -f ${DOCKER} logs -f
+	docker compose -f ${DOCKER} logs -f > logs.txt 
 .PHONY: docker-compose-logs
+
+clean-logs:
+	> logs.txt
+.PHONY: clean-logs
 
 test:
 	docker compose -f ${DOCKER} up --build

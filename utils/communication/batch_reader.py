@@ -7,7 +7,24 @@ from dataclasses import dataclass
 from typing import Iterable, Optional, Generator, List, Tuple
 from .file_chunk import FileChunk
 from .directory_reader import DirectoryReader
+from utils.file_utils.table_type import TableType
 
+class TableStats:
+    """
+    Estadísticas de un tabla procesada.
+
+    - total_rows: filas procesadas (sin contar header)
+    - total_bytes: bytes procesados (sin contar header)
+    - total_files: archivos procesados
+    """
+    def __init__(self, table: TableType) -> None:
+        self.table: TableType = table
+        self.total_rows: int = 0
+        self.total_bytes: int = 0
+        self.total_files: int = 0
+
+    def __str__(self) -> str:
+        return f"(rows={self.total_rows}, bytes={self.total_bytes}, files={self.total_files})"
 
 class BatchReader:
     """
@@ -33,6 +50,7 @@ class BatchReader:
         self.total_bytes: int = 0
         self.total_batches: int = 0
         self.encoding: str = "utf-8"
+        self.currentTable = None
 
     # -----------------------
     # Implementaciones
@@ -42,8 +60,18 @@ class BatchReader:
         for abs_path, rel_path, _ in self.directory_reader.iter():
             # Verificar si el archivo es reconocido por el sistema antes de procesarlo
             try:
-                from utils.file_utils.table_type import TableType
-                TableType.from_path(rel_path)  # Verifica si es un tipo válido
+                table = TableType.from_path(rel_path)  # Verifica si es un tipo válido
+                if self.currentTable is None:
+                    self.currentTable = TableStats(table)
+                    logging.info("action: start_new_table | client_id:%s | table:%s", self.client_id, table.name)
+                elif self.currentTable.table != table:
+                    logging.info("action: finish_table | client_id:%s | table:%s | stats:%s", 
+                                 self.client_id, self.currentTable.table, str(self.currentTable) if self.currentTable else "N/A")
+                    self.currentTable = TableStats(table)
+                    logging.info("action: start_new_table | client_id:%s | table:%s", self.client_id, table.name)
+                    
+                self.currentTable.total_files += 1
+            
             except ValueError as e:
                 # Archivo no reconocido (ej: payment_methods.csv) - ignorar silenciosamente
                 logging.info("action: skip_unsupported_file | client_id:%s | file:%s | reason:%s", 
@@ -51,20 +79,21 @@ class BatchReader:
                 continue  # Salta al siguiente archivo
             
             # Itera por batches del archivo actual
-            for batch_payload in self.__iter_batch_payload__(abs_path):
-                # Determina si es el último chunk (si el batch < max_batch_size)
-                is_last = len(batch_payload) < self.max_batch_size
+            for batch_payload, lines in self._iter_batch_payload(abs_path):
                 # Actualiza stats
+                if lines is not None:
+                    self.currentTable.total_rows = lines
+                    self.currentTable.total_bytes += len(batch_payload)
+            
                 self._update_stats(batch_payload)
                 # Crea y devuelve FileChunk
                 yield FileChunk(
                     client_id=self.client_id,
                     rel_path=rel_path,
-                    data=batch_payload,
-                    last=is_last,
+                    data=batch_payload
                 )
 
-    def __iter_batch_payload__(self, current_file: str) -> Generator[bytes, None, None]:
+    def _iter_batch_payload(self, current_file: str) -> Generator[bytes, None, None]:
         """Itera el archivo actual hasta completar el batch_size."""
         buffer = b""
         self.current_line = 0
@@ -83,7 +112,7 @@ class BatchReader:
                 if len(buffer) + len(encoded) > self.max_batch_size:
                     # yield el buffer actual
                     if buffer:
-                        yield buffer
+                        yield buffer, self.current_line - 1  # -1 because current_line was incremented
                     # arranca un nuevo batch con la línea que no entraba
                     buffer = encoded
                 else:
@@ -91,7 +120,7 @@ class BatchReader:
 
             # Último batch si quedó algo
             if buffer:
-                yield buffer
+                yield buffer, self.current_line
 
     # -----------------------
     # Helpers
