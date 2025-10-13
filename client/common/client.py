@@ -210,7 +210,7 @@ class Client:
         elif query_type == ResultTableType.QUERY_3:
             return "year_half_created_at,store_name,tpv\n"
         elif query_type == ResultTableType.QUERY_4:
-            return "store_name,birthdate,purchases_qty\n"
+            return "store_id,store_name,user_id,birthdate,purchase_quantity\n"
 
     def _save_process_chunk_as_csv(self, process_chunk, output_path: str, csv_header: str) -> None:
         """
