@@ -345,7 +345,7 @@ class Aggregator:
             return None
             
         rows = []
-        marker_date = datetime.date(2024, 1, 1)
+        marker_date = DateTime(datetime.date(2024, 1, 1), datetime.time(0, 0))
         
         for (store_id, user_id), count in chunk_accumulator.items():
             row = TransactionsProcessRow(

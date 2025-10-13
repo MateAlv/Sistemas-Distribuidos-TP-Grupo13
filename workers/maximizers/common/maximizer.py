@@ -185,7 +185,7 @@ class Maximizer:
                         self.apply(chunk)
                         
                         # Para absolute max: detectar cuándo termina cada maximizer parcial
-                        if self.is_absolute_max():
+                        if self.maximizer_type == "MAX" and self.is_absolute_max():
                             # Contar maximizers parciales únicos que han enviado datos
                             for row in chunk.rows:
                                 if hasattr(row, 'transaction_id') and row.transaction_id:
@@ -205,7 +205,7 @@ class Maximizer:
                                 logging.info(f"action: absolute_max_ready | all_partial_maximizers_received:{self.partial_maximizers_finished}")
                         
                         # Para absolute TOP3: detectar cuándo termina cada TOP3 parcial
-                        if self.is_absolute_top3():
+                        if self.maximizer_type == "TOP3" and self.is_absolute_top3():
                             # Contar TOP3 parciales únicos que han enviado datos
                             for row in chunk.rows:
                                 if isinstance(row, PurchasesPerUserStoreRow):
