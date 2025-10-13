@@ -32,6 +32,7 @@ class Joiner:
         self.joiner_data_chunks = {}  # Store chunks from maximizers per client
         self.client_end_messages_received = []  # Track which clients have sent end messages
         self.completed_clients = []  # Track which clients have been processed
+        self._pending_end_messages = []  # Track clients that need END messages sent
         self.lock = threading.Lock()
         self.ready_to_join = {}
 
@@ -92,15 +93,21 @@ class Joiner:
                         table_type = end_message.table_type()
                         
                         with self.lock:
-                            self.client_end_messages_received.append(client_id)
-                            logging.info(f"action: received_end_message | type:{self.joiner_type} | client_id:{client_id} | table_type:{table_type} | count:{end_message.total_chunks()}")
-                            
-                            for existing_client in self.joiner_data_chunks.keys():
-                                if self.is_ready_to_join_for_client(existing_client):
-                                    logging.info(f"action: ready_to_join_after_end | type:{self.joiner_type} | client_id:{existing_client}")
-                                    self.apply_for_client(existing_client)
-                                    self.publish_results(existing_client)
-                                    self.completed_clients.append(existing_client)
+                            # Solo agregar el client_id si no está ya en la lista de END messages recibidos
+                            if client_id not in self.client_end_messages_received:
+                                self.client_end_messages_received.append(client_id)
+                                logging.info(f"action: received_end_message | type:{self.joiner_type} | client_id:{client_id} | table_type:{table_type} | count:{end_message.total_chunks()}")
+                                
+                                # Solo procesar si está listo para join
+                                if self.is_ready_to_join_for_client(client_id):
+                                    logging.info(f"action: ready_to_join_after_end | type:{self.joiner_type} | client_id:{client_id}")
+                                    self.apply_for_client(client_id)
+                                    self.publish_results(client_id)
+                                    self.clean_client_data(client_id)
+                                    self.completed_clients.append(client_id)
+                                    self._pending_end_messages.append(client_id)
+                            else:
+                                logging.debug(f"action: duplicate_end_message_ignored | type:{self.joiner_type} | client_id:{client_id}")
 
                     else:
                         chunk = ProcessBatchReader.from_bytes(data)
@@ -116,14 +123,20 @@ class Joiner:
                                 self.apply_for_client(client_id)
                                 # Publica los resultados al to_merge_data
                                 self.publish_results(client_id)
+                                # Limpiar datos del cliente después de procesar
+                                self.clean_client_data(client_id)
                                 # Mark this client as processed
                                 self.completed_clients.append(client_id)
+                                self._pending_end_messages.append(client_id)
                             else:
                                 logging.debug(f"action: waiting_join_data | type:{self.joiner_type} | cli_id:{client_id} | file_type:{chunk.table_type()}")
                     
-                    for client_id in self.completed_clients:
-                        self.send_end_query_msg(client_id)
-                        self.completed_clients.remove(client_id)
+                    # Enviar END messages para clientes recién completados
+                    if hasattr(self, '_pending_end_messages'):
+                        for client_id in self._pending_end_messages:
+                            self.send_end_query_msg(client_id)
+                        self._pending_end_messages.clear()
+                    
                 except ValueError as e:
                     logging.error(f"action: error_parsing_data | type:{self.joiner_type} | error:{e}")
                 except Exception as e:
@@ -219,18 +232,18 @@ class Joiner:
         not_processed = client_id not in self.completed_clients
         
         # Detailed logging to debug join readiness
-        logging.info(f"action: checking_join_readiness | type:{self.joiner_type} | client_id:{client_id} | has_maximizer_data:{has_maximizer_data} | has_end_message:{has_end_message} | not_processed:{not_processed}")
-        logging.info(f"action: join_state_details | type:{self.joiner_type} | client_id:{client_id} | joiner_data_chunks_keys:{list(self.joiner_data_chunks.keys())} | end_messages_received:{list(self.client_end_messages_received)} | completed_clients:{list(self.completed_clients)}")
+        logging.debug(f"action: checking_join_readiness | type:{self.joiner_type} | client_id:{client_id} | has_maximizer_data:{has_maximizer_data} | has_end_message:{has_end_message} | not_processed:{not_processed}")
+        logging.debug(f"action: join_state_details | type:{self.joiner_type} | client_id:{client_id} | joiner_data_chunks_keys:{list(self.joiner_data_chunks.keys())} | end_messages_received:{list(self.client_end_messages_received)} | completed_clients:{list(self.completed_clients)}")
         
         if has_maximizer_data and has_end_message and not_processed:
             logging.info(f"action: ready_to_join | client_id:{client_id} | has_data:{has_maximizer_data} | has_end:{has_end_message}")
         else:
             if not has_maximizer_data:
-                logging.info(f"action: not_ready_to_join | reason:no_maximizer_data | client_id:{client_id}")
+                logging.debug(f"action: not_ready_to_join | reason:no_maximizer_data | client_id:{client_id}")
             if not has_end_message:
-                logging.info(f"action: not_ready_to_join | reason:no_end_message | client_id:{client_id}")
+                logging.debug(f"action: not_ready_to_join | reason:no_end_message | client_id:{client_id}")
             if not not_processed:
-                logging.info(f"action: not_ready_to_join | reason:already_processed | client_id:{client_id}")
+                logging.debug(f"action: not_ready_to_join | reason:already_processed | client_id:{client_id}")
         
         return has_maximizer_data and has_end_message and not_processed
     
@@ -249,6 +262,36 @@ class Joiner:
         
         logging.info(f"action: applied_join | client_id:{client_id} | joined_rows:{len(self.joiner_results.get(client_id, []))}")
     
+    def clean_client_data(self, client_id):
+        """Clean client data after processing to prevent reprocessing"""
+        # Limpiar chunks de datos del maximizer
+        if client_id in self.joiner_data_chunks:
+            del self.joiner_data_chunks[client_id]
+            logging.debug(f"action: cleaned_joiner_data_chunks | client_id:{client_id}")
+        
+        # Limpiar datos procesados
+        if client_id in self.data:
+            del self.data[client_id]
+            logging.debug(f"action: cleaned_data | client_id:{client_id}")
+        
+        # Limpiar resultados del join (opcional, pero ayuda con memoria)
+        if client_id in self.joiner_results:
+            del self.joiner_results[client_id]
+            logging.debug(f"action: cleaned_joiner_results | client_id:{client_id}")
+        
+        logging.info(f"action: client_data_cleaned | type:{self.joiner_type} | client_id:{client_id}")
+    
+    def reset_for_new_session(self):
+        """Reset joiner state for a new processing session (new client batch)"""
+        with self.lock:
+            self.data.clear()
+            self.joiner_data_chunks.clear()
+            self.joiner_results.clear()
+            self.client_end_messages_received.clear()
+            self.completed_clients.clear()
+            self._pending_end_messages.clear()
+            logging.info(f"action: joiner_reset_for_new_session | type:{self.joiner_type}")
+
 class MenuItemsJoiner(Joiner):
     
     def define_queues(self):

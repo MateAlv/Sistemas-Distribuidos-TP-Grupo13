@@ -24,6 +24,7 @@ class Maximizer:
         self.maximizer_range = max_range
         self.client_id = None  # Track client ID for publishing results
         self.end_received = False  # Track si se recibió END message
+        self.client_completed = False  # Track si el cliente actual ya fue completado
         self.received_ranges = set()  # Para el absolute max: trackear qué rangos han enviado datos
         
         if self.maximizer_type == "MAX":
@@ -94,6 +95,7 @@ class Maximizer:
         """Resetea el estado del maximizer para procesar un nuevo cliente"""
         self.client_id = None
         self.end_received = False
+        self.client_completed = False
         self.received_ranges = set()
         
         if self.maximizer_type == "MAX":
@@ -149,6 +151,9 @@ class Maximizer:
         
         logging.info(f"action: maximizer_finished | type:{self.maximizer_type} | range:{self.maximizer_range} | client_id:{self.client_id or 1}")
         
+        # Marcar cliente como completado
+        self.client_completed = True
+        
         # Resetear para el próximo cliente
         self.reset_for_new_client()
     
@@ -181,6 +186,13 @@ class Maximizer:
                         # Continuar con el próximo cliente
                     else:
                         chunk = ProcessBatchReader.from_bytes(data)
+                        
+                        # Verificar si el cliente actual ya fue completado
+                        if self.client_completed and self.client_id is not None and chunk.client_id() == self.client_id:
+                            logging.debug(f"action: ignoring_duplicate_data_for_completed_client | type:{self.maximizer_type} | range:{self.maximizer_range} | client_id:{chunk.client_id()}")
+                            results.remove(data)
+                            continue
+                        
                         logging.info(f"action: maximize | type:{self.maximizer_type} | range:{self.maximizer_range} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()} | rows_in:{len(chunk.rows)}")
                         
                         # Track client_id for publishing results
@@ -211,6 +223,7 @@ class Maximizer:
                                 # Procesar el final del cliente automáticamente
                                 self.process_client_end()
                                 # Continuar al siguiente chunk/cliente
+                                results.remove(data)
                                 continue
                         
                         # Para absolute TOP3: detectar cuándo termina cada TOP3 parcial
@@ -236,6 +249,7 @@ class Maximizer:
                                 # Procesar el final del cliente automáticamente
                                 self.process_client_end()
                                 # Continuar al siguiente chunk/cliente
+                                results.remove(data)
                                 continue
                         
                         # Los maximizers parciales NO envían resultados hasta recibir END
