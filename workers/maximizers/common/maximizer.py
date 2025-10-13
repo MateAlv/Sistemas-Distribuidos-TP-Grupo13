@@ -470,42 +470,35 @@ class Maximizer:
 
     def publish_absolute_top3_results(self):
         """
-        Publica los resultados finales del TOP3 absoluto consolidando todas las tiendas.
-        Encuentra el TOP 3 global considerando todas las tiendas.
+        Publica los resultados finales del TOP3 absoluto manteniendo el TOP3 de cada tienda.
+        Envía el TOP3 de usuarios con más compras para cada tienda por separado.
         """
         logging.info(f"action: calculating_absolute_top3 | stores_processed:{len(self.top3_by_store)}")
-        
-        # Consolidar todos los candidatos de todas las tiendas
-        all_candidates = []
-        
-        for store_id, top3_heap in self.top3_by_store.items():
-            # Convertir heap a lista
-            top3_list = list(top3_heap)
-            
-            for purchase_count, user_id in top3_list:
-                all_candidates.append((purchase_count, user_id, store_id))
-                logging.debug(f"action: candidate_consolidated | store_id:{store_id} | user_id:{user_id} | purchases:{purchase_count}")
-        
-        # Ordenar todos los candidatos por cantidad de compras (descendente)
-        all_candidates.sort(key=lambda x: x[0], reverse=True)
-        
-        # Tomar los TOP 3 globales
-        global_top3 = all_candidates[:3]
         
         accumulated_results = []
         marker_date = datetime.date(2024, 1, 1)
         
-        for rank, (purchase_count, user_id, store_id) in enumerate(global_top3, 1):
-            row = PurchasesPerUserStoreRow(
-                store_id=store_id,
-                store_name="",  # Placeholder - lo llenará el joiner
-                user_id=user_id,
-                user_birthdate=marker_date,  # Placeholder - lo llenará el joiner
-                purchases_made=purchase_count,
-            )
-            accumulated_results.append(row)
+        # Para cada tienda, tomar su TOP3 de usuarios
+        for store_id, top3_heap in self.top3_by_store.items():
+            # Convertir heap a lista y ordenar por cantidad de compras (descendente)
+            top3_list = list(top3_heap)
+            top3_list.sort(key=lambda x: x[0], reverse=True)
             
-            logging.info(f"action: global_top3_client | rank:{rank} | store_id:{store_id} | user_id:{user_id} | purchases:{purchase_count}")
+            # Tomar hasta 3 usuarios de esta tienda
+            store_top3 = top3_list[:3]
+            
+            for rank, (purchase_count, user_id) in enumerate(store_top3, 1):
+                row = PurchasesPerUserStoreRow(
+                    store_id=store_id,
+                    store_name="",  # Placeholder - lo llenará el joiner
+                    user_id=user_id,
+                    user_birthdate=marker_date,  # Placeholder - lo llenará el joiner
+                    purchases_made=purchase_count,
+                )
+                accumulated_results.append(row)
+                
+                logging.info(f"action: store_top3_client | store_id:{store_id} | rank:{rank} | user_id:{user_id} | purchases:{purchase_count}")
+                logging.debug(f"action: candidate_consolidated | store_id:{store_id} | user_id:{user_id} | purchases:{purchase_count}")
         
         if accumulated_results:
             from utils.file_utils.process_chunk import ProcessChunkHeader
@@ -515,7 +508,7 @@ class Maximizer:
             self.data_sender.send(chunk.serialize())
             # NO cerrar la conexión aquí - se cerrará después de enviar el END message
             
-            logging.info(f"action: publish_absolute_top3_results | result: success | global_top3_count:{len(accumulated_results)} | total_candidates:{len(all_candidates)}")
+            logging.info(f"action: publish_absolute_top3_results | result: success | stores_processed:{len(self.top3_by_store)} | total_top3_results:{len(accumulated_results)}")
         else:
             logging.warning(f"action: no_absolute_top3_results | client_id:{self.client_id or 1}")
 
