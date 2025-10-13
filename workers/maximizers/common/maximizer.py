@@ -90,6 +90,68 @@ class Maximizer:
     def is_absolute_top3(self):
         return self.maximizer_range == "0"
     
+    def reset_for_new_client(self):
+        """Resetea el estado del maximizer para procesar un nuevo cliente"""
+        self.client_id = None
+        self.end_received = False
+        self.received_ranges = set()
+        
+        if self.maximizer_type == "MAX":
+            self.sellings_max = dict()
+            self.profit_max = dict()
+            self.partial_maximizers_finished = 0
+        elif self.maximizer_type == "TOP3":
+            self.top3_by_store = defaultdict(list)
+            if self.is_absolute_top3():
+                self.partial_top3_finished = 0
+        
+        logging.info(f"action: reset_for_new_client | type:{self.maximizer_type} | range:{self.maximizer_range}")
+    
+    def process_client_end(self):
+        """Procesa el final de un cliente y envía resultados"""
+        logging.info(f"action: end_received_processing_final | type:{self.maximizer_type} | range:{self.maximizer_range}")
+
+        if self.maximizer_type == "MAX":
+            if self.is_absolute_max():
+                # Absolute max: enviar resultados finales al joiner
+                self.publish_absolute_max_results()
+            else:
+                # Maximizers parciales: enviar máximos al absolute max
+                self.publish_partial_max_results()
+                logging.info(f"action: partial_maximizer_finished | range:{self.maximizer_range} | client_id:{self.client_id or 1}")
+
+            try:
+                logging.info(f"action: sending_end_message_to_joiner | client_id:{self.client_id or 1} ")
+                end_msg = MessageEnd(self.client_id or 1, TableType.TRANSACTION_ITEMS, 1)
+                self.data_sender.send(end_msg.encode())
+                # NO cerrar self.data_sender para permitir reutilización
+                logging.info(f"action: sent_end_message_to_joiner | client_id:{self.client_id or 1} | format:END;{self.client_id or 1};{TableType.TRANSACTION_ITEMS.value};1")
+            except Exception as e:
+                logging.error(f"action: error_sending_end_to_joiner | error:{e}")
+                
+        elif self.maximizer_type == "TOP3":
+            if self.is_absolute_top3():
+                # TOP3 absoluto: enviar resultados finales al joiner
+                self.publish_absolute_top3_results()
+                # Enviar END message al joiner
+                try:
+                    logging.info(f"action: sending_end_message_to_joiner | client_id:{self.client_id or 1}")
+                    end_msg = MessageEnd(self.client_id or 1, TableType.PURCHASES_PER_USER_STORE, 1)
+                    self.data_sender.send(end_msg.encode())
+                    # NO cerrar self.data_sender para permitir reutilización
+                    logging.info(f"action: sent_end_message_to_joiner | client_id:{self.client_id or 1} | format:END;{self.client_id or 1};{TableType.PURCHASES_PER_USER_STORE.value};1")
+                except Exception as e:
+                    logging.error(f"action: error_sending_end_to_joiner | error:{e}")
+            else:
+                # TOP3 parciales: enviar top 3 locales al absoluto
+                self.publish_partial_top3_results()
+                logging.info(f"action: partial_top3_finished | range:{self.maximizer_range} | client_id:{self.client_id or 1}")
+        
+        logging.info(f"action: maximizer_finished | type:{self.maximizer_type} | range:{self.maximizer_range} | client_id:{self.client_id or 1}")
+        
+        # Resetear para el próximo cliente
+        self.reset_for_new_client()
+    
     def run(self):
         logging.info(f"Maximizer iniciado. Tipo: {self.maximizer_type}, Rango: {self.maximizer_range}, Reciever: {self.data_receiver.queue_name}")
         
@@ -124,7 +186,7 @@ class Maximizer:
         
 
         # Loop principal para procesar datos
-        while not self.end_received:
+        while True:  
             # Escuchar datos con timeout
             self.data_receiver.connection.call_later(TIMEOUT, stop)
             self.data_receiver.start_consuming(callback)
@@ -133,46 +195,9 @@ class Maximizer:
             for data in results:
                 try:
                     if data.startswith(b"END;"):
-                        logging.info(f"action: end_received_processing_final | type:{self.maximizer_type} | range:{self.maximizer_range}")
-        
-                        if self.maximizer_type == "MAX":
-                            if self.is_absolute_max():
-                                # Absolute max: enviar resultados finales al joiner
-                                self.publish_absolute_max_results()
-                                # Enviar END message al joiner
-                            else:
-                                # Maximizers parciales: enviar máximos al absolute max
-                                self.publish_partial_max_results()
-                                # NO necesitan enviar END message ya que el absolute max detecta automáticamente
-                                logging.info(f"action: partial_maximizer_finished | range:{self.maximizer_range} | client_id:{self.client_id or 1}")
-
-                            try:
-                                logging.info(f"action: sending_end_message_to_joiner | client_id:{self.client_id or 1} ")
-                                end_msg = MessageEnd(self.client_id or 1, TableType.TRANSACTION_ITEMS, 1)
-                                self.data_sender.send(end_msg.encode())
-                                logging.info(f"action: sent_end_message_to_joiner | client_id:{self.client_id or 1} | format:END;{self.client_id or 1};{TableType.TRANSACTION_ITEMS.value};1")
-                            except Exception as e:
-                                logging.error(f"action: error_sending_end_to_joiner | error:{e}")
-                                
-                        elif self.maximizer_type == "TOP3":
-                            if self.is_absolute_top3():
-                                # TOP3 absoluto: enviar resultados finales al joiner
-                                self.publish_absolute_top3_results()
-                                # Enviar END message al joiner
-                                try:
-                                    logging.info(f"action: sending_end_message_to_joiner | client_id:{self.client_id or 1}")
-                                    end_msg = MessageEnd(self.client_id or 1, TableType.PURCHASES_PER_USER_STORE, 1)
-                                    self.data_sender.send(end_msg.encode())
-                                    logging.info(f"action: sent_end_message_to_joiner | client_id:{self.client_id or 1} | format:END;{self.client_id or 1};{TableType.PURCHASES_PER_USER_STORE.value};1")
-                                except Exception as e:
-                                    logging.error(f"action: error_sending_end_to_joiner | error:{e}")
-                            else:
-                                # TOP3 parciales: enviar top 3 locales al absoluto
-                                self.publish_partial_top3_results()
-                                # NO necesitan enviar END message ya que el absoluto detecta automáticamente
-                                logging.info(f"action: partial_top3_finished | range:{self.maximizer_range} | client_id:{self.client_id or 1}")
-                            
-                        logging.info(f"action: maximizer_finished | type:{self.maximizer_type} | range:{self.maximizer_range}")
+                        # Procesar el final del cliente actual
+                        self.process_client_end()
+                        # Continuar con el próximo cliente (no salir del loop)
                     else:
                         chunk = ProcessBatchReader.from_bytes(data)
                         logging.info(f"action: maximize | type:{self.maximizer_type} | range:{self.maximizer_range} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()} | rows_in:{len(chunk.rows)}")
@@ -202,6 +227,10 @@ class Maximizer:
                             if self.partial_maximizers_finished >= self.expected_partial_maximizers:
                                 self.end_received = True
                                 logging.info(f"action: absolute_max_ready | all_partial_maximizers_received:{self.partial_maximizers_finished}")
+                                # Procesar el final del cliente automáticamente
+                                self.process_client_end()
+                                # Continuar al siguiente chunk/cliente
+                                continue
                         
                         # Para absolute TOP3: detectar cuándo termina cada TOP3 parcial
                         if self.maximizer_type == "TOP3" and self.is_absolute_top3():
@@ -223,6 +252,10 @@ class Maximizer:
                             if self.partial_top3_finished >= self.expected_partial_top3:
                                 self.end_received = True
                                 logging.info(f"action: absolute_top3_ready | all_partial_top3_received:{self.partial_top3_finished}")
+                                # Procesar el final del cliente automáticamente
+                                self.process_client_end()
+                                # Continuar al siguiente chunk/cliente
+                                continue
                         
                         # Los maximizers parciales NO envían resultados hasta recibir END
                         # Solo el absolute max envía resultados finales
@@ -253,6 +286,7 @@ class Maximizer:
                 logging.info(f"action: sending_end_message_to_joiner | client_id:{self.client_id or 1} ")
                 end_msg = MessageEnd(self.client_id or 1, TableType.TRANSACTION_ITEMS, 1)
                 self.data_sender.send(end_msg.encode())
+                # NO cerrar self.data_sender para permitir reutilización
                 logging.info(f"action: sent_end_message_to_joiner | client_id:{self.client_id or 1} | format:END;{self.client_id or 1};{TableType.TRANSACTION_ITEMS.value};1")
             except Exception as e:
                 logging.error(f"action: error_sending_end_to_joiner | error:{e}")
@@ -266,6 +300,7 @@ class Maximizer:
                     logging.info(f"action: sending_end_message_to_joiner | client_id:{self.client_id or 1}")
                     end_msg = MessageEnd(self.client_id or 1, TableType.PURCHASES_PER_USER_STORE, 1)
                     self.data_sender.send(end_msg.encode())
+                    # NO cerrar self.data_sender para permitir reutilización
                     logging.info(f"action: sent_end_message_to_joiner | client_id:{self.client_id or 1} | format:END;{self.client_id or 1};{TableType.PURCHASES_PER_USER_STORE.value};1")
                 except Exception as e:
                     logging.error(f"action: error_sending_end_to_joiner | error:{e}")
@@ -486,7 +521,7 @@ class Maximizer:
             header = ProcessChunkHeader(client_id=self.client_id or 1, table_type=TableType.PURCHASES_PER_USER_STORE)
             chunk = ProcessChunk(header, accumulated_results)
             self.data_sender.send(chunk.serialize())
-            self.data_sender.close()
+            # NO cerrar la conexión aquí - se cerrará después de enviar el END message
             
             logging.info(f"action: publish_partial_top3_results | result: success | stores:{len(self.top3_by_store)} | total_clients:{len(accumulated_results)}")
         else:
@@ -537,7 +572,7 @@ class Maximizer:
             header = ProcessChunkHeader(client_id=self.client_id or 1, table_type=TableType.PURCHASES_PER_USER_STORE)
             chunk = ProcessChunk(header, accumulated_results)
             self.data_sender.send(chunk.serialize())
-            self.data_sender.close()
+            # NO cerrar la conexión aquí - se cerrará después de enviar el END message
             
             logging.info(f"action: publish_absolute_top3_results | result: success | global_top3_count:{len(accumulated_results)} | total_candidates:{len(all_candidates)}")
         else:
