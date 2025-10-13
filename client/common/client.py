@@ -205,9 +205,9 @@ class Client:
         if query_type == ResultTableType.QUERY_1:
             return "transaction_id,final_amount\n"
         elif query_type == ResultTableType.QUERY_2_1:
-            return "item_id,item_name,sellings_qty\n"
+            return "year_month_created_at,item_id,item_name,sellings_qty\n"
         elif query_type == ResultTableType.QUERY_2_2:
-            return "item_id,item_name,profit_sum\n"
+            return "year_month_created_at,item_id,item_name,profit_sum\n"
         elif query_type == ResultTableType.QUERY_3:
             return "year_half_created_at,store_name,tpv\n"
         elif query_type == ResultTableType.QUERY_4:
