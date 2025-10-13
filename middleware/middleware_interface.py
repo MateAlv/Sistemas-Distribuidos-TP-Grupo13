@@ -5,8 +5,8 @@ from abc import ABC, abstractmethod
 
 logging.getLogger("pika").setLevel(logging.CRITICAL)
 
-TIMEOUT = 3
-RETRY_DELAY = 3
+TIMEOUT = 0.1
+RETRY_DELAY = 0.1
 
 
 class MessageMiddlewareMessageError(Exception):
