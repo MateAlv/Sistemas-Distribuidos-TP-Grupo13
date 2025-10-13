@@ -193,8 +193,21 @@ class Maximizer:
             for data in results:
                 try:
                     if data.startswith(b"END;"):
-                        # Procesar el final del cliente
-                        self.process_client_end()
+                        # Handle END message differently for absolute vs partial maximizers
+                        if self.maximizer_type == "TOP3" and self.is_absolute_top3():
+                            # For absolute TOP3: count END messages from partial maximizers
+                            self.partial_top3_finished += 1
+                            logging.info(f"action: end_received_from_partial | partial_count:{self.partial_top3_finished}/{self.expected_partial_top3}")
+                            
+                            # Only process client end when all partials have finished
+                            if self.partial_top3_finished >= self.expected_partial_top3:
+                                logging.info(f"action: all_partials_finished | processing_final_end")
+                                self.process_client_end()
+                            else:
+                                logging.info(f"action: waiting_for_more_partials | received:{self.partial_top3_finished} | expected:{self.expected_partial_top3}")
+                        else:
+                            # For partial maximizers or other types: process immediately
+                            self.process_client_end()
                     else:
                         chunk = ProcessBatchReader.from_bytes(data)
                         
@@ -328,8 +341,30 @@ class Maximizer:
                 logging.info(f"action: maximizer_partial_result | type:{self.maximizer_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()} | sellings_max_partial: {selling_summary} | profit_max_partial: {profit_summary}")
             return True
         elif self.maximizer_type == "TOP3":
-            self.update_top3(chunk.rows)
-            logging.info(f"action: top3_result | type:{self.maximizer_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()} | stores_processed:{len(self.top3_by_store)}")
+            if self.is_absolute_top3():
+                # El absolute TOP3 solo acumula datos, no los procesa
+                # Los datos ya vienen procesados de los maximizers parciales
+                for row in chunk.rows:
+                    if isinstance(row, PurchasesPerUserStoreRow):
+                        store_id = int(row.store_id)
+                        user_id = int(row.user_id)
+                        purchase_count = int(row.purchases_made)
+                        
+                        # Acumular directamente en top3_by_store
+                        if len(self.top3_by_store[store_id]) < 3:
+                            heapq.heappush(self.top3_by_store[store_id], (purchase_count, user_id))
+                        else:
+                            # Si el nuevo count es mayor que el mínimo en el heap
+                            if purchase_count > self.top3_by_store[store_id][0][0]:
+                                heapq.heapreplace(self.top3_by_store[store_id], (purchase_count, user_id))
+                        
+                        logging.debug(f"action: absolute_top3_accumulate | store_id:{store_id} | user_id:{user_id} | count:{purchase_count}")
+                
+                logging.info(f"action: absolute_top3_result | type:{self.maximizer_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()} | stores_processed:{len(self.top3_by_store)}")
+            else:
+                # Los maximizers parciales usan la lógica normal
+                self.update_top3(chunk.rows)
+                logging.info(f"action: top3_result | type:{self.maximizer_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()} | stores_processed:{len(self.top3_by_store)}")
             return True
         else:
             logging.error(f"Maximizador desconocido: {self.maximizer_type}")
