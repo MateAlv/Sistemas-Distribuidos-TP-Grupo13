@@ -29,7 +29,8 @@ def read_config(path: str):
 
             key, value = line.split(":", 1)
             key, value = key.strip(), value.strip()
-
+            if key.startswith("#"):
+                continue
             if key.lower() in ("compose_name", "output_file", "data_path", "logging_level"):
                 meta[key.lower()] = value
             else:
