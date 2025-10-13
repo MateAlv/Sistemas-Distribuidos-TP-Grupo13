@@ -8,6 +8,7 @@ class TableType(Enum):
     MENU_ITEMS = 3
     STORES = 4
     USERS = 5
+    PURCHASES_PER_USER_STORE = 6
     
     def from_path(path: str):
         """
@@ -17,10 +18,17 @@ class TableType(Enum):
         """
         path = path.lower()
         filename = path.split("/")[-1]  # tomar solo el último segmento (archivo)
-
-        for table_type in TableType:
-            if table_type.name.lower() in filename:
-                return table_type
+        
+        if "transaction_items" in filename:
+            return TableType.TRANSACTION_ITEMS
+        elif "transactions" in filename:
+            return TableType.TRANSACTIONS
+        elif "menu_items" in filename:
+            return TableType.MENU_ITEMS
+        elif "stores" in filename:
+            return TableType.STORES
+        elif "users" in filename:
+            return TableType.USERS
 
         raise ValueError(f"No se pudo determinar el tipo de tabla para el path: {path}")
 # =========================================

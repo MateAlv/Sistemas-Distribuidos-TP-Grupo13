@@ -137,7 +137,6 @@ def define_aggregator(meta: dict, compose: dict, nodo: str):
             "PYTHONUNBUFFERED=1",
             f"LOGGING_LEVEL={meta['logging_level']}",
             f"AGGREGATOR_TYPE={nodo.split('_')[1].upper()}",
-            f"AGGREGATOR_ID={index}",
         ],
         "volumes": [
             "./utils:/workers/utils:ro",
@@ -157,9 +156,9 @@ def get_maximizer_range(nodo: str):
     # MAXIMIZER_MAX_4_6 -> 4
     # MAXIMIZER_MAX_7_8 -> 7
     # MAXIMIZER_TOP3_ABSOLUTE -> 0
-    # MAXIMIZER_TOP3_1_3 -> 1
-    # MAXIMIZER_TOP3_4_6 -> 4
-    # MAXIMIZER_TOP3_7_8 -> 7
+    # MAXIMIZER_TOP3_1 -> 1
+    # MAXIMIZER_TOP3_4 -> 4
+    # MAXIMIZER_TOP3_7 -> 7
     r = nodo.split("_")[2]
     if r == "ABSOLUTE":
         return 0
@@ -169,9 +168,9 @@ def get_maximizer_range(nodo: str):
         return 2
     elif r == "3":
         return 3
-    elif r == "4_6":
+    elif r == "4" or r == "4_6":
         return 4
-    elif r == "7_8":
+    elif r == "7" or r == "7_8":
         return 7
     else:
         # Try to extract just the first number for other patterns

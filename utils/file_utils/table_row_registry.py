@@ -9,6 +9,7 @@ PROCESS_CLASSES = {
     TableType.MENU_ITEMS: MenuItemsProcessRow,
     TableType.STORES: StoresProcessRow,
     TableType.USERS: UsersProcessRow,
+    TableType.PURCHASES_PER_USER_STORE: PurchasesPerUserStoreRow,
 }
 
 FILE_CLASSES = {

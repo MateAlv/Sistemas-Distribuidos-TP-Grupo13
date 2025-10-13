@@ -236,8 +236,7 @@ class Server:
         chunk = FileChunk.recv(sock)
         client_id = chunk.client_id()
         
-        logging.info("action: recv_file_chunk | peer:%s | cli_id:%s | file:%s | bytes:%s | is_last:%s",
-                     peer, client_id, chunk.path(), chunk.payload_size(), chunk.is_last_file_chunk())
+        logging.debug("action: recv_file_chunk | cli_id:%s | file:%s | bytes:%s ", client_id, chunk.path(), chunk.payload_size())
         
         # Deserializar el batch para convertirlo en ProcessChunk
         process_chunk = ProcessBatchReader.from_file_rows(chunk.payload(), chunk.path(), client_id)
@@ -246,26 +245,26 @@ class Server:
         table_type = process_chunk.table_type()
         
         if table_type == TableType.TRANSACTIONS or table_type == TableType.TRANSACTION_ITEMS:
-            logging.info("action: send_to_filter1 | peer:%s | cli_id:%s | file:%s | table:%s",
+            logging.debug("action: send_to_filter1 | peer:%s | cli_id:%s | file:%s | table:%s",
                          peer, client_id, chunk.path(), table_type)
             self.middleware_queue_senders["to_filter_1"].send(process_chunk.serialize())
 
         elif table_type == TableType.STORES:
-            logging.info("action: send_to_join_stores | peer:%s | cli_id:%s | file:%s | table:%s",
+            logging.debug("action: send_to_join_stores | peer:%s | cli_id:%s | file:%s | table:%s",
                          peer, client_id, chunk.path(), table_type)
             self.middleware_queue_senders["to_join_stores"].send(process_chunk.serialize())
             
-            logging.info("action: send_to_top3 | peer:%s | cli_id:%s | file:%s | table:%s",
+            logging.debug("action: send_to_top3 | peer:%s | cli_id:%s | file:%s | table:%s",
                          peer, client_id, chunk.path(), table_type)
             self.middleware_queue_senders["to_top3"].send(process_chunk.serialize())
 
         elif table_type == TableType.USERS:
-            logging.info("action: send_to_join_users | peer:%s | cli_id:%s | file:%s | table:%s",
+            logging.debug("action: send_to_join_users | peer:%s | cli_id:%s | file:%s | table:%s",
                          peer, client_id, chunk.path(), table_type)
             self.middleware_queue_senders["to_join_users"].send(process_chunk.serialize())
 
         elif table_type == TableType.MENU_ITEMS:
-            logging.info("action: send_to_join_menu_items | peer:%s | cli_id:%s | file:%s | table:%s",
+            logging.debug("action: send_to_join_menu_items | peer:%s | cli_id:%s | file:%s | table:%s",
                          peer, client_id, chunk.path(), table_type)
             self.middleware_queue_senders["to_join_menu_items"].send(process_chunk.serialize())
         
@@ -315,10 +314,10 @@ class Server:
         maximum_chunks = self._max_number_of_chunks_in_batch()
         all_data_received = False
         all_data_received_per_query = {
-            ResultTableType.QUERY_1: True,  # No habilitado
+            ResultTableType.QUERY_1: False,  
             ResultTableType.QUERY_2_1: False,  # Habilitar Query 2.1 (productos más vendidos)
             ResultTableType.QUERY_2_2: False,  # Habilitar Query 2.2 (productos más rentables)
-            ResultTableType.QUERY_3: True,
+            ResultTableType.QUERY_3: False,
             ResultTableType.QUERY_4: True,
         }
         results_for_client = []
@@ -382,20 +381,11 @@ class Server:
                         if len(chunks_received[query]) >= maximum_chunks:
                             self._send_batch_results_to_client(sock, client_id, chunks_received[query])
                             chunks_received[query] = []
-                            logging.info(
-                                "action: result_sent | client_id:%s | rows:%s | query:%s",
-                                client_id,
-                                len(result_chunk.rows),
-                                query.name,
-                            )
+                            logging.info(f"action: result_sent | client_id:{client_id} | rows:{len(result_chunk.rows)} | query:{query.name}")
 
                         if expected_total_chunks[query] is not None and number_of_chunks_received[query] == expected_total_chunks[query]:
                             all_data_received_per_query[query] = True
-                            logging.info(
-                                "action: all_data_received_for_query | client_id:%s | query:%s",
-                                client_id,
-                                query.name,
-                            )
+                            logging.info(f"action: all_data_received_for_query | client_id:{client_id} | query:{query.name}")
                             if chunks_received[query]:
                                 self._send_batch_results_to_client(sock, client_id, chunks_received[query])
                                 chunks_received[query] = []
@@ -429,12 +419,11 @@ class Server:
                 # Enviar header + datos del chunk
                 sendall(sock, self.header_id_to_bytes(H_ID_DATA))
                 sendall(sock, results_data)
-                
-                logging.info("action: result_chunk_sent | client_id:%s | chunk:%d/%d | bytes:%s | query:%s", 
-                           client_id, i+1, len(results), len(results_data), result_chunk.query_type().name)
+
+                logging.info(f"action: result_chunk_sent | client_id:{client_id} | chunk:{i+1}/{len(results)} | bytes:{len(results_data)} | query:{result_chunk.query_type().name}")
 
         except Exception as e:
-            logging.error("action: send_batch_results_error | client_id:%s | error:%r", client_id, e)
+            logging.error(f"action: send_batch_results_error | client_id:{client_id} | error:{e}")
             raise
 
     def _begin_shutdown(self, signum, frame) -> None:

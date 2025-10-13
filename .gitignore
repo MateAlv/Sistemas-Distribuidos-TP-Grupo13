@@ -10,3 +10,4 @@ middleware/__pycache__/
 .venv/
 docker-compose.yaml
 __pycache__/
+logs.txt
