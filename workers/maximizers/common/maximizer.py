@@ -165,25 +165,6 @@ class Maximizer:
         def stop():
             self.data_receiver.stop_consuming()
             
-        # Iniciar el consumer de END messages en background
-        # import threading
-        # def check_end_messages():
-        #     if not self.is_absolute_max():  # Solo los maximizers parciales escuchan END_MESSAGE
-        #         logging.info(f"action: starting_end_message_listener | type:{self.maximizer_type} | range:{self.maximizer_range} | exchange:{self.middleware_exchange_receiver.exchange_name}")
-        #         while not self.end_received:
-        #             try:
-        #                 self.middleware_exchange_receiver.connection.call_later(TIMEOUT, end_stop)
-        #                 self.middleware_exchange_receiver.start_consuming(end_callback)
-        #             except Exception as e:
-        #                 logging.debug(f"action: end_message_timeout | type:{self.maximizer_type} | range:{self.maximizer_range} | error:{e}")
-                    
-        #             # Procesar END messages recibidos
-        #             for end_msg in end_messages:
-        #                 logging.info(f"action: processing_end_message | type:{self.maximizer_type} | range:{self.maximizer_range} | setting_end_received_true")
-        #                 self.end_received = True
-        #                 end_messages.remove(end_msg)
-        #                 break
-        
 
         # Loop principal para procesar datos
         while True:  
@@ -197,7 +178,7 @@ class Maximizer:
                     if data.startswith(b"END;"):
                         # Procesar el final del cliente actual
                         self.process_client_end()
-                        # Continuar con el próximo cliente (no salir del loop)
+                        # Continuar con el próximo cliente
                     else:
                         chunk = ProcessBatchReader.from_bytes(data)
                         logging.info(f"action: maximize | type:{self.maximizer_type} | range:{self.maximizer_range} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()} | rows_in:{len(chunk.rows)}")
