@@ -108,6 +108,7 @@ def define_filter(meta: dict, compose: dict, nodo: str):
         "environment": [
             "PYTHONUNBUFFERED=1",
             f"LOGGING_LEVEL={meta['logging_level']}",
+            f"WORKER_ID={service_name}",
         ],
         "volumes": [
             f".{config_path}:{config_path}:ro",
@@ -264,7 +265,7 @@ def define_client(meta: dict, compose: dict, nodo: str, index: int):
         "entrypoint": FlowList(["python3", "main.py"]),
         "container_name": service_name,
         "environment": [
-            f"CLI_ID={index}",
+            f"CLIENT_ID={index}",
             "CLI_DATA_DIR=/data",
             "CLI_OUTPUT_DIR=/output",
             "DATA_MODE=tree",
