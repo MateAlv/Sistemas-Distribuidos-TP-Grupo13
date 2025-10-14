@@ -22,6 +22,26 @@ up:
 	docker compose -f ${DOCKER} up -d --build
 .PHONY: docker-compose-up
 
+q1: 
+	python3 generar-compose.py --config=q1-config.ini
+	make up
+.PHONY: q1
+
+q2: 
+	python3 generar-compose.py --config=q2-config.ini
+	make up
+.PHONY: q2
+
+q3: 
+	python3 generar-compose.py --config=q3-config.ini
+	make up
+.PHONY: q3
+
+q4: 
+	python3 generar-compose.py --config=q4-config.ini
+	make up
+.PHONY: q4
+
 down:
 	docker compose -f ${DOCKER} stop -t 1
 	docker compose -f ${DOCKER} down
@@ -40,6 +60,10 @@ logs:
 clean-logs:
 	> logs.txt
 .PHONY: clean-logs
+
+clean-results:
+	rm -rf .results/client-1/*
+.PHONY: clean-results
 
 test:
 	docker compose -f ${DOCKER} up --build
