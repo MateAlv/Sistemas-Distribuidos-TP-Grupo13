@@ -95,13 +95,11 @@ def get_filter_config_path(nodo: str):
 def is_filter(nodo: str):
     return nodo.startswith("FILTER_")
 
-def define_filter(meta: dict, compose: dict, nodo: str):
-    service_name = f"{nodo.lower()}_service"
+def define_filter(meta: dict, compose: dict, nodo: str, worker_id: int):
+    base_service_name = f"{nodo.lower()}_service"
+    service_name = f"{base_service_name}-{worker_id}" if worker_id > 1 else base_service_name
     config_path = get_filter_config_path(nodo)
-    # Extract numeric ID from service name for WORKER_ID
-    # filter_year_service -> 1, filter_hour_service -> 2, filter_amount_service -> 3
     filter_type = nodo.split("_")[1].lower()
-    worker_id = {"year": 1, "hour": 2, "amount": 3}.get(filter_type, 1)
     
     compose["services"][service_name] = {
         "build": {
@@ -131,8 +129,9 @@ def define_filter(meta: dict, compose: dict, nodo: str):
 def is_aggregator(nodo: str):
     return nodo.startswith("AGGREGATOR_")
 
-def define_aggregator(meta: dict, compose: dict, nodo: str):
-    service_name = f"{nodo.lower()}_service"
+def define_aggregator(meta: dict, compose: dict, nodo: str, worker_id: int):
+    base_service_name = f"{nodo.lower()}_service"
+    service_name = f"{base_service_name}-{worker_id}" if worker_id > 1 else base_service_name
     compose["services"][service_name] = {
         "build": {
             "context": ".",             # project root
@@ -144,6 +143,7 @@ def define_aggregator(meta: dict, compose: dict, nodo: str):
             "PYTHONUNBUFFERED=1",
             f"LOGGING_LEVEL={meta['logging_level']}",
             f"AGGREGATOR_TYPE={nodo.split('_')[1].upper()}",
+            f"WORKER_ID={worker_id}",
         ],
         "volumes": [
             "./utils:/workers/utils:ro",
@@ -190,8 +190,9 @@ def get_maximizer_range(nodo: str):
 def is_maximizer(nodo: str):
     return nodo.startswith("MAXIMIZER_")
 
-def define_maximizer(meta: dict, compose: dict, nodo: str):
-    service_name = f"{nodo.lower()}_service"
+def define_maximizer(meta: dict, compose: dict, nodo: str, worker_id: int):
+    base_service_name = f"{nodo.lower()}_service"
+    service_name = f"{base_service_name}-{worker_id}" if worker_id > 1 else base_service_name
     compose["services"][service_name] = {
         "build": {
             "context": ".",             # project root
@@ -204,6 +205,7 @@ def define_maximizer(meta: dict, compose: dict, nodo: str):
             f"LOGGING_LEVEL={meta['logging_level']}",
             f"MAXIMIZER_TYPE={nodo.split('_')[1].upper()}",
             f"MAXIMIZER_RANGE={get_maximizer_range(nodo)}",
+            f"WORKER_ID={worker_id}",
         ],
         "volumes": [
             "./utils:/workers/utils:ro",
@@ -231,8 +233,9 @@ def get_joiner_type(nodo: str):
     # JOINER_USERS -> USERS
     return nodo.split("_", 1)[1].upper()
 
-def define_joiner(meta: dict, compose: dict, nodo: str):
-    service_name = f"{nodo.lower()}_service"
+def define_joiner(meta: dict, compose: dict, nodo: str, worker_id: int):
+    base_service_name = f"{nodo.lower()}_service"
+    service_name = f"{base_service_name}-{worker_id}" if worker_id > 1 else base_service_name
     compose["services"][service_name] = {
         "build": {
             "context": ".",             # project root
@@ -244,6 +247,7 @@ def define_joiner(meta: dict, compose: dict, nodo: str):
             "PYTHONUNBUFFERED=1",
             f"LOGGING_LEVEL={meta['logging_level']}",
             f"JOINER_TYPE={get_joiner_type(nodo)}",
+            f"WORKER_ID={worker_id}",
         ],
         "volumes": [
             "./utils:/workers/utils:ro",
@@ -296,6 +300,10 @@ def generate_compose(meta: dict, nodes: dict, services: dict = None):
     }
     define_rabbitmq(compose)
     client_amount = 0
+    
+    # Contadores independientes para cada tipo de worker
+    worker_counters = {}
+    
     for nodo, cantidad in nodes.items():
         if cantidad == 0:
             continue
@@ -305,18 +313,30 @@ def generate_compose(meta: dict, nodes: dict, services: dict = None):
                 define_client(meta, compose, nodo, i)
             client_amount = cantidad
         else: 
-            if is_filter(nodo):
-                service_name = define_filter(meta, compose, nodo)
-            elif is_aggregator(nodo):
-                service_name = define_aggregator(meta, compose, nodo)
-            elif is_maximizer(nodo):
-                service_name = define_maximizer(meta, compose, nodo)
-            elif is_joiner(nodo):
-                service_name = define_joiner(meta, compose, nodo)
-            else:
-                raise ValueError(f"Tipo de nodo inválido: {nodo}")
+            # Inicializar contador para este tipo de worker si no existe
+            if nodo not in worker_counters:
+                worker_counters[nodo] = 0
             
-            services[service_name] = cantidad
+            for worker_instance in range(cantidad):
+                worker_counters[nodo] += 1
+                worker_id = worker_counters[nodo]
+                
+                if is_filter(nodo):
+                    service_name = define_filter(meta, compose, nodo, worker_id)
+                elif is_aggregator(nodo):
+                    service_name = define_aggregator(meta, compose, nodo, worker_id)
+                elif is_maximizer(nodo):
+                    service_name = define_maximizer(meta, compose, nodo, worker_id)
+                elif is_joiner(nodo):
+                    service_name = define_joiner(meta, compose, nodo, worker_id)
+                else:
+                    raise ValueError(f"Tipo de nodo inválido: {nodo}")
+                
+                # Para scaling, necesitamos el nombre base del servicio
+                base_service_name = f"{nodo.lower()}_service"
+                if base_service_name not in services:
+                    services[base_service_name] = 0
+                services[base_service_name] += 1
     if client_amount == 0:
         raise ValueError("Debe haber al menos un cliente.")
     define_server(compose, client_amount) 
