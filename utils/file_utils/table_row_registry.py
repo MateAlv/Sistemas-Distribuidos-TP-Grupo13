@@ -10,6 +10,7 @@ PROCESS_CLASSES = {
     TableType.STORES: StoresProcessRow,
     TableType.USERS: UsersProcessRow,
     TableType.PURCHASES_PER_USER_STORE: PurchasesPerUserStoreRow,
+    TableType.TPV: TPVProcessRow,
 }
 
 FILE_CLASSES = {

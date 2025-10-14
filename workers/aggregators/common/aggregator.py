@@ -1,5 +1,5 @@
 from logging import log
-from utils.file_utils.process_table import TransactionItemsProcessRow, TransactionsProcessRow, PurchasesPerUserStoreRow
+from utils.file_utils.process_table import TransactionItemsProcessRow, TransactionsProcessRow, PurchasesPerUserStoreRow, TPVProcessRow
 import logging
 from utils.file_utils.process_table import TableProcessRow
 from utils.file_utils.process_chunk import ProcessChunk
@@ -46,8 +46,8 @@ class Aggregator:
             self.middleware_queue_sender["to_top_4_6"] = MessageMiddlewareQueue("rabbitmq", "to_top_4_6")
             self.middleware_queue_sender["to_top_7_10"] = MessageMiddlewareQueue("rabbitmq", "to_top_7_10")
         elif self.aggregator_type == "TPV":
-            self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", "transactions")
-            self.middleware_exchange_sender = MessageMiddlewareExchange("rabbitmq", f"end_exchange_aggregator_{self.aggregator_type}", [""], exchange_type="fanout")
+            self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", "to_agg_3")
+            self.middleware_queue_sender["to_join_with_stores_tvp"] = MessageMiddlewareQueue("rabbitmq", "to_join_with_stores_tvp")
         else:
             raise ValueError(f"Tipo de agregador inválido: {self.aggregator_type}")
 
@@ -374,11 +374,18 @@ class Aggregator:
         Aplica agregación para TPV por store y semestre.
         Procesa un chunk y retorna un chunk agregado.
         """
+        from utils.file_utils.process_table import YearHalf
+        
         YEARS = {2024, 2025}
         # Acumulador temporal para este chunk
         chunk_accumulator = defaultdict(float)
         
+        processed_rows = 0
+        valid_years = 0
+        parsing_errors = 0
+        
         for row in chunk.rows:
+            processed_rows += 1
             if hasattr(row, 'store_id') and hasattr(row, 'final_amount') and hasattr(row, 'created_at'):
                 # Parsear fecha
                 created_at = row.created_at
@@ -386,51 +393,61 @@ class Aggregator:
                     try:
                         dt = datetime.datetime.fromisoformat(created_at)
                     except ValueError:
-                        dt = datetime.datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S")
+                        try:
+                            dt = datetime.datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S")
+                        except ValueError:
+                            parsing_errors += 1
+                            continue
                 elif hasattr(created_at, 'date'):
                     # Manejar objetos DateTime con atributo .date
                     dt = datetime.datetime.combine(created_at.date, created_at.time if hasattr(created_at, 'time') else datetime.time(0, 0))
                 elif hasattr(created_at, 'year'):
                     dt = created_at
                 else:
+                    parsing_errors += 1
                     continue
                     
                 # Filtrar por años 2024-2025
                 if dt.year in YEARS:
+                    valid_years += 1
                     # Determinar semestre (1: Ene-Jun, 2: Jul-Dec)
                     semester = 1 if 1 <= dt.month <= 6 else 2
                     
                     try:
                         amount = float(row.final_amount)
                     except (ValueError, TypeError):
-                        amount = float(str(row.final_amount).replace(",", "."))
+                        try:
+                            amount = float(str(row.final_amount).replace(",", "."))
+                        except (ValueError, TypeError):
+                            parsing_errors += 1
+                            continue
                     
                     key = (dt.year, semester, int(row.store_id))
                     chunk_accumulator[key] += amount
 
+        logging.info(f"action: apply_tpv_stats | client_id:{chunk.header.client_id} | processed:{processed_rows} | valid_years:{valid_years} | parsing_errors:{parsing_errors} | accumulated_keys:{len(chunk_accumulator)}")
+
         # Crear chunk de salida con los datos agregados de este chunk
         if not chunk_accumulator:
+            logging.warning(f"action: apply_tpv_no_output | client_id:{chunk.header.client_id} | processed:{processed_rows} | valid_years:{valid_years}")
             return None
             
         rows = []
         
         for (year, semester, store_id), total_tpv in chunk_accumulator.items():
-            # Crear fecha representativa del semestre
-            first_month = 1 if semester == 1 else 7
-            created_date = datetime.date(year, first_month, 1)
+            # Crear YearHalf para representar año y semestre
+            year_half = YearHalf(year, semester)
             
-            row = TransactionsProcessRow(
-                transaction_id="",
+            row = TPVProcessRow(
                 store_id=store_id,
-                user_id=0,  # Valor dummy para TPV
-                final_amount=total_tpv,
-                created_at=created_date,
+                tpv=total_tpv,
+                year_half=year_half
             )
             rows.append(row)
         
         from utils.file_utils.process_chunk import ProcessChunkHeader
         from utils.file_utils.table_type import TableType
-        header = ProcessChunkHeader(client_id=chunk.header.client_id, table_type=TableType.TRANSACTIONS)
+        header = ProcessChunkHeader(client_id=chunk.header.client_id, table_type=TableType.TPV)
         return ProcessChunk(header, rows)
 
     def publish_purchases_chunk(self, aggregated_chunk):
@@ -448,22 +465,14 @@ class Aggregator:
 
     def publish_tpv_chunk(self, aggregated_chunk):
         """
-        Publica un chunk agregado de TPV por store y semestre.
+        Publica un chunk agregado de TPV por store y semestre directamente al joiner.
         """
-        import base64
-        
-        queue = MessageMiddlewareQueue("rabbitmq", "results_query_3")
-        payload_b64 = base64.b64encode(aggregated_chunk.serialize()).decode("utf-8")
-        queue.send(payload_b64)
+        queue = MessageMiddlewareQueue("rabbitmq", "to_join_with_stores_tvp")
+        chunk_data = aggregated_chunk.serialize()
+        queue.send(chunk_data)  # Enviar datos directos, no en base64
         queue.close()
         
-        logging.info(f"action: publish_tpv_chunk | result: success | rows:{len(aggregated_chunk.rows)}")
-        
-        # Cerrar conexiones
-        try:
-            self.middleware_queue_receiver.close()
-        except:
-            pass
+        logging.info(f"action: publish_tpv_chunk | result: success | rows:{len(aggregated_chunk.rows)} | queue:to_join_with_stores_tvp")
 
     def _ensure_dict_entry(self, dictionary, client_id, table_type, default=0):
         """Helper para inicializar entradas en diccionarios anidados"""
@@ -584,11 +593,16 @@ class Aggregator:
             }
         
         for row in aggregated_chunk.rows:
-            # Extraer año y semestre de la fecha
-            year = row.created_at.year
-            semester = 1 if row.created_at.month <= 6 else 2
-            key = (year, semester, int(row.store_id))
-            self.global_accumulator[client_id]['tpv'][key] += float(row.final_amount)
+            # Usar directamente los campos de TPVProcessRow
+            if isinstance(row, TPVProcessRow):
+                key = (row.year_half.year, row.year_half.half, int(row.store_id))
+                self.global_accumulator[client_id]['tpv'][key] += float(row.tpv)
+            else:
+                # Fallback para compatibilidad con versión anterior
+                year = row.created_at.year
+                semester = 1 if row.created_at.month <= 6 else 2
+                key = (year, semester, int(row.store_id))
+                self.global_accumulator[client_id]['tpv'][key] += float(row.final_amount)
 
     def publish_final_results(self, client_id, table_type):
         """Publica los resultados finales acumulados"""
@@ -748,35 +762,26 @@ class Aggregator:
         rows = []
         
         for (year, semester, store_id), total_tpv in data['tpv'].items():
-            # Crear fecha representativa del semestre
-            first_month = 1 if semester == 1 else 7
-            created_date = datetime.date(year, first_month, 1)
+            # Crear YearHalf para representar año y semestre
+            from utils.file_utils.process_table import YearHalf
+            year_half = YearHalf(year, semester)
             
-            row = TransactionsProcessRow(
-                transaction_id="",
+            row = TPVProcessRow(
                 store_id=store_id,
-                user_id=0,  # Valor dummy para TPV
-                final_amount=total_tpv,
-                created_at=created_date,
+                tpv=total_tpv,
+                year_half=year_half
             )
             rows.append(row)
         
         from utils.file_utils.process_chunk import ProcessChunkHeader
         from utils.file_utils.table_type import TableType
-        header = ProcessChunkHeader(client_id=client_id, table_type=TableType.TRANSACTIONS)
+        header = ProcessChunkHeader(client_id=client_id, table_type=TableType.TPV)
         chunk = ProcessChunk(header, rows)
         
         import base64
-        queue = MessageMiddlewareQueue("rabbitmq", "results_query_3")
+        queue = MessageMiddlewareQueue("rabbitmq", "to_join_with_stores_tvp")
         chunk_data = chunk.serialize()
-        payload_b64 = base64.b64encode(chunk_data).decode("utf-8")
-        queue.send(payload_b64)
+        queue.send(chunk_data)  # Enviar datos directos, no en base64
         queue.close()
         
-        logging.info(f"action: publish_final_tpv | client_id:{client_id} | rows:{len(rows)} | bytes_sent:{len(chunk_data)} | queue:results_query_3")
-        
-        # Cerrar conexiones
-        try:
-            self.middleware_queue_receiver.close()
-        except:
-            pass
+        logging.info(f"action: publish_final_tpv | client_id:{client_id} | rows:{len(rows)} | bytes_sent:{len(chunk_data)} | queue:to_join_with_stores_tvp")

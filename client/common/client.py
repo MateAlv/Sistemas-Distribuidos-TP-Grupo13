@@ -209,7 +209,7 @@ class Client:
         elif query_type == ResultTableType.QUERY_2_2:
             return "year_month_created_at,item_id,item_name,profit_sum\n"
         elif query_type == ResultTableType.QUERY_3:
-            return "year_half_created_at,store_name,tpv\n"
+            return "year_half_created_at,store_id,store_name,tpv\n"
         elif query_type == ResultTableType.QUERY_4:
             return "store_id,store_name,user_id,birthdate,purchase_quantity\n"
 
@@ -230,4 +230,4 @@ class Client:
                 data = row.serialize()
                 if not data.endswith(b'\n'):
                     data += b'\n'
-                f.write(data)
+                f.write(data) 
