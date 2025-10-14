@@ -19,6 +19,7 @@ docker-image:
 .PHONY: docker-image
 
 up:
+	make clean-results
 	docker compose -f ${DOCKER} up -d --build
 .PHONY: docker-compose-up
 
@@ -34,16 +35,38 @@ rebuild:
 	docker compose -f ${DOCKER} up -d
 
 logs:
+	> logs.txt
 	docker compose -f ${DOCKER} logs -f > logs.txt 
 .PHONY: docker-compose-logs
 
-clean-logs:
-	> logs.txt
-.PHONY: clean-logs
+clean-results:
+	rm -rf .results/client-1/*
+.PHONY: clean-results
 
 test:
+	make clean-results
 	docker compose -f ${DOCKER} up --build
 .PHONY: test
+
+q1: 
+	python3 generar-compose.py --config=q1-config.ini
+	make test
+.PHONY: q1
+
+q2: 
+	python3 generar-compose.py --config=q2-config.ini
+	make test
+.PHONY: q2
+
+q3: 
+	python3 generar-compose.py --config=q3-config.ini
+	make test
+.PHONY: q3
+
+q4: 
+	python3 generar-compose.py --config=q4-config.ini
+	make test
+.PHONY: q4
 
 images-clean:
 	# Stop and remove all containers first

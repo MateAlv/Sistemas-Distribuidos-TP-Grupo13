@@ -11,3 +11,4 @@ middleware/__pycache__/
 docker-compose.yaml
 __pycache__/
 logs.txt
+.idea/
