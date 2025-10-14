@@ -336,4 +336,45 @@ class PurchasesPerUserStoreRow(TableProcessRow):
         
         consumed = len(line.encode("utf-8")) + 1
         return row, consumed
+
+# =========================================
+# TPV Process Row
+# - Representa una fila del procesamiento de TPV por store y semestre.
+# - Campos:
+#       - store_id: int
+#       - tpv: float (total payment value)
+#       - year_half: YearHalf
+# =========================================
+class TPVProcessRow(TableProcessRow):
+    def __init__(self, store_id: int, tpv: float, year_half: YearHalf):
+        self.store_id = store_id
+        self.tpv = tpv
+        self.year_half = year_half
+        
+    def serialize(self) -> bytes:
+        store_id_str = str(self.store_id) if self.store_id is not None else ""
+        tpv_str = str(self.tpv) if self.tpv is not None else ""
+        year_half_str = str(self.year_half) if self.year_half is not None else ""
+
+        return f"{store_id_str},{tpv_str},{year_half_str}\n".encode("utf-8")
+
+    @staticmethod
+    def from_file_row(file_row):
+        # Esta función normalmente no se usaría para esta clase 
+        # ya que se construye a partir de datos agregados
+        raise NotImplementedError("TPVProcessRow se construye a partir de datos agregados")
+    
+    @staticmethod
+    def deserialize(data: bytes):
+        line = data.split(b"\n", 1)[0].decode("utf-8")
+        parts = line.split(CSV_DELIMITER)
+
+        store_id = int(float(parts[0])) if len(parts[0]) > 0 else None
+        tpv = float(parts[1]) if len(parts[1]) > 0 else None
+        year_half = YearHalf.from_str(parts[2]) if len(parts[2]) > 0 else None
+
+        row = TPVProcessRow(store_id, tpv, year_half)
+        
+        consumed = len(line.encode("utf-8")) + 1
+        return row, consumed
 # =========================================

@@ -209,7 +209,7 @@ class Client:
         elif query_type == ResultTableType.QUERY_2_2:
             return "year_month_created_at,item_id,item_name,profit_sum\n"
         elif query_type == ResultTableType.QUERY_3:
-            return "year_half_created_at,store_name,tpv\n"
+            return "year_half_created_at,store_id,store_name,tpv\n"
         elif query_type == ResultTableType.QUERY_4:
             return "store_id,store_name,user_id,birthdate,purchase_quantity\n"
 
@@ -223,12 +223,11 @@ class Client:
         except FileNotFoundError:
             file_exists = False
 
-        # Usar modo "wb" para sobrescribir el archivo completamente en lugar de append
-        with open(output_path, "wb") as f:
-            # Siempre escribir el header al inicio del archivo
-            f.write(csv_header.encode())
+        with open(output_path, "ab") as f:
+            if not file_exists:
+                f.write(csv_header.encode())
             for row in process_chunk.rows:
                 data = row.serialize()
                 if not data.endswith(b'\n'):
                     data += b'\n'
-                f.write(data)
+                f.write(data) 

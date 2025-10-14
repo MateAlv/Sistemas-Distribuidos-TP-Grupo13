@@ -29,7 +29,8 @@ def read_config(path: str):
 
             key, value = line.split(":", 1)
             key, value = key.strip(), value.strip()
-
+            if key.startswith("#"):
+                continue
             if key.lower() in ("compose_name", "output_file", "data_path", "logging_level"):
                 meta[key.lower()] = value
             else:
@@ -97,16 +98,22 @@ def is_filter(nodo: str):
 def define_filter(meta: dict, compose: dict, nodo: str):
     service_name = f"{nodo.lower()}_service"
     config_path = get_filter_config_path(nodo)
+    # Extract numeric ID from service name for WORKER_ID
+    # filter_year_service -> 1, filter_hour_service -> 2, filter_amount_service -> 3
+    filter_type = nodo.split("_")[1].lower()
+    worker_id = {"year": 1, "hour": 2, "amount": 3}.get(filter_type, 1)
+    
     compose["services"][service_name] = {
         "build": {
             "context": ".",             # project root
             "dockerfile": f"workers/filter/Dockerfile"
         },
-        "entrypoint": FlowList(["python3", "main.py", "--filter", f"{nodo.split("_")[1].lower()}"]),
+        "entrypoint": FlowList(["python3", "main.py", "--filter", filter_type]),
         "container_name": service_name,
         "environment": [
             "PYTHONUNBUFFERED=1",
             f"LOGGING_LEVEL={meta['logging_level']}",
+            f"WORKER_ID={worker_id}",
         ],
         "volumes": [
             f".{config_path}:{config_path}:ro",
@@ -263,7 +270,7 @@ def define_client(meta: dict, compose: dict, nodo: str, index: int):
         "entrypoint": FlowList(["python3", "main.py"]),
         "container_name": service_name,
         "environment": [
-            f"CLI_ID={index}",
+            f"CLIENT_ID={index}",
             "CLI_DATA_DIR=/data",
             "CLI_OUTPUT_DIR=/output",
             "DATA_MODE=tree",

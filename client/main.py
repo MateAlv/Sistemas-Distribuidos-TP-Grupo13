@@ -17,8 +17,13 @@ def initialize_config():
     config.read("config.ini")
 
     try:
+        # Priorizar variable de entorno CLIENT_ID, fallback a config file
+        client_id = os.getenv("CLIENT_ID")
+        if client_id is None:
+            client_id = config["DEFAULT"]["CLIENT_ID"]
+            
         params = {
-            "id": os.getenv("CLIENT_ID", config["DEFAULT"]["CLIENT_ID"]),
+            "id": client_id,
             "server_address": os.getenv("SERVER_ADDRESS", config["DEFAULT"]["SERVER_ADDRESS"]),
             "log_level": os.getenv("LOGGING_LEVEL", config["DEFAULT"]["LOGGING_LEVEL"]),
             "data_dir": os.getenv("DATA_DIR", config["DEFAULT"]["DATA_DIR"]),
