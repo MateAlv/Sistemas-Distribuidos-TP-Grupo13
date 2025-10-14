@@ -467,11 +467,9 @@ class Aggregator:
         """
         Publica un chunk agregado de TPV por store y semestre directamente al joiner.
         """
-        import base64
-        
         queue = MessageMiddlewareQueue("rabbitmq", "to_join_with_stores_tvp")
-        payload_b64 = base64.b64encode(aggregated_chunk.serialize()).decode("utf-8")
-        queue.send(payload_b64)
+        chunk_data = aggregated_chunk.serialize()
+        queue.send(chunk_data)  # Enviar datos directos, no en base64
         queue.close()
         
         logging.info(f"action: publish_tpv_chunk | result: success | rows:{len(aggregated_chunk.rows)} | queue:to_join_with_stores_tvp")
@@ -783,8 +781,7 @@ class Aggregator:
         import base64
         queue = MessageMiddlewareQueue("rabbitmq", "to_join_with_stores_tvp")
         chunk_data = chunk.serialize()
-        payload_b64 = base64.b64encode(chunk_data).decode("utf-8")
-        queue.send(payload_b64)
+        queue.send(chunk_data)  # Enviar datos directos, no en base64
         queue.close()
         
         logging.info(f"action: publish_final_tpv | client_id:{client_id} | rows:{len(rows)} | bytes_sent:{len(chunk_data)} | queue:to_join_with_stores_tvp")
