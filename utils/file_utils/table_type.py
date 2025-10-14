@@ -9,6 +9,7 @@ class TableType(Enum):
     STORES = 4
     USERS = 5
     PURCHASES_PER_USER_STORE = 6
+    TPV = 7  # Para datos agregados de TPV por store y semestre
     
     def from_path(path: str):
         """

@@ -447,7 +447,7 @@ class Aggregator:
         
         from utils.file_utils.process_chunk import ProcessChunkHeader
         from utils.file_utils.table_type import TableType
-        header = ProcessChunkHeader(client_id=chunk.header.client_id, table_type=TableType.TRANSACTIONS)
+        header = ProcessChunkHeader(client_id=chunk.header.client_id, table_type=TableType.TPV)
         return ProcessChunk(header, rows)
 
     def publish_purchases_chunk(self, aggregated_chunk):
@@ -775,7 +775,7 @@ class Aggregator:
         
         from utils.file_utils.process_chunk import ProcessChunkHeader
         from utils.file_utils.table_type import TableType
-        header = ProcessChunkHeader(client_id=client_id, table_type=TableType.TRANSACTIONS)
+        header = ProcessChunkHeader(client_id=client_id, table_type=TableType.TPV)
         chunk = ProcessChunk(header, rows)
         
         import base64
