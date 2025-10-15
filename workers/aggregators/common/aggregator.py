@@ -104,7 +104,8 @@ class Aggregator:
                             continue
                         
                         logging.info(f"action: stats_end_received | type:{self.aggregator_type} | agg_id:{stats_end.aggregator_id} | cli_id:{stats_end.client_id} | table_type:{stats_end.table_type}")
-                        self.delete_client_data(stats_end)
+                        self.delete_stats_client_data(stats_end)
+                        self.delete_client_accumulator(stats_end)
                     else:
                         stats = AggregatorStatsMessage.decode(stats_msg)
                         if stats.aggregator_id == self.aggregator_id:
@@ -238,10 +239,6 @@ class Aggregator:
                         if client_id not in self.end_message_received:
                             self.end_message_received[client_id] = {}
 
-                        if self.end_message_received[client_id].get(table_type, False):
-                            total_expected = self.chunks_to_receive[client_id][table_type]
-                            total_received = self.chunks_received_per_client[client_id][table_type]
-                            total_processed = self.chunks_processed_per_client[client_id][table_type]
                         if self.end_message_received[client_id].get(table_type, False):
                             total_expected = self.chunks_to_receive[client_id][table_type]
                             total_received = self.chunks_received_per_client[client_id][table_type]
@@ -527,10 +524,22 @@ class Aggregator:
         # Limpiar estado
         end_msg = AggregatorStatsEndMessage(self.aggregator_id, client_id, table_type)
         self.middleware_stats_exchange.send(end_msg.encode())
-        self.delete_client_data(end_msg)
+        self.delete_client_stats_data(end_msg)
+        self.delete_client_accumulator(end_msg)
 
-    def delete_client_data(self, stats_end):
+    def delete_client_accumulator(self, stats_end):
+        # Limpiar acumulador global
+        logging.info(f"action: deleting_client_accumulator | cli_id:{stats_end.client_id}")
+        try:
+            if stats_end.client_id in self.global_accumulator:
+                del self.global_accumulator[stats_end.client_id]
+        except KeyError:
+            pass  # Ya estaba limpio
+        logging.info(f"action: client_accumulator_deleted | cli_id:{stats_end.client_id}")
+
+    def delete_client_stats_data(self, stats_end):
         """Limpia datos del cliente después de procesar"""
+        logging.info(f"action: deleting_client_stats_data | cli_id:{stats_end.client_id}")
         try:
             if stats_end.client_id in self.end_message_received:
                 if stats_end.table_type in self.end_message_received[stats_end.client_id]:
@@ -559,11 +568,8 @@ class Aggregator:
             if (stats_end.client_id, stats_end.table_type) in self.already_sent_stats:
                 del self.already_sent_stats[(stats_end.client_id, stats_end.table_type)]
             
-            # Limpiar acumulador global
-            if stats_end.client_id in self.global_accumulator:
-                del self.global_accumulator[stats_end.client_id]
-                logging.info(f"action: cleanup_accumulator | client_id:{stats_end.client_id} | aggregator_id:{self.aggregator_id}")
-                
+
+            logging.info(f"action: client_stats_data_deleted | cli_id:{stats_end.client_id}")
         except KeyError:
             pass  # Ya estaba limpio
 

@@ -191,7 +191,7 @@ class Server:
             logging.error("action: client_handler_error | peer:%s | client_id:%s | error:%r", peer, client_id, e)
         finally:
             # Cleanup
-            for queue in middleware_queue_senders.items():
+            for queue in middleware_queue_senders.values():
                 queue.close()
 
             if middleware_queue_receiver is not None:
@@ -328,10 +328,10 @@ class Server:
         maximum_chunks = self._max_number_of_chunks_in_batch()
         all_data_received = False
         all_data_received_per_query = {
-            ResultTableType.QUERY_1: False,  
+            ResultTableType.QUERY_1: False,
             ResultTableType.QUERY_2_1: True,
             ResultTableType.QUERY_2_2: True,
-            ResultTableType.QUERY_3: True,
+            ResultTableType.QUERY_3: False,
             ResultTableType.QUERY_4: True,
         }
         results_for_client = []

@@ -188,7 +188,7 @@ class Joiner:
                     logging.error(f"action: unexpected_error | type:{self.joiner_type} | error:{e} | error_type:{type(e).__name__} | error_traceback:", exc_info=True)
  
                 results.remove(data)
-        
+
     def save_data(self, chunk) -> bool:
         """
         Guarda los datos para la tabla que debe joinearse.
@@ -206,7 +206,7 @@ class Joiner:
         self.joiner_data_chunks[client_id].append(chunk)
         
         return True
-    
+
     def save_data_join(self, chunk) -> bool:
         """
         Guarda los datos para la tabla base necesaria para el join (tabla de productos).
@@ -228,21 +228,7 @@ class Joiner:
             
         logging.info(f"action: saved_join_data | type:{self.joiner_type} | client_id:{client_id} | products_loaded:{len(self.joiner_data[client_id])}")
         return True
-    
-    def apply(self, client_id) -> bool:
-        """
-        Aplica el agrupador según el tipo configurado.
-        """
-        logging.info(f"action: joining_data | type:{self.joiner_type} | cli_id:{client_id} | type:{self.joiner_type}")
-        # Hacer el join entre self.data y self.joiner_data
-        rows = self.data.get(client_id, [])
-        if not client_id in self.joiner_results:
-            self.joiner_results[client_id] = []
-        for row in rows:
-            self.joiner_results[client_id].append(self.join_result(row, client_id))
-        logging.info(f"action: joiner_result | type:{self.joiner_type} | results_out: Data: {self.data} - Joiner_data: {self.joiner_data}")
-        return True
-    
+
     def run(self):
         logging.info(f"Joiner iniciado. Tipo: {self.joiner_type}")
         
