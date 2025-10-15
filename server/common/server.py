@@ -61,7 +61,8 @@ class Server:
         self.middleware_queue_senders = {}
         self.max_number_of_chunks_in_batch = max_number_of_chunks_in_batch
         self.middleware_queue_senders["to_filter_1"] = MessageMiddlewareQueue("rabbitmq", "to_filter_1")
-        self.middleware_queue_senders["to_join_stores"] = MessageMiddlewareQueue("rabbitmq", "to_join_stores")
+        self.middleware_queue_senders["to_join_stores_tpv"] = MessageMiddlewareQueue("rabbitmq", "stores_for_tpv_joiner")
+        self.middleware_queue_senders["to_join_stores_top3"] = MessageMiddlewareQueue("rabbitmq", "stores_for_top3_joiner")
         self.middleware_queue_senders["to_join_users"] = MessageMiddlewareQueue("rabbitmq", "to_join_users")
         self.middleware_queue_senders["to_join_menu_items"] = MessageMiddlewareQueue("rabbitmq", "to_join_menu_items")
         self.middleware_queue_senders["to_top3"] = MessageMiddlewareQueue("rabbitmq", "to_top3")
@@ -163,7 +164,8 @@ class Server:
                         if table_type == TableType.TRANSACTIONS or table_type == TableType.TRANSACTION_ITEMS:
                             self.middleware_queue_senders["to_filter_1"].send(message)
                         elif table_type == TableType.STORES:
-                            self.middleware_queue_senders["to_join_stores"].send(message)
+                            self.middleware_queue_senders["to_join_stores_tpv"].send(message)
+                            self.middleware_queue_senders["to_join_stores_top3"].send(message)
                             self.middleware_queue_senders["to_top3"].send(message)
                         elif table_type == TableType.USERS:
                             self.middleware_queue_senders["to_join_users"].send(message)
@@ -250,9 +252,13 @@ class Server:
             self.middleware_queue_senders["to_filter_1"].send(process_chunk.serialize())
 
         elif table_type == TableType.STORES:
-            logging.debug("action: send_to_join_stores | peer:%s | cli_id:%s | file:%s | table:%s",
+            logging.debug("action: send_to_join_stores_tpv | peer:%s | cli_id:%s | file:%s | table:%s",
                          peer, client_id, chunk.path(), table_type)
-            self.middleware_queue_senders["to_join_stores"].send(process_chunk.serialize())
+            self.middleware_queue_senders["to_join_stores_tpv"].send(process_chunk.serialize())
+            
+            logging.debug("action: send_to_join_stores_top3 | peer:%s | cli_id:%s | file:%s | table:%s",
+                         peer, client_id, chunk.path(), table_type)
+            self.middleware_queue_senders["to_join_stores_top3"].send(process_chunk.serialize())
             
             logging.debug("action: send_to_top3 | peer:%s | cli_id:%s | file:%s | table:%s",
                          peer, client_id, chunk.path(), table_type)
