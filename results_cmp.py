@@ -88,6 +88,10 @@ def results_compare(base_dir, result_dir, verbose=False):
 
         missing, extra = compare_sets(base_set, result_set)
 
+        if len(base_set) == len(result_set):
+            print(f"✅ Mismo número de filas: {len(base_set)}")
+        else:
+            print(f"❌ Diferente número de filas: esperado {len(base_set)}, obtenido {len(result_set)}")
         if not missing and not extra:
             print(f"✅ {file_name}: resultados iguales - {len(base_set)}/{len(result_set)} filas\n")
         else:
