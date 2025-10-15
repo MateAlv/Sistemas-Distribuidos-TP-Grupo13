@@ -12,6 +12,7 @@ import logging
 from collections import defaultdict
 import datetime
 import threading
+import sys
 
 TIMEOUT = 3
 
@@ -35,6 +36,15 @@ class Joiner:
         self._pending_end_messages = []  # Track clients that need END messages sent
         self.lock = threading.Lock()
         self.ready_to_join = {}
+        self.data_receiver = None
+        self.data_join_receiver = None
+        self.data_sender = None
+
+        self.__running = True
+        
+        # Iniciar hilos para manejar data y join_data (eliminamos end_message_handler_thread)
+        self.data_handler_thread = threading.Thread(target=self.handle_data, name="DataHandler")
+        self.join_data_handler_thread = threading.Thread(target=self.handle_join_data, name="JoinDataHandler")
 
         self.define_queues()
 
@@ -46,7 +56,7 @@ class Joiner:
         def stop():
             self.data_join_receiver.stop_consuming()
 
-        while True:
+        while self.__running:
             # Escuchar datos de join (productos)
             self.data_join_receiver.connection.call_later(TIMEOUT, stop)
             self.data_join_receiver.start_consuming(callback)
@@ -64,9 +74,9 @@ class Joiner:
 
                         self.save_data_join(chunk)
                 except ValueError as e:
-                    logging.error(f"action: error_parsing_join_data | type:{self.joiner_type} | error:{e}")
+                    logging.error(f"action: error_parsing_join_data | type:{self.joiner_type} | error:{e} | error_type:{type(e).__name__} | data_preview:{data[:100] if len(data) > 100 else data}")
                 except Exception as e:
-                    logging.error(f"action: unexpected_error_join_data | type:{self.joiner_type} | error:{e}")
+                    logging.error(f"action: unexpected_error_join_data | type:{self.joiner_type} | error:{e} | error_type:{type(e).__name__} | error_traceback:", exc_info=True)
 
                 results.remove(data)
                 
@@ -79,7 +89,7 @@ class Joiner:
         def stop():
             self.data_receiver.stop_consuming()
 
-        while True:
+        while self.__running:
             # Escuchar datos del maximizer con timeout
             self.data_receiver.connection.call_later(TIMEOUT, stop)
             self.data_receiver.start_consuming(callback)
@@ -101,11 +111,25 @@ class Joiner:
                                 # Solo procesar si está listo para join
                                 if self.is_ready_to_join_for_client(client_id):
                                     logging.info(f"action: ready_to_join_after_end | type:{self.joiner_type} | client_id:{client_id}")
-                                    self.apply_for_client(client_id)
-                                    self.publish_results(client_id)
-                                    self.clean_client_data(client_id)
-                                    self.completed_clients.append(client_id)
-                                    self._pending_end_messages.append(client_id)
+                                    try:
+                                        logging.debug(f"action: starting_apply_for_client | type:{self.joiner_type} | client_id:{client_id}")
+                                        self.apply_for_client(client_id)
+                                        logging.debug(f"action: completed_apply_for_client | type:{self.joiner_type} | client_id:{client_id}")
+                                        
+                                        logging.debug(f"action: starting_publish_results | type:{self.joiner_type} | client_id:{client_id}")
+                                        self.publish_results(client_id)
+                                        logging.debug(f"action: completed_publish_results | type:{self.joiner_type} | client_id:{client_id}")
+                                        
+                                        logging.debug(f"action: starting_clean_client_data | type:{self.joiner_type} | client_id:{client_id}")
+                                        self.clean_client_data(client_id)
+                                        logging.debug(f"action: completed_clean_client_data | type:{self.joiner_type} | client_id:{client_id}")
+                                        
+                                        self.completed_clients.append(client_id)
+                                        self._pending_end_messages.append(client_id)
+                                        logging.debug(f"action: processing_complete | type:{self.joiner_type} | client_id:{client_id}")
+                                    except Exception as inner_e:
+                                        logging.error(f"action: error_in_join_processing | type:{self.joiner_type} | client_id:{client_id} | error:{inner_e} | error_type:{type(inner_e).__name__}")
+                                        raise inner_e
                             else:
                                 logging.debug(f"action: duplicate_end_message_ignored | type:{self.joiner_type} | client_id:{client_id}")
 
@@ -119,28 +143,49 @@ class Joiner:
                             client_id = chunk.client_id()
                             if self.is_ready_to_join_for_client(client_id):
                                 logging.info(f"action: ready_to_join | type:{self.joiner_type} | client_id:{client_id}")
-                                # Aplica el join
-                                self.apply_for_client(client_id)
-                                # Publica los resultados al to_merge_data
-                                self.publish_results(client_id)
-                                # Limpiar datos del cliente después de procesar
-                                self.clean_client_data(client_id)
-                                # Mark this client as processed
-                                self.completed_clients.append(client_id)
-                                self._pending_end_messages.append(client_id)
+                                try:
+                                    logging.debug(f"action: starting_apply_for_client_from_data | type:{self.joiner_type} | client_id:{client_id}")
+                                    # Aplica el join
+                                    self.apply_for_client(client_id)
+                                    logging.debug(f"action: completed_apply_for_client_from_data | type:{self.joiner_type} | client_id:{client_id}")
+                                    
+                                    logging.debug(f"action: starting_publish_results_from_data | type:{self.joiner_type} | client_id:{client_id}")
+                                    # Publica los resultados al to_merge_data
+                                    self.publish_results(client_id)
+                                    logging.debug(f"action: completed_publish_results_from_data | type:{self.joiner_type} | client_id:{client_id}")
+                                    
+                                    logging.debug(f"action: starting_clean_client_data_from_data | type:{self.joiner_type} | client_id:{client_id}")
+                                    # Limpiar datos del cliente después de procesar
+                                    self.clean_client_data(client_id)
+                                    logging.debug(f"action: completed_clean_client_data_from_data | type:{self.joiner_type} | client_id:{client_id}")
+                                    
+                                    # Mark this client as processed
+                                    self.completed_clients.append(client_id)
+                                    self._pending_end_messages.append(client_id)
+                                    logging.debug(f"action: processing_complete_from_data | type:{self.joiner_type} | client_id:{client_id}")
+                                except Exception as inner_e:
+                                    logging.error(f"action: error_in_join_processing_from_data | type:{self.joiner_type} | client_id:{client_id} | error:{inner_e} | error_type:{type(inner_e).__name__}")
+                                    raise inner_e
                             else:
                                 logging.debug(f"action: waiting_join_data | type:{self.joiner_type} | cli_id:{client_id} | file_type:{chunk.table_type()}")
                     
                     # Enviar END messages para clientes recién completados
                     if hasattr(self, '_pending_end_messages'):
                         for client_id in self._pending_end_messages:
-                            self.send_end_query_msg(client_id)
+                            try:
+                                logging.debug(f"action: starting_send_end_query_msg | type:{self.joiner_type} | client_id:{client_id}")
+                                self.send_end_query_msg(client_id)
+                                logging.debug(f"action: completed_send_end_query_msg | type:{self.joiner_type} | client_id:{client_id}")
+                            except Exception as end_msg_error:
+                                logging.error(f"action: error_sending_end_message | type:{self.joiner_type} | client_id:{client_id} | error:{end_msg_error} | error_type:{type(end_msg_error).__name__}")
+                                raise end_msg_error
                         self._pending_end_messages.clear()
+                        logging.debug(f"action: cleared_pending_end_messages | type:{self.joiner_type}")
                     
                 except ValueError as e:
-                    logging.error(f"action: error_parsing_data | type:{self.joiner_type} | error:{e}")
+                    logging.error(f"action: error_parsing_data | type:{self.joiner_type} | error:{e} | error_type:{type(e).__name__} | data_preview:{data[:100] if len(data) > 100 else data}")
                 except Exception as e:
-                    logging.error(f"action: unexpected_error | type:{self.joiner_type} | error:{e}")
+                    logging.error(f"action: unexpected_error | type:{self.joiner_type} | error:{e} | error_type:{type(e).__name__} | error_traceback:", exc_info=True)
  
                 results.remove(data)
         
@@ -200,13 +245,10 @@ class Joiner:
     
     def run(self):
         logging.info(f"Joiner iniciado. Tipo: {self.joiner_type}")
-        # Iniciar hilos para manejar data y join_data (eliminamos end_message_handler_thread)
-        data_handler_thread = threading.Thread(target=self.handle_data, name="DataHandler")
-        join_data_handler_thread = threading.Thread(target=self.handle_join_data, name="JoinDataHandler")
         
-        data_handler_thread.start() 
-        join_data_handler_thread.start()
-    
+        self.data_handler_thread.start() 
+        self.join_data_handler_thread.start()
+
     def define_queues(self):
         raise NotImplementedError("Subclasses must implement define_queues method")
 
@@ -253,12 +295,24 @@ class Joiner:
             logging.warning(f"action: no_data_to_join | client_id:{client_id}")
             return
             
-        for chunk in self.joiner_data_chunks[client_id]:
-            for row in chunk.rows:
-                joined_row = self.join_result(row, client_id)
-                if client_id not in self.joiner_results:
-                    self.joiner_results[client_id] = []
-                self.joiner_results[client_id].append(joined_row)
+        logging.debug(f"action: processing_chunks | type:{self.joiner_type} | client_id:{client_id} | chunks_count:{len(self.joiner_data_chunks[client_id])}")
+        
+        for chunk_idx, chunk in enumerate(self.joiner_data_chunks[client_id]):
+            logging.debug(f"action: processing_chunk | type:{self.joiner_type} | client_id:{client_id} | chunk_idx:{chunk_idx} | rows_count:{len(chunk.rows)}")
+            
+            for row_idx, row in enumerate(chunk.rows):
+                try:
+                    logging.debug(f"action: joining_row | type:{self.joiner_type} | client_id:{client_id} | chunk_idx:{chunk_idx} | row_idx:{row_idx}")
+                    joined_row = self.join_result(row, client_id)
+                    
+                    if client_id not in self.joiner_results:
+                        self.joiner_results[client_id] = []
+                    self.joiner_results[client_id].append(joined_row)
+                    
+                    logging.debug(f"action: row_joined_successfully | type:{self.joiner_type} | client_id:{client_id} | chunk_idx:{chunk_idx} | row_idx:{row_idx}")
+                except Exception as row_error:
+                    logging.error(f"action: error_joining_row | type:{self.joiner_type} | client_id:{client_id} | chunk_idx:{chunk_idx} | row_idx:{row_idx} | error:{row_error} | error_type:{type(row_error).__name__}")
+                    raise row_error
         
         logging.info(f"action: applied_join | client_id:{client_id} | joined_rows:{len(self.joiner_results.get(client_id, []))}")
     
@@ -292,6 +346,30 @@ class Joiner:
             self._pending_end_messages.clear()
             logging.info(f"action: joiner_reset_for_new_session | type:{self.joiner_type}")
 
+    def shutdown(self, signum, frame):
+        logging.info(f"SIGTERM received: shutting down joiner {self.joiner_type}")
+        try:
+            self.__running = False  # Stop the handler loops
+            
+            # Detener hilos
+            if self.data_handler_thread.is_alive():
+                self.data_handler_thread.join(timeout=5)
+            if self.join_data_handler_thread.is_alive():
+                self.join_data_handler_thread.join(timeout=5)
+            
+            # Cerrar colas y conexiones
+            if self.data_receiver:
+                self.data_receiver.stop_consuming()
+                self.data_receiver.close()
+            if self.data_join_receiver:
+                self.data_join_receiver.stop_consuming()
+                self.data_join_receiver.close()
+            if self.data_sender:
+                self.data_sender.close()
+            logging.info(f"Joiner {self.joiner_type} shutdown complete.")
+        except Exception as e:
+            logging.error(f"Error during shutdown of joiner {self.joiner_type}: {e}")
+    
 class MenuItemsJoiner(Joiner):
     
     def define_queues(self):
@@ -372,7 +450,7 @@ class StoresTpvJoiner(Joiner):
     
     def define_queues(self):
         self.data_receiver = MessageMiddlewareQueue("rabbitmq", "to_join_with_stores_tvp")
-        self.data_join_receiver = MessageMiddlewareQueue("rabbitmq", "to_join_stores")
+        self.data_join_receiver = MessageMiddlewareQueue("rabbitmq", "stores_for_tpv_joiner")
         # No necesitamos data_sender fijo porque enviamos a colas específicas por cliente
         
     def save_data_join_fields(self, row, client_id):
@@ -456,7 +534,7 @@ class StoresTop3Joiner(Joiner):
         # Recibe del TOP3 absoluto
         self.data_receiver = MessageMiddlewareQueue("rabbitmq", "to_purchases_joiner")
         # Recibe datos de stores del servidor
-        self.data_join_receiver = MessageMiddlewareQueue("rabbitmq", "to_join_stores")
+        self.data_join_receiver = MessageMiddlewareQueue("rabbitmq", "stores_for_top3_joiner")
         # Envía al UsersJoiner
         self.data_sender = MessageMiddlewareQueue("rabbitmq", "to_join_with_users")
 
@@ -489,22 +567,35 @@ class StoresTop3Joiner(Joiner):
         return True
     
     def join_result(self, row: TableProcessRow, client_id):
+        logging.debug(f"action: starting_join_result | type:{self.joiner_type} | client_id:{client_id} | row_type:{type(row)}")
+        
         # Procesar PurchasesPerUserStoreRow del TOP3 absoluto
         if isinstance(row, PurchasesPerUserStoreRow):
-            store_id = row.store_id
-            store_name = self.joiner_data[client_id].get(store_id, f"UNKNOWN_STORE_{store_id}")
-            
-            # Crear nueva fila con store_name llenado
-            joined_row = PurchasesPerUserStoreRow(
-                store_id=store_id,
-                store_name=store_name,  # ¡Ahora con el nombre real!
-                user_id=row.user_id,
-                user_birthdate=row.user_birthdate,  # Sigue siendo placeholder
-                purchases_made=row.purchases_made
-            )
-            
-            logging.debug(f"action: joined_store_data | store_id:{store_id} | store_name:{store_name} | user_id:{row.user_id} | purchases:{row.purchases_made}")
-            return joined_row
+            try:
+                store_id = row.store_id
+                logging.debug(f"action: looking_up_store | type:{self.joiner_type} | client_id:{client_id} | store_id:{store_id}")
+                
+                if client_id not in self.joiner_data:
+                    logging.error(f"action: missing_joiner_data_for_client | type:{self.joiner_type} | client_id:{client_id} | available_clients:{list(self.joiner_data.keys())}")
+                    store_name = f"NO_JOINER_DATA_{store_id}"
+                else:
+                    store_name = self.joiner_data[client_id].get(store_id, f"UNKNOWN_STORE_{store_id}")
+                    logging.debug(f"action: store_lookup_result | type:{self.joiner_type} | client_id:{client_id} | store_id:{store_id} | store_name:{store_name}")
+                
+                # Crear nueva fila con store_name llenado
+                joined_row = PurchasesPerUserStoreRow(
+                    store_id=store_id,
+                    store_name=store_name,  # ¡Ahora con el nombre real!
+                    user_id=row.user_id,
+                    user_birthdate=row.user_birthdate,  # Sigue siendo placeholder
+                    purchases_made=row.purchases_made
+                )
+                
+                logging.debug(f"action: joined_store_data | store_id:{store_id} | store_name:{store_name} | user_id:{row.user_id} | purchases:{row.purchases_made}")
+                return joined_row
+            except Exception as join_error:
+                logging.error(f"action: error_in_join_result | type:{self.joiner_type} | client_id:{client_id} | error:{join_error} | error_type:{type(join_error).__name__}")
+                raise join_error
         else:
             logging.warning(f"action: unexpected_row_type | expected:PurchasesPerUserStoreRow | got:{type(row)}")
             return row
@@ -520,16 +611,28 @@ class StoresTop3Joiner(Joiner):
     
     def publish_results(self, client_id):
         # Envía PurchasesPerUserStoreRow con store_name llenado al UsersJoiner
+        logging.debug(f"action: starting_publish_results | type:{self.joiner_type} | client_id:{client_id}")
+        
         joiner_results = self.joiner_results.get(client_id, [])
+        logging.debug(f"action: got_joiner_results | type:{self.joiner_type} | client_id:{client_id} | results_count:{len(joiner_results)}")
         
         if joiner_results:
-            # Crear chunk con las filas que tienen store_name llenado
-            from utils.file_utils.process_chunk import ProcessChunkHeader
-            header = ProcessChunkHeader(client_id, TableType.PURCHASES_PER_USER_STORE)
-            chunk = ProcessChunk(header, joiner_results)
-            
-            self.data_sender.send(chunk.serialize())
-            logging.info(f"action: sent_to_users_joiner | type:{self.joiner_type} | client_id:{client_id} | rows:{len(joiner_results)}")
+            try:
+                # Crear chunk con las filas que tienen store_name llenado
+                from utils.file_utils.process_chunk import ProcessChunkHeader
+                logging.debug(f"action: creating_chunk_header | type:{self.joiner_type} | client_id:{client_id}")
+                header = ProcessChunkHeader(client_id, TableType.PURCHASES_PER_USER_STORE)
+                
+                logging.debug(f"action: creating_chunk | type:{self.joiner_type} | client_id:{client_id}")
+                chunk = ProcessChunk(header, joiner_results)
+                
+                logging.debug(f"action: sending_chunk | type:{self.joiner_type} | client_id:{client_id}")
+                self.data_sender.send(chunk.serialize())
+                
+                logging.info(f"action: sent_to_users_joiner | type:{self.joiner_type} | client_id:{client_id} | rows:{len(joiner_results)}")
+            except Exception as publish_error:
+                logging.error(f"action: error_publishing_results | type:{self.joiner_type} | client_id:{client_id} | error:{publish_error} | error_type:{type(publish_error).__name__}")
+                raise publish_error
         else:
             logging.info(f"action: no_results_to_send | type:{self.joiner_type} | client_id:{client_id}")
 

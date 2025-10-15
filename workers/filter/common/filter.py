@@ -1,4 +1,6 @@
+from asyncio.tasks import sleep
 import logging
+import sys
 from utils.file_utils.process_table import TableProcessRow
 from utils.file_utils.process_chunk import ProcessChunk
 from utils.file_utils.result_chunk import ResultChunkHeader, ResultChunk
@@ -13,6 +15,8 @@ from .filter_stats_messages import FilterStatsMessage, FilterStatsEndMessage
 class Filter:
     def __init__(self, cfg: dict):
         logging.getLogger('pika').setLevel(logging.CRITICAL)
+        
+        self.__running = True
         
         self.id = cfg["id"]
         self.cfg = cfg
@@ -51,7 +55,7 @@ class Filter:
         def stats_stop():
             self.middleware_end_exchange.stop_consuming()
 
-        while True:
+        while self.__running:
             self.middleware_end_exchange.connection.call_later(TIMEOUT, stats_stop)
             self.middleware_end_exchange.start_consuming(stats_callback)       
 
@@ -254,3 +258,20 @@ class Filter:
             return True
         
         return False
+
+    def shutdown(self, signum, frame):
+        logging.info("SIGTERM recibido, cerrando filtro")
+        try:
+            self.__running = False
+            
+            for queue in self.middleware_queue_sender.values():
+                queue.stop_consuming()
+                queue.close()
+            
+            self.middleware_queue_receiver.stop_consuming()
+            self.middleware_queue_receiver.close()
+            self.middleware_end_exchange.stop_consuming()
+            self.middleware_end_exchange.close()
+            logging.info(f"Filtro {self.filter_type} cerrado")
+        except Exception as e:
+            logging.error(f"Error cerrando filtro: {e}")

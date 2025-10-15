@@ -8,7 +8,9 @@ middleware/__pycache__/
 .results/
 .vscode/
 .venv/
-docker-compose.yaml
 __pycache__/
 logs.txt
 .idea/
+
+docker-compose.yaml
+docker-compose-*.yaml

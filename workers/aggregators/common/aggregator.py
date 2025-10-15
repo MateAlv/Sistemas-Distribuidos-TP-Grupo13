@@ -11,12 +11,15 @@ from middleware.middleware_interface import MessageMiddlewareQueue, MessageMiddl
 from .aggregator_stats_messages import AggregatorStatsMessage, AggregatorStatsEndMessage
 from collections import defaultdict
 import datetime
+import sys
 
 TIMEOUT = 3
 
 class Aggregator:
     def __init__(self, agg_type: str, agg_id: int = 1):
         logging.getLogger('pika').setLevel(logging.CRITICAL)
+        
+        self._running = True
         
         self.aggregator_type = agg_type
         self.aggregator_id = agg_id
@@ -51,6 +54,25 @@ class Aggregator:
         else:
             raise ValueError(f"Tipo de agregador inválido: {self.aggregator_type}")
 
+    def shutdown(self, signum, frame):
+        logging.info(f"action: shutdown_signal_received | type:{self.aggregator_type} | agg_id:{self.aggregator_id}")
+        # Enviar stats finales a otros aggregators - Tolerancia a fallos
+        try:
+            self._running = False  # Stop the main loop
+            # Cerrar conexiones de middleware
+            self.middleware_queue_receiver.stop_consuming()
+            self.middleware_queue_receiver.close()
+            for sender in self.middleware_queue_sender.values():
+                sender.stop_consuming()
+                sender.close()
+                
+            self.middleware_stats_exchange.stop_consuming()
+            self.middleware_stats_exchange.close()
+            
+            logging.info(f"action: shutdown_completed | type:{self.aggregator_type} | agg_id:{self.aggregator_id}")
+        except Exception as e:
+            logging.error(f"action: shutdown_error | type:{self.aggregator_type} | agg_id:{self.aggregator_id} | error:{e}")
+    
     def run(self):
         logging.info(f"Agregador iniciado. Tipo: {self.aggregator_type}, ID: {self.aggregator_id}")
         results = []
@@ -63,7 +85,7 @@ class Aggregator:
         def stats_stop():
             self.middleware_stats_exchange.stop_consuming()
 
-        while True:
+        while self._running:
             # Escuchar stats de otros aggregators
             self.middleware_stats_exchange.connection.call_later(TIMEOUT, stats_stop)
             self.middleware_stats_exchange.start_consuming(stats_callback)

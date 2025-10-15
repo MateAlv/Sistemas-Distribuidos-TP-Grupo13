@@ -68,18 +68,12 @@ def main():
 
     client = Client(client_config, cfg["data_dir"])
 
-    def shutdown_handler(signum, frame):
-        logging.info("SIGTERM recibido, cerrando cliente")
-        sys.exit(0)
-
-    signal.signal(signal.SIGTERM, shutdown_handler)
+    signal.signal(signal.SIGTERM, client._begin_shutdown)
 
     try:
         client.start_client_loop()
     except Exception as e:
         logging.critical("Client loop failed: %s", e)
-        sys.exit(1)
-
 
 if __name__ == "__main__":
     main()

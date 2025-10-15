@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import os
+import signal
 import logging
 import argparse
 from configparser import ConfigParser
@@ -59,6 +60,8 @@ def main():
     
     aggregator = Aggregator(agg_type, agg_id)
 
+    signal.signal(signal.SIGTERM, aggregator.shutdown)
+    
     aggregator.run()
 
 

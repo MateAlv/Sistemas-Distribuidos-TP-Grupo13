@@ -13,6 +13,7 @@ from middleware.middleware_interface import MessageMiddlewareQueue, MessageMiddl
 from collections import defaultdict
 import datetime
 import heapq
+import sys
 
 TIMEOUT = 3
 
@@ -38,9 +39,12 @@ class Maximizer:
                 # Envía END message al joiner cuando termine
                 self.middleware_exchange_sender = MessageMiddlewareExchange("rabbitmq", "end_exchange_maximizer_PRODUCTS", [""], exchange_type="fanout")
                 self.expected_partial_maximizers = 3  # Sabemos que son 3: rango 1, 4, 7
+                self.middleware_exchange_receiver = None  # No necesita escuchar END de nadie
             else:
                 # Maximizers parciales - envían al absolute max
                 self.data_sender = MessageMiddlewareQueue("rabbitmq", "to_absolute_max")
+                self.middleware_exchange_sender = None  # No envía END directamente al joiner
+                
                 if self.maximizer_range == "1":
                     self.data_receiver = MessageMiddlewareQueue("rabbitmq", "to_max_1_3")
                 elif self.maximizer_range == "4":
@@ -65,9 +69,12 @@ class Maximizer:
                 self.expected_partial_top3 = 3  # Sabemos que son 3: rango 1, 4, 7
                 self.partial_top3_finished = 0  # Para contar cuántos parciales terminaron
                 self.received_ranges = set()  # Para trackear qué rangos han enviado datos
+                self.middleware_exchange_receiver = None  # No necesita escuchar END de nadie
             else:
                 # TOP3 parciales - envían al absoluto
                 self.data_sender = MessageMiddlewareQueue("rabbitmq", "to_top3_absolute")
+                self.middleware_exchange_sender = None  # No envía END directamente al joiner
+                self.middleware_exchange_receiver = None  # No necesita escuchar END de nadie
                 
                 # Configurar receiver basado en el rango
                 if self.maximizer_range == "1":
@@ -111,6 +118,9 @@ class Maximizer:
     def process_client_end(self):
         """Procesa el final de un cliente y envía resultados"""
         logging.info(f"action: end_received_processing_final | type:{self.maximizer_type} | range:{self.maximizer_range}")
+        
+        # Mark as processed to avoid duplicate END processing
+        self.end_received = True
 
         if self.maximizer_type == "MAX":
             if self.is_absolute_max():
@@ -195,6 +205,12 @@ class Maximizer:
                     if data.startswith(b"END;"):
                         # Handle END message differently for absolute vs partial maximizers
                         if self.maximizer_type == "TOP3" and self.is_absolute_top3():
+                            # Ignore END messages if we already processed this client
+                            if self.end_received:
+                                logging.debug(f"action: ignoring_end_after_reset | partial_count:{self.partial_top3_finished}/{self.expected_partial_top3}")
+                                results.remove(data)
+                                continue
+                                
                             # For absolute TOP3: count END messages from partial maximizers
                             self.partial_top3_finished += 1
                             logging.info(f"action: end_received_from_partial | partial_count:{self.partial_top3_finished}/{self.expected_partial_top3}")
@@ -264,6 +280,25 @@ class Maximizer:
                     
                 results.remove(data)
     
+    def shutdown(self, signum, frame):
+        logging.info(f"SIGTERM recibida para el maximizer {self.maximizer_type} rango {self.maximizer_range}: apagando maximizer")
+        try:
+            if self.data_receiver:
+                self.data_receiver.stop_consuming()
+                self.data_receiver.close()
+            if self.data_sender:
+                self.data_sender.stop_consuming()
+                self.data_sender.close()
+            if self.middleware_exchange_sender:
+                self.middleware_exchange_sender.stop_consuming()
+                self.middleware_exchange_sender.close()
+            if self.middleware_exchange_receiver:
+                self.middleware_exchange_receiver.stop_consuming()
+                self.middleware_exchange_receiver.close()
+            logging.info(f"Maximizer {self.maximizer_type} rango {self.maximizer_range} apagado correctamente.")
+        except Exception as e:
+            logging.error(f"Error al apagar el maximizer {self.maximizer_type} rango {self.maximizer_range}: {e}")
+            
 
     def update_max(self, rows: list[TableProcessRow]) -> bool:
         """
@@ -320,8 +355,7 @@ class Maximizer:
                     # Si el nuevo count es mayor que el mínimo en el heap
                     if purchase_count > self.top3_by_store[store_id][0][0]:
                         heapq.heapreplace(self.top3_by_store[store_id], (purchase_count, user_id))
-                
-                logging.debug(f"action: update_top3 | store_id:{store_id} | user_id:{user_id} | count:{purchase_count}")
+                        logging.debug(f"action: update_top3 | store_id:{store_id} | user_id:{user_id} | count:{purchase_count}")
 
     def apply(self, chunk) -> bool:
         """
@@ -344,23 +378,36 @@ class Maximizer:
             if self.is_absolute_top3():
                 # El absolute TOP3 solo acumula datos, no los procesa
                 # Los datos ya vienen procesados de los maximizers parciales
+                logging.debug(f"action: processing_absolute_top3_chunk | rows_count:{len(chunk.rows)} | current_stores_before:{len(self.top3_by_store)} | stores_before:{list(self.top3_by_store.keys())}")
+                
                 for row in chunk.rows:
                     if isinstance(row, PurchasesPerUserStoreRow):
                         store_id = int(row.store_id)
                         user_id = int(row.user_id)
                         purchase_count = int(row.purchases_made)
                         
+                        logging.debug(f"action: processing_absolute_row | store_id:{store_id} | user_id:{user_id} | purchase_count:{purchase_count} | heap_size_before:{len(self.top3_by_store[store_id])}")
+                        
                         # Acumular directamente en top3_by_store
                         if len(self.top3_by_store[store_id]) < 3:
                             heapq.heappush(self.top3_by_store[store_id], (purchase_count, user_id))
+                            logging.debug(f"action: pushed_to_heap | store_id:{store_id} | user_id:{user_id} | heap_size_after:{len(self.top3_by_store[store_id])}")
                         else:
                             # Si el nuevo count es mayor que el mínimo en el heap
                             if purchase_count > self.top3_by_store[store_id][0][0]:
+                                old_min = self.top3_by_store[store_id][0]
                                 heapq.heapreplace(self.top3_by_store[store_id], (purchase_count, user_id))
+                                logging.debug(f"action: replaced_in_heap | store_id:{store_id} | user_id:{user_id} | old_min:{old_min}")
+                            else:
+                                logging.debug(f"action: skipped_lower_count | store_id:{store_id} | user_id:{user_id} | count:{purchase_count} | min_heap:{self.top3_by_store[store_id][0][0]}")
                         
                         logging.debug(f"action: absolute_top3_accumulate | store_id:{store_id} | user_id:{user_id} | count:{purchase_count}")
                 
-                logging.info(f"action: absolute_top3_result | type:{self.maximizer_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()} | stores_processed:{len(self.top3_by_store)}")
+                logging.info(f"action: absolute_top3_result | type:{self.maximizer_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()} | stores_processed:{len(self.top3_by_store)} | stores_after:{list(self.top3_by_store.keys())}")
+                
+                # Log de estado completo
+                for store_id, heap in self.top3_by_store.items():
+                    logging.debug(f"action: store_heap_state | store_id:{store_id} | heap:{list(heap)}")
             else:
                 # Los maximizers parciales usan la lógica normal
                 self.update_top3(chunk.rows)
@@ -459,7 +506,11 @@ class Maximizer:
         Publica los resultados finales del TOP3 absoluto.
         Los maximizers parciales ya enviaron su TOP3 calculado, solo necesitamos reenviarlos.
         """
-        logging.info(f"action: forwarding_top3_results | stores_processed:{len(self.top3_by_store)}")
+        logging.info(f"action: forwarding_top3_results | stores_processed:{len(self.top3_by_store)} | stores_list:{list(self.top3_by_store.keys())}")
+        
+        # Log detailed state before processing
+        for store_id, heap in self.top3_by_store.items():
+            logging.debug(f"action: store_heap_before_forward | store_id:{store_id} | heap_content:{list(heap)} | heap_size:{len(heap)}")
         
         accumulated_results = []
         marker_date = datetime.date(2024, 1, 1)
@@ -467,6 +518,8 @@ class Maximizer:
         # Los datos ya vienen procesados de los maximizers parciales
         # Solo necesitamos reenviarlos al joiner
         for store_id, top3_heap in self.top3_by_store.items():
+            logging.debug(f"action: processing_store_for_forward | store_id:{store_id} | heap_size:{len(top3_heap)}")
+            
             # Los datos ya están como TOP3 por store
             for purchase_count, user_id in top3_heap:
                 row = PurchasesPerUserStoreRow(
@@ -490,13 +543,6 @@ class Maximizer:
             logging.info(f"action: publish_absolute_top3_results | result: success | stores_processed:{len(self.top3_by_store)} | total_results_forwarded:{len(accumulated_results)}")
         else:
             logging.warning(f"action: no_absolute_top3_results | client_id:{self.client_id or 1}")
-
-    def publish_results(self, chunk):
-        """
-        DEPRECATED - Solo para compatibilidad. Los maximizers parciales NO deben usar esto.
-        """
-        logging.warning(f"action: deprecated_publish_results_called | type:{self.maximizer_type} | range:{self.maximizer_range}")
-        return
 
     def publish_absolute_max_results(self):
         """
@@ -568,4 +614,3 @@ class Maximizer:
             logging.info(f"action: publish_absolute_max_results | result: success | client_id:{self.client_id or 1} | months_selling:{len(monthly_max_selling)} | months_profit:{len(monthly_max_profit)} | total_rows:{len(accumulated_results)}")
         else:
             logging.warning(f"action: no_absolute_max_results | client_id:{self.client_id or 1}")
-

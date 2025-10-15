@@ -126,6 +126,8 @@ class Server:
         number_of_chunks_per_file = {}
         middleware_queue_senders = {}
         middleware_queue_senders["to_filter_1"] = MessageMiddlewareQueue("rabbitmq", "to_filter_1")
+        middleware_queue_senders["to_join_stores_tpv"] = MessageMiddlewareQueue("rabbitmq", "stores_for_tpv_joiner")
+        middleware_queue_senders["to_join_stores_top3"] = MessageMiddlewareQueue("rabbitmq", "stores_for_top3_joiner")
         middleware_queue_senders["to_join_stores"] = MessageMiddlewareQueue("rabbitmq", "to_join_stores")
         middleware_queue_senders["to_join_users"] = MessageMiddlewareQueue("rabbitmq", "to_join_users")
         middleware_queue_senders["to_join_menu_items"] = MessageMiddlewareQueue("rabbitmq", "to_join_menu_items")
@@ -141,7 +143,7 @@ class Server:
 
             # -------- Recepción de archivos --------
             files_received = 0
-            while True:
+            while self._running:
                 header = self._recv_header_id(sock)
                 if header is None:
                     break
@@ -166,7 +168,8 @@ class Server:
                         if table_type == TableType.TRANSACTIONS or table_type == TableType.TRANSACTION_ITEMS:
                             middleware_queue_senders["to_filter_1"].send(message)
                         elif table_type == TableType.STORES:
-                            middleware_queue_senders["to_join_stores"].send(message)
+                            middleware_queue_senders["to_join_stores_tpv"].send(message)
+                            middleware_queue_senders["to_join_stores_top3"].send(message)
                             middleware_queue_senders["to_top3"].send(message)
                         elif table_type == TableType.USERS:
                             middleware_queue_senders["to_join_users"].send(message)
@@ -259,9 +262,13 @@ class Server:
             middleware_queue_senders["to_filter_1"].send(process_chunk.serialize())
 
         elif table_type == TableType.STORES:
-            logging.debug("action: send_to_join_stores | peer:%s | cli_id:%s | file:%s | table:%s",
+            logging.debug("action: send_to_join_stores_tpv | peer:%s | cli_id:%s | file:%s | table:%s",
                          peer, client_id, chunk.path(), table_type)
-            middleware_queue_senders["to_join_stores"].send(process_chunk.serialize())
+            middleware_queue_senders["to_join_stores_tpv"].send(process_chunk.serialize())
+            
+            logging.debug("action: send_to_join_stores_top3 | peer:%s | cli_id:%s | file:%s | table:%s",
+                         peer, client_id, chunk.path(), table_type)
+            middleware_queue_senders["to_join_stores_top3"].send(process_chunk.serialize())
             
             logging.debug("action: send_to_top3 | peer:%s | cli_id:%s | file:%s | table:%s",
                          peer, client_id, chunk.path(), table_type)
@@ -320,6 +327,10 @@ class Server:
         
         maximum_chunks = self._max_number_of_chunks_in_batch()
         all_data_received = False
+        
+        # Solo esperar queries que realmente pueden generar resultados
+        # Para q1: solo QUERY_1
+        # Para configuraciones más complejas podrían ser múltiples queries
         all_data_received_per_query = {
             ResultTableType.QUERY_1: True,  
             ResultTableType.QUERY_2_1: False,
@@ -330,24 +341,15 @@ class Server:
         results_for_client = []
         number_of_chunks_received = {
             ResultTableType.QUERY_1: 0,
-            ResultTableType.QUERY_2_1: 0,
-            ResultTableType.QUERY_2_2: 0,
-            ResultTableType.QUERY_3: 0,
-            ResultTableType.QUERY_4: 0,
+            # Las demás queries se añadirán dinámicamente
         }
         chunks_received = {
             ResultTableType.QUERY_1: [],
-            ResultTableType.QUERY_2_1: [],
-            ResultTableType.QUERY_2_2: [],
-            ResultTableType.QUERY_3: [],
-            ResultTableType.QUERY_4: [],
+            # Las demás queries se añadirán dinámicamente
         }
         expected_total_chunks = {
             ResultTableType.QUERY_1: None,
-            ResultTableType.QUERY_2_1: None,
-            ResultTableType.QUERY_2_2: None,
-            ResultTableType.QUERY_3: None,
-            ResultTableType.QUERY_4: None,
+            # Las demás queries se añadirán dinámicamente
         }
 
         def callback(msg):
@@ -367,6 +369,17 @@ class Server:
                         query_end_message = MessageQueryEnd.decode(msg)
                         query = query_end_message.query()
                         total_chunks = query_end_message.total_chunks()
+                        
+                        # Asegurar que la query está inicializada
+                        if query not in all_data_received_per_query:
+                            all_data_received_per_query[query] = False
+                        if query not in number_of_chunks_received:
+                            number_of_chunks_received[query] = 0
+                        if query not in chunks_received:
+                            chunks_received[query] = []
+                        if query not in expected_total_chunks:
+                            expected_total_chunks[query] = None
+                            
                         expected_total_chunks[query] = total_chunks
 
                         if number_of_chunks_received[query] == total_chunks:
@@ -382,6 +395,17 @@ class Server:
                     else:
                         result_chunk = ResultBatchReader.from_bytes(msg)
                         query = result_chunk.query_type()
+                        
+                        # Asegurar que la query está inicializada
+                        if query not in all_data_received_per_query:
+                            all_data_received_per_query[query] = False
+                        if query not in number_of_chunks_received:
+                            number_of_chunks_received[query] = 0
+                        if query not in chunks_received:
+                            chunks_received[query] = []
+                        if query not in expected_total_chunks:
+                            expected_total_chunks[query] = None
+                            
                         number_of_chunks_received[query] += 1
                         chunks_received[query].append(result_chunk)
                         logging.info(f"action: result_receiver | client_id:{client_id} | rows:{len(result_chunk.rows)} | query:{query.name}")
@@ -437,16 +461,29 @@ class Server:
     def _begin_shutdown(self, signum, frame) -> None:
         logging.info("action: sigterm_received | result: success")
         self._running = False
-        if self._server_socket:
-            try:
+        try:
+            if self._server_socket:
                 fd = self._server_socket.fileno()
-            except Exception:
-                fd = "unknown"
-            try:
                 self._server_socket.close()
                 logging.debug("action: fd_close | result: success | kind: listen_socket | fd:%s", fd)
-            except Exception as e:
-                logging.warning("action: listen_close_fail | error:%r", e)
+                
+            # Esperar a que terminen los threads de cliente
+            with self.clients_lock:
+                active_threads = list(self.client_threads.values())
+            
+            for thread in active_threads:
+                if thread.is_alive():
+                    thread.join(timeout=5)
+            
+            # Esperar threads generales
+            alive = [t for t in self._threads if t.is_alive()]
+            for t in alive:
+                t.join(timeout=30)
+                
+            logging.info("action: server_shutdown | result: success")
+        except Exception as e:
+            logging.warning("error: shutdown | error:%r", e)
+        
 
     def __graceful_shutdown(self) -> None:
         logging.info("action: shutdown | result: in_progress")

@@ -7,7 +7,7 @@ logging.getLogger("pika").setLevel(logging.CRITICAL)
 
 TIMEOUT = 0.1
 RETRY_DELAY = 0.1
-
+HEARTBEAT = 3000
 
 class MessageMiddlewareMessageError(Exception):
     pass
@@ -63,7 +63,7 @@ class MessageMiddlewareExchange(MessageMiddleware):
         for attempt in range(3):
             try:
                 self.connection = pika.BlockingConnection(
-                    pika.ConnectionParameters(host=self.host, heartbeat=300, blocked_connection_timeout=30)
+                    pika.ConnectionParameters(host=self.host, heartbeat=HEARTBEAT, blocked_connection_timeout=30)
                 )
                 self.channel = self.connection.channel()
                 self.channel.exchange_declare(exchange=self.exchange_name, exchange_type=self.exchange_type, durable=True)
@@ -153,7 +153,7 @@ class MessageMiddlewareQueue(MessageMiddleware):
         for attempt in range(3):
             try:
                 self.connection = pika.BlockingConnection(
-                    pika.ConnectionParameters(host=self.host, heartbeat=300, blocked_connection_timeout=30)
+                    pika.ConnectionParameters(host=self.host, heartbeat=HEARTBEAT, blocked_connection_timeout=30)
                 )
                 self.channel = self.connection.channel()
                 self.channel.queue_declare(queue=self.queue_name, durable=True)

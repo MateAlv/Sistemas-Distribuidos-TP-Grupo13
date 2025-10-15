@@ -2,6 +2,7 @@
 
 from common.joiner import StoresTop3Joiner
 import os
+import signal
 import logging
 import argparse
 from configparser import ConfigParser
@@ -71,6 +72,8 @@ def main():
         logging.info("Iniciando Joiner de Users...")
         joiner = UsersJoiner(joiner_type)
 
+    signal.signal(signal.SIGTERM, joiner.shutdown)
+        
     joiner.run()
 
 
