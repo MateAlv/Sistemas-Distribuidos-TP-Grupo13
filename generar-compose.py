@@ -18,6 +18,7 @@ def read_config(path: str):
         "output_file": "docker-compose.yaml",
         "data_path": "./.data",
         "logging_level": "INFO",
+        "output_path": "./.results",
     }
     nodes = {}
 
@@ -31,10 +32,10 @@ def read_config(path: str):
             key, value = key.strip(), value.strip()
             if key.startswith("#"):
                 continue
-            if key.lower() in ("compose_name", "output_file", "data_path", "logging_level"):
+            if key.lower() in ("compose_name", "output_file", "data_path", "logging_level", "output_path"):
                 meta[key.lower()] = value
             else:
-                nodes[key] = int(value)
+                nodes[key.upper()] = int(value)
                 
     yaml.add_representer(FlowList, flow_list_representer)
     
@@ -266,6 +267,7 @@ def is_client(nodo: str):
 
 def define_client(meta: dict, compose: dict, nodo: str, index: int):
     service_name = f"{nodo.lower()}-{index}"
+    output_path = meta.get("output_path", "./.results")
     compose["services"][service_name] = {
         "build": {
             "context": ".",             # project root
@@ -282,7 +284,7 @@ def define_client(meta: dict, compose: dict, nodo: str, index: int):
         ],
         "volumes": [
             f".{meta['data_path']}:/data:ro",
-            f"./.results/client-{index}:/output",
+            f"{output_path.rstrip('/')}/client-{index}:/output",
             "./client/config.ini:/config.ini:ro",
             "./utils:/client/utils:ro",
             "./middleware:/client/middleware:ro",
@@ -341,7 +343,7 @@ def generate_compose(meta: dict, nodes: dict, services: dict = None):
         raise ValueError("Debe haber al menos un cliente.")
     define_server(compose, client_amount) 
     define_network(compose)
-    return compose
+    return compose, client_amount
 
 
 def main():
@@ -354,12 +356,7 @@ def main():
         required=True,       # obligatorio
         help="Archivo de configuración a usar"
     )
-     # Definimos el argumento --run
-    parser.add_argument(
-        "--run",          # nombre del parámetro
-        required=False,       # NO obligatorio
-        help="Ejecutar el docker-compose generado y los escala"
-    )
+
     args = parser.parse_args()
 
     meta, nodes = read_config(args.config)
@@ -368,7 +365,7 @@ def main():
 
     services = {}
 
-    compose = generate_compose(meta, nodes, services)
+    compose, client_count = generate_compose(meta, nodes, services)
 
 
     with open(output_file, "w") as f:
@@ -376,22 +373,17 @@ def main():
         
     print(f"Archivo '{output_file}' generado correctamente.")
         
-    print(f"Datos de entrada para los clientes en: {meta.get('data_path', './.data')}")
+    print(f"    Datos de entrada para los clientes en: {meta.get('data_path', './.data')}")
     
-    print(f"Directorio de salida para los resultados en: {meta.get('output_path', './.results')}")
-    
-    
+    print(f"    Directorio de salida para los resultados en: {meta.get('output_path', './.results')}")
+
+    print()
     print("Servicios definidos y sus cantidades:")
-    
-    services_scale = ""
+    print(f"\n - Clientes configurados: {client_count}")
+
     for service, cantidad in services.items():
         print(f"  - {service}: {cantidad}")
-        if cantidad > 1:
-            services_scale += f" --scale {service}={cantidad}"
 
-    if not args.run:
-        return
-    os.system(f"docker compose -f {output_file} up -d --build {services_scale}")
 
 if __name__ == "__main__":
     main()

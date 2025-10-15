@@ -2,6 +2,21 @@ SHELL := /bin/bash
 PWD := $(shell pwd)
 
 DOCKER ?= docker-compose.yaml
+QUERY ?= all
+
+ifeq ($(QUERY),all)
+CONFIG := q-all-config.ini
+else ifeq ($(QUERY),1)
+CONFIG := q1-config.ini
+else ifeq ($(QUERY),2)
+CONFIG := q2-config.ini
+else ifeq ($(QUERY),3)
+CONFIG := q3-config.ini
+else ifeq ($(QUERY),4)
+CONFIG := q4-config.ini
+else
+$(error Invalid QUERY value '$(QUERY)'. Use 'all', '1', '2', '3', or '4'.)
+endif
 
 default: docker-image
 
@@ -18,10 +33,21 @@ docker-image:
 
 .PHONY: docker-image
 
+build:
+	# Generate docker-compose file based on the selected query configuration
+	python3 generar-compose.py --config=${CONFIG}
+
 up:
 	make clean-results
+	python3 generar-compose.py --config=${CONFIG}
 	docker compose -f ${DOCKER} up -d --build
 .PHONY: docker-compose-up
+
+test:
+	# Run the docker-compose setup
+	make clean-results
+	docker compose -f ${DOCKER} up --build
+.PHONY: test
 
 down:
 	docker compose -f ${DOCKER} stop -t 1
@@ -41,32 +67,9 @@ logs:
 
 clean-results:
 	rm -rf .results/client-1/*
+	rm -rf .results/client-2/*
+	rm -rf .results/client-3/*
 .PHONY: clean-results
-
-test:
-	make clean-results
-	docker compose -f ${DOCKER} up --build
-.PHONY: test
-
-build-all:
-	python3 generar-compose.py --config=q-all-config.ini
-.PHONY: all
-
-build-q1: 
-	python3 generar-compose.py --config=q1-config.ini
-.PHONY: q1
-
-build-q2: 
-	python3 generar-compose.py --config=q2-config.ini
-.PHONY: q2
-
-build-q3: 
-	python3 generar-compose.py --config=q3-config.ini
-.PHONY: q3
-
-build-q4: 
-	python3 generar-compose.py --config=q4-config.ini
-.PHONY: q4
 
 images-clean:
 	# Stop and remove all containers first
