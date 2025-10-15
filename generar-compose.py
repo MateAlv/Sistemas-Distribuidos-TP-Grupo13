@@ -18,6 +18,7 @@ def read_config(path: str):
         "output_file": "docker-compose.yaml",
         "data_path": "./.data",
         "logging_level": "INFO",
+        "output_path": "./.results",
     }
     nodes = {}
 
@@ -31,10 +32,10 @@ def read_config(path: str):
             key, value = key.strip(), value.strip()
             if key.startswith("#"):
                 continue
-            if key.lower() in ("compose_name", "output_file", "data_path", "logging_level"):
+            if key.lower() in ("compose_name", "output_file", "data_path", "logging_level", "output_path"):
                 meta[key.lower()] = value
             else:
-                nodes[key] = int(value)
+                nodes[key.upper()] = int(value)
                 
     yaml.add_representer(FlowList, flow_list_representer)
     
@@ -266,6 +267,7 @@ def is_client(nodo: str):
 
 def define_client(meta: dict, compose: dict, nodo: str, index: int):
     service_name = f"{nodo.lower()}-{index}"
+    output_path = meta.get("output_path", "./.results")
     compose["services"][service_name] = {
         "build": {
             "context": ".",             # project root
@@ -282,7 +284,7 @@ def define_client(meta: dict, compose: dict, nodo: str, index: int):
         ],
         "volumes": [
             f".{meta['data_path']}:/data:ro",
-            f"./.results/client-{index}:/output",
+            f"{output_path.rstrip('/')}/client-{index}:/output",
             "./client/config.ini:/config.ini:ro",
             "./utils:/client/utils:ro",
             "./middleware:/client/middleware:ro",
