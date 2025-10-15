@@ -28,7 +28,7 @@ def load_rows(path):
 
 def compare_sets(base_set, result_set):
     base_set = set(base_set)
-    result_set = set(base_set)
+    result_set = set(result_set)
 
     missing_in_results = base_set - result_set
     extra_in_results = result_set - base_set
