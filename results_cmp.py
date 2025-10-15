@@ -26,15 +26,14 @@ def load_rows(path):
     return rows
 
 
-def compare_rows(base_set, result_set):
+def compare_sets(base_set, result_set):
+    base_set = set(base_set)
+    result_set = set(base_set)
 
-    for row in result_set:
-        if row in base_set:
-            base_set.remove(row)
-            result_set.remove(row)
-    
-    missing_in_base = base_set
-    extra_in_results = result_set
+    missing_in_results = base_set - result_set
+    extra_in_results = result_set - base_set
+
+    return sorted(missing_in_results), sorted(extra_in_results)
 
     return missing_in_base, extra_in_results
 
@@ -87,10 +86,10 @@ def results_compare(base_dir, result_dir, verbose=False):
         base_set = load_rows(base_src)
         result_set = load_rows(result_src)
 
-        missing, extra = compare_rows(base_set, result_set)
+        missing, extra = compare_sets(base_set, result_set)
 
         if not missing and not extra:
-            print(f"✅ {file_name}: resultados iguales - {len(result_rows)}/{len(base_rows)} filas)\n")
+            print(f"✅ {file_name}: resultados iguales - {len(base_set)}/{len(result_set)} filas\n")
         else:
             print(f"❌ {file_name}: diferencias encontradas")
             if missing:
