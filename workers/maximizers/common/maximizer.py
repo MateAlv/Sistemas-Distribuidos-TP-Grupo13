@@ -108,8 +108,8 @@ class Maximizer:
             logging.debug(f"action: end_already_processed | type:{self.maximizer_type} | range:{self.maximizer_range} | client_id:{client_id}")
             return
 
-        expected_table = self._expected_table_type()
-        if table_type != expected_table:
+        if not self._is_valid_table_type(table_type, for_end=True):
+            expected_table = self._expected_table_type()
             logging.debug(f"action: ignoring_end_wrong_table | expected:{expected_table} | received:{table_type} | client_id:{client_id}")
             return
 
@@ -180,7 +180,8 @@ class Maximizer:
         table_type = end_message.table_type()
         expected_table = self._expected_table_type()
 
-        if table_type != expected_table:
+        if not self._is_valid_table_type(table_type, for_end=True):
+            expected_table = self._expected_table_type()
             logging.debug(f"action: ignoring_end_wrong_table | expected:{expected_table} | received:{table_type} | client_id:{client_id}")
             return
 
@@ -224,7 +225,7 @@ class Maximizer:
         table_type = chunk.table_type()
         expected_table = self._expected_table_type()
 
-        if table_type != expected_table:
+        if not self._is_valid_table_type(table_type, for_end=False):
             logging.debug(f"action: ignoring_chunk_wrong_table | expected:{expected_table} | received:{table_type} | client_id:{client_id}")
             return
 
@@ -271,6 +272,18 @@ class Maximizer:
         if self.maximizer_type == "TOP3":
             return TableType.PURCHASES_PER_USER_STORE
         raise ValueError(f"Tipo de maximizer inválido: {self.maximizer_type}")
+
+    def _is_valid_table_type(self, table_type: TableType, *, for_end: bool) -> bool:
+        expected = self._expected_table_type()
+        if table_type == expected:
+            return True
+
+        # Los maximizers TOP3 parciales reciben END con TableType.TRANSACTIONS desde el aggregator
+        if self.maximizer_type == "TOP3" and not self.is_absolute_top3():
+            if for_end and table_type == TableType.TRANSACTIONS:
+                return True
+
+        return False
 
     def _extract_range_from_row(self, row) -> Optional[str]:
         if hasattr(row, "transaction_id") and row.transaction_id:
