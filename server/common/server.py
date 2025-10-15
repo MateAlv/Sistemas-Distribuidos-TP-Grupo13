@@ -318,7 +318,11 @@ class Server:
         # Para q1: solo QUERY_1
         # Para configuraciones más complejas podrían ser múltiples queries
         all_data_received_per_query = {
-            ResultTableType.QUERY_1: False,  
+            ResultTableType.QUERY_1: False,
+            ResultTableType.QUERY_2_1: False,
+            ResultTableType.QUERY_2_2: False,
+            ResultTableType.QUERY_3: False,
+            ResultTableType.QUERY_4: False,
             # Las demás queries se añadirán dinámicamente cuando lleguen resultados
         }
         results_for_client = []
