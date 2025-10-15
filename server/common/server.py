@@ -308,22 +308,33 @@ class Server:
     def _listen_and_send_results(self, sock: socket.socket, client_id: int, peer: str) -> None:
         """
         Escucha resultados de la cola to_merge_data para este cliente específico.
-        Envía resultados conforme van llegando y detecta fin automáticamente.
+        Envía resultados en lotes y detecta fin automáticamente.
         """
         
         maximum_chunks = self._max_number_of_chunks_in_batch()
+        all_data_received = False
         
-        # Tracking de queries activas - se llenan dinámicamente
-        active_queries = set()  # Queries que están enviando datos
-        completed_queries = set()  # Queries que ya terminaron completamente
-        
+        # Solo esperar queries que realmente pueden generar resultados
+        # Para q1: solo QUERY_1
+        # Para configuraciones más complejas podrían ser múltiples queries
+        all_data_received_per_query = {
+            ResultTableType.QUERY_1: False,  
+            # Las demás queries se añadirán dinámicamente cuando lleguen resultados
+        }
         results_for_client = []
         middleware_queue = MessageMiddlewareQueue("rabbitmq", f"to_merge_data_{client_id}")
-        
-        # Contadores por query
-        number_of_chunks_received = {}
-        chunks_received = {}
-        expected_total_chunks = {}
+        number_of_chunks_received = {
+            ResultTableType.QUERY_1: 0,
+            # Las demás queries se añadirán dinámicamente
+        }
+        chunks_received = {
+            ResultTableType.QUERY_1: [],
+            # Las demás queries se añadirán dinámicamente
+        }
+        expected_total_chunks = {
+            ResultTableType.QUERY_1: None,
+            # Las demás queries se añadirán dinámicamente
+        }
 
         def callback(msg):
             results_for_client.append(msg)
@@ -331,9 +342,7 @@ class Server:
         def stop():
             middleware_queue.stop_consuming()
 
-        logging.info("action: listening_for_results | client_id:%s", client_id)
-
-        while True:
+        while not all_data_received:
             middleware_queue.connection.call_later(TIMEOUT, stop)
             middleware_queue.start_consuming(callback)
 
@@ -344,83 +353,64 @@ class Server:
                         query = query_end_message.query()
                         total_chunks = query_end_message.total_chunks()
                         
-                        logging.info("action: query_end_received | client_id:%s | query:%s | total_chunks:%d", 
-                                   client_id, query.name, total_chunks)
-                        
-                        # Inicializar si no existe
+                        # Asegurar que la query está inicializada
+                        if query not in all_data_received_per_query:
+                            all_data_received_per_query[query] = False
+                        if query not in number_of_chunks_received:
+                            number_of_chunks_received[query] = 0
+                        if query not in chunks_received:
+                            chunks_received[query] = []
                         if query not in expected_total_chunks:
-                            expected_total_chunks[query] = total_chunks
-                            number_of_chunks_received[query] = number_of_chunks_received.get(query, 0)
-                            chunks_received[query] = chunks_received.get(query, [])
-                            active_queries.add(query)
-                        
+                            expected_total_chunks[query] = None
+                            
                         expected_total_chunks[query] = total_chunks
-                        
-                        # Verificar si ya terminamos con esta query
-                        if number_of_chunks_received[query] >= total_chunks:
-                            # Enviar chunks restantes si los hay
+
+                        if number_of_chunks_received[query] == total_chunks:
+                            all_data_received_per_query[query] = True
+                            logging.info(
+                                "action: all_data_received_for_query | client_id:%s | query:%s",
+                                client_id,
+                                query.name,
+                            )
                             if chunks_received[query]:
                                 self._send_batch_results_to_client(sock, client_id, chunks_received[query])
                                 chunks_received[query] = []
-                            
-                            completed_queries.add(query)
-                            active_queries.discard(query)
-                            logging.info("action: query_completed | client_id:%s | query:%s", client_id, query.name)
-                            
                     else:
                         result_chunk = ResultBatchReader.from_bytes(msg)
                         query = result_chunk.query_type()
                         
-                        # Inicializar si no existe
+                        # Asegurar que la query está inicializada
+                        if query not in all_data_received_per_query:
+                            all_data_received_per_query[query] = False
                         if query not in number_of_chunks_received:
                             number_of_chunks_received[query] = 0
+                        if query not in chunks_received:
                             chunks_received[query] = []
+                        if query not in expected_total_chunks:
                             expected_total_chunks[query] = None
-                            active_queries.add(query)
                             
                         number_of_chunks_received[query] += 1
                         chunks_received[query].append(result_chunk)
-                        
-                        logging.debug("action: result_chunk_received | client_id:%s | query:%s | chunk:%d", 
-                                    client_id, query.name, number_of_chunks_received[query])
 
-                        # Enviar batch si alcanzamos el límite o si ya sabemos el total y es el último
-                        should_send_batch = False
                         if len(chunks_received[query]) >= maximum_chunks:
-                            should_send_batch = True
-                        elif (expected_total_chunks[query] is not None and 
-                              number_of_chunks_received[query] >= expected_total_chunks[query]):
-                            should_send_batch = True
-                            
-                        if should_send_batch and chunks_received[query]:
                             self._send_batch_results_to_client(sock, client_id, chunks_received[query])
                             chunks_received[query] = []
+                            logging.info(f"action: result_sent | client_id:{client_id} | rows:{len(result_chunk.rows)} | query:{query.name}")
 
-                        # Verificar si esta query está completa
-                        if (expected_total_chunks[query] is not None and 
-                            number_of_chunks_received[query] >= expected_total_chunks[query]):
-                            completed_queries.add(query)
-                            active_queries.discard(query)
-                            logging.info("action: query_completed | client_id:%s | query:%s", client_id, query.name)
+                        if expected_total_chunks[query] is not None and number_of_chunks_received[query] == expected_total_chunks[query]:
+                            all_data_received_per_query[query] = True
+                            logging.info(f"action: all_data_received_for_query | client_id:{client_id} | query:{query.name}")
+                            if chunks_received[query]:
+                                self._send_batch_results_to_client(sock, client_id, chunks_received[query])
+                                chunks_received[query] = []
 
                 except Exception as e:
-                    logging.error("action: error_processing_result | client_id:%s | error:%r", client_id, e)
+                    logging.error("Unexpected error decoding result msg | client_id:%s | error:%r", client_id, e)
                 finally:
                     if msg in results_for_client:
                         results_for_client.remove(msg)
 
-            # Verificar si podemos terminar
-            # Terminamos cuando:
-            # 1. Hay al menos una query activa o completada (hemos recibido algo)
-            # 2. No hay queries activas (todas las que empezaron ya terminaron)
-            if (completed_queries or active_queries) and not active_queries:
-                logging.info("action: all_queries_completed | client_id:%s | completed:%s", 
-                           client_id, [q.name for q in completed_queries])
-                break
-                
-            # Si no hay mensajes y llevamos tiempo sin recibir nada, seguir esperando
-            if not results_for_client and not active_queries and not completed_queries:
-                continue
+            all_data_received = all(all_data_received_per_query.values())
 
         sendall(sock, self.header_id_to_bytes(H_ID_FINISH))
         logging.info("action: results_finished_signal_sent | client_id:%s", client_id)
