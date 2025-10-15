@@ -48,24 +48,24 @@ test:
 	docker compose -f ${DOCKER} up --build
 .PHONY: test
 
-q1: 
+build-all:
+	python3 generar-compose.py --config=q-all-config.ini
+.PHONY: all
+
+build-q1: 
 	python3 generar-compose.py --config=q1-config.ini
-	make test
 .PHONY: q1
 
-q2: 
+build-q2: 
 	python3 generar-compose.py --config=q2-config.ini
-	make test
 .PHONY: q2
 
-q3: 
+build-q3: 
 	python3 generar-compose.py --config=q3-config.ini
-	make test
 .PHONY: q3
 
-q4: 
+build-q4: 
 	python3 generar-compose.py --config=q4-config.ini
-	make test
 .PHONY: q4
 
 images-clean:
