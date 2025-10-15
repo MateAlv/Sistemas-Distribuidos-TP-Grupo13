@@ -327,29 +327,34 @@ class Server:
         
         maximum_chunks = self._max_number_of_chunks_in_batch()
         all_data_received = False
-        
-        # Solo esperar queries que realmente pueden generar resultados
-        # Para q1: solo QUERY_1
-        # Para configuraciones más complejas podrían ser múltiples queries
         all_data_received_per_query = {
-            ResultTableType.QUERY_1: True,  
-            ResultTableType.QUERY_2_1: False,
-            ResultTableType.QUERY_2_2: False,
+            ResultTableType.QUERY_1: False,  
+            ResultTableType.QUERY_2_1: True,
+            ResultTableType.QUERY_2_2: True,
             ResultTableType.QUERY_3: True,
             ResultTableType.QUERY_4: True,
         }
         results_for_client = []
         number_of_chunks_received = {
             ResultTableType.QUERY_1: 0,
-            # Las demás queries se añadirán dinámicamente
+            ResultTableType.QUERY_2_1: 0,
+            ResultTableType.QUERY_2_2: 0,
+            ResultTableType.QUERY_3: 0,
+            ResultTableType.QUERY_4: 0,
         }
         chunks_received = {
             ResultTableType.QUERY_1: [],
-            # Las demás queries se añadirán dinámicamente
+            ResultTableType.QUERY_2_1: [],
+            ResultTableType.QUERY_2_2: [],
+            ResultTableType.QUERY_3: [],
+            ResultTableType.QUERY_4: [],
         }
         expected_total_chunks = {
             ResultTableType.QUERY_1: None,
-            # Las demás queries se añadirán dinámicamente
+            ResultTableType.QUERY_2_1: None,
+            ResultTableType.QUERY_2_2: None,
+            ResultTableType.QUERY_3: None,
+            ResultTableType.QUERY_4: None,
         }
 
         def callback(msg):
@@ -362,24 +367,12 @@ class Server:
             middleware_queue.connection.call_later(TIMEOUT, stop)
             middleware_queue.start_consuming(callback)
 
-            logging.debug("action: cylce_not_all_data_received | client_id:%s",client_id)
             for msg in list(results_for_client):
                 try:
                     if msg.startswith(b"QUERY_END;"):
                         query_end_message = MessageQueryEnd.decode(msg)
                         query = query_end_message.query()
                         total_chunks = query_end_message.total_chunks()
-                        
-                        # Asegurar que la query está inicializada
-                        if query not in all_data_received_per_query:
-                            all_data_received_per_query[query] = False
-                        if query not in number_of_chunks_received:
-                            number_of_chunks_received[query] = 0
-                        if query not in chunks_received:
-                            chunks_received[query] = []
-                        if query not in expected_total_chunks:
-                            expected_total_chunks[query] = None
-                            
                         expected_total_chunks[query] = total_chunks
 
                         if number_of_chunks_received[query] == total_chunks:
@@ -395,17 +388,6 @@ class Server:
                     else:
                         result_chunk = ResultBatchReader.from_bytes(msg)
                         query = result_chunk.query_type()
-                        
-                        # Asegurar que la query está inicializada
-                        if query not in all_data_received_per_query:
-                            all_data_received_per_query[query] = False
-                        if query not in number_of_chunks_received:
-                            number_of_chunks_received[query] = 0
-                        if query not in chunks_received:
-                            chunks_received[query] = []
-                        if query not in expected_total_chunks:
-                            expected_total_chunks[query] = None
-                            
                         number_of_chunks_received[query] += 1
                         chunks_received[query].append(result_chunk)
                         logging.info(f"action: result_receiver | client_id:{client_id} | rows:{len(result_chunk.rows)} | query:{query.name}")
@@ -432,7 +414,6 @@ class Server:
 
         sendall(sock, self.header_id_to_bytes(H_ID_FINISH))
         logging.info("action: results_finished_signal_sent | client_id:%s", client_id)
-        
 
     def _max_number_of_chunks_in_batch(self) -> int:
         with self.clients_lock:
