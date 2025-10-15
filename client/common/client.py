@@ -167,7 +167,7 @@ class Client:
                                         self.output_dir,
                                         f"results_{result_chunk.query_type().name.lower()}.csv"
                                     )
-                        csv_header = self._obtain_csv_header(result_chunk.query_type())
+                        csv_header = result_chunk.query_type().obtain_csv_header()
                         self.query_chunks[result_chunk.query_type()] = self.query_chunks.get(result_chunk.query_type(), 0) + 1
                         
                         self._save_process_chunk_as_csv(result_chunk, output_path, csv_header)
@@ -203,18 +203,6 @@ class Client:
                         
         except Exception as e:
             logging.error("Cliente %s: error esperando resultados: %s", self.id, e)
-    
-    def _obtain_csv_header(self, query_type: ResultTableType) -> str:
-        if query_type == ResultTableType.QUERY_1:
-            return "transaction_id,final_amount\n"
-        elif query_type == ResultTableType.QUERY_2_1:
-            return "year_month_created_at,item_id,item_name,sellings_qty\n"
-        elif query_type == ResultTableType.QUERY_2_2:
-            return "year_month_created_at,item_id,item_name,profit_sum\n"
-        elif query_type == ResultTableType.QUERY_3:
-            return "year_half_created_at,store_id,store_name,tpv\n"
-        elif query_type == ResultTableType.QUERY_4:
-            return "store_id,store_name,user_id,birthdate,purchase_quantity\n"
 
     def _save_process_chunk_as_csv(self, process_chunk, output_path: str, csv_header: str) -> None:
         """
@@ -230,10 +218,8 @@ class Client:
             if not file_exists:
                 f.write(csv_header.encode())
             for row in process_chunk.rows:
-                data = row.serialize()
-                if not data.endswith(b'\n'):
-                    data += b'\n'
-                f.write(data) 
+                data = row.to_csv()
+                f.write(data.encode("utf-8")) # Asegurar UTF-8
     
     def close(self) -> None:
         try:

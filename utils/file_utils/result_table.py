@@ -10,6 +10,9 @@ class TableResultRow:
     def serialize(self) -> bytes:
         raise NotImplementedError
 
+    def to_csv(self) -> str:
+        raise NotImplementedError
+
     @staticmethod
     def deserialize(data: bytes):
         raise NotImplementedError
@@ -25,6 +28,9 @@ class Query1ResultRow(TableResultRow):
 
     def serialize(self) -> bytes:
         return f"{self.transaction_id},{str(self.final_amount)}\n".encode("utf-8")
+
+    def to_csv(self) -> str:
+        return f"{self.transaction_id},{str(self.final_amount)}\n"
 
     @staticmethod
     def deserialize(data: bytes):
@@ -52,6 +58,9 @@ class Query2_1ResultRow(TableResultRow):
 
     def serialize(self) -> bytes:
         return f"{str(self.year_month_created_at)},{self.item_id},{self.item_name},{self.sellings_quantity}\n".encode("utf-8")
+
+    def to_csv(self) -> str:
+        return f"{str(self.year_month_created_at)},{self.item_name},{self.sellings_quantity}\n"
 
     @staticmethod
     def deserialize(data: bytes):
@@ -82,6 +91,9 @@ class Query2_2ResultRow(TableResultRow):
     def serialize(self) -> bytes:
         return f"{str(self.year_month_created_at)},{self.item_id},{self.item_name},{self.profit_sum}\n".encode("utf-8")
 
+    def to_csv(self) -> str:
+        return f"{str(self.year_month_created_at)},{self.item_name},{self.profit_sum}\n"
+
     @staticmethod
     def deserialize(data: bytes):
         line = data.split(b"\n", 1)[0].decode("utf-8")
@@ -110,6 +122,9 @@ class Query3ResultRow(TableResultRow):
 
     def serialize(self) -> bytes:
         return f"{self.year_half},{self.store_id},{self.store_name},{self.tpv}\n".encode("utf-8")
+
+    def to_csv(self) -> str:
+        return f"{self.year_half},{self.store_name},{self.tpv}\n"
 
     @staticmethod
     def deserialize(data: bytes):
@@ -140,6 +155,9 @@ class Query4ResultRow(TableResultRow):
 
     def serialize(self) -> bytes:
         return f"{self.store_id},{self.store_name},{self.user_id},{self.birthdate.isoformat()},{self.purchase_quantity}\n".encode("utf-8")
+
+    def to_csv(self) -> str:
+        return f"{self.store_name},{self.birthdate.isoformat()}\n"
 
     @staticmethod
     def deserialize(data: bytes):
