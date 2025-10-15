@@ -375,6 +375,11 @@ def main():
         yaml.dump(compose, f, sort_keys=False)
         
     print(f"Archivo '{output_file}' generado correctamente.")
+        
+    print(f"Datos de entrada para los clientes en: {meta.get('data_path', './.data')}")
+    
+    print(f"Directorio de salida para los resultados en: {meta.get('output_path', './.results')}")
+    
     
     print("Servicios definidos y sus cantidades:")
     
