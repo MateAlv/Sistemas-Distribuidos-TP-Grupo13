@@ -67,6 +67,8 @@ logs:
 
 clean-results:
 	rm -rf .results/client-1/*
+	rm -rf .results/client-2/*
+	rm -rf .results/client-3/*
 .PHONY: clean-results
 
 images-clean:
