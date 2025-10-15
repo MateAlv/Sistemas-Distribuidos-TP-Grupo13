@@ -354,12 +354,7 @@ def main():
         required=True,       # obligatorio
         help="Archivo de configuración a usar"
     )
-     # Definimos el argumento --run
-    parser.add_argument(
-        "--run",          # nombre del parámetro
-        required=False,       # NO obligatorio
-        help="Ejecutar el docker-compose generado y los escala"
-    )
+
     args = parser.parse_args()
 
     meta, nodes = read_config(args.config)
@@ -376,22 +371,15 @@ def main():
         
     print(f"Archivo '{output_file}' generado correctamente.")
         
-    print(f"Datos de entrada para los clientes en: {meta.get('data_path', './.data')}")
+    print(f"    Datos de entrada para los clientes en: {meta.get('data_path', './.data')}")
     
-    print(f"Directorio de salida para los resultados en: {meta.get('output_path', './.results')}")
-    
-    
+    print(f"    Directorio de salida para los resultados en: {meta.get('output_path', './.results')}")
+
     print("Servicios definidos y sus cantidades:")
-    
-    services_scale = ""
+
     for service, cantidad in services.items():
         print(f"  - {service}: {cantidad}")
-        if cantidad > 1:
-            services_scale += f" --scale {service}={cantidad}"
 
-    if not args.run:
-        return
-    os.system(f"docker compose -f {output_file} up -d --build {services_scale}")
 
 if __name__ == "__main__":
     main()

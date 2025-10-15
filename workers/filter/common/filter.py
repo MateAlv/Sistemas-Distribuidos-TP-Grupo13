@@ -28,7 +28,10 @@ class Filter:
         self.already_sent_stats = {}
         self.middleware_queue_sender = {}
 
-        self.middleware_end_exchange = MessageMiddlewareExchange("rabbitmq", f"end_exchange_filter_{self.filter_type}", [""], "fanout")
+        self.middleware_end_exchange = MessageMiddlewareExchange("rabbitmq", 
+                                                                 f"end_exchange_filter_{self.filter_type}", 
+                                                                 [""], 
+                                                                 "fanout")
         
         if self.filter_type == "year":
             self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", "to_filter_1")
@@ -43,6 +46,11 @@ class Filter:
             self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", "to_filter_3")
         else:
             raise ValueError(f"Tipo de filtro inválido: {self.filter_type}")
+        
+        logging.info(f"Filtro inicializado. Tipo: {self.filter_type}, ID: {self.id}"
+                     f" | Receiver Queue: {self.middleware_queue_receiver.queue_name}"
+                     f" | Sender Queues: {list(self.middleware_queue_sender.keys())}"
+                     f" | End Exchange: end_exchange_filter_{self.filter_type}")
 
     def run(self):
         logging.info(f"Filtro iniciado. Tipo: {self.filter_type}, ID: {self.id}")
@@ -64,6 +72,9 @@ class Filter:
 
             for stats_msg in stats_results:
                 try:
+                    
+                    logging.debug(f"action: stats_message_received | msg:{stats_msg}")
+                    
                     if stats_msg.startswith(b"STATS_END"):
                         stats_end = FilterStatsEndMessage.decode(stats_msg)
                         if stats_end.filter_id == self.id:
@@ -127,10 +138,15 @@ class Filter:
                         stats_msg = FilterStatsMessage(self.id, client_id, table_type, total_expected,
                                     self.number_of_chunks_received_per_client[client_id][table_type],
                                     self.number_of_chunks_not_sent_per_client[client_id][table_type])
+                        
+                        logging.info(f"action: sending_stats_message | type:{self.filter_type} | cli_id:{client_id} | file_type:{table_type.name} | chunks_received:{self.number_of_chunks_received_per_client[client_id][table_type]} | chunks_not_sent:{self.number_of_chunks_not_sent_per_client[client_id][table_type]} | chunks_expected:{total_expected}")
+                        logging.info(f"action: sending_stats_message | msg:{stats_msg.encode()}")
                         self.middleware_end_exchange.send(stats_msg.encode())
 
                         if self._can_send_end_message(total_expected, client_id, table_type):
                             self._send_end_message(client_id, table_type, total_expected, self.number_of_chunks_not_sent_per_client[client_id][table_type])
+                        else:
+                            logging.info(f"action: not_sending_end_message_yet | type:{self.filter_type} | cli_id:{client_id} | file_type:{table_type.name} | chunks_received:{self.number_of_chunks_received_per_client[client_id][table_type]} | chunks_not_sent:{self.number_of_chunks_not_sent_per_client[client_id][table_type]} | chunks_expected:{total_expected}")
                     else:
                         chunk = ProcessBatchReader.from_bytes(msg)
                         client_id = chunk.client_id()

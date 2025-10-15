@@ -82,8 +82,6 @@ def main():
     logging.debug(f"Config cargada desde {config_file}: {cfg}")
 
     filter = Filter(cfg)
-
-    logging.debug(f"filter: {str(filter)}")
     
     signal.signal(signal.SIGTERM, filter.shutdown)
 
