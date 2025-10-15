@@ -343,7 +343,7 @@ def generate_compose(meta: dict, nodes: dict, services: dict = None):
         raise ValueError("Debe haber al menos un cliente.")
     define_server(compose, client_amount) 
     define_network(compose)
-    return compose
+    return compose, client_amount
 
 
 def main():
@@ -365,7 +365,7 @@ def main():
 
     services = {}
 
-    compose = generate_compose(meta, nodes, services)
+    compose, client_count = generate_compose(meta, nodes, services)
 
 
     with open(output_file, "w") as f:
@@ -377,7 +377,9 @@ def main():
     
     print(f"    Directorio de salida para los resultados en: {meta.get('output_path', './.results')}")
 
+    print()
     print("Servicios definidos y sus cantidades:")
+    print(f"\n - Clientes configurados: {client_count}")
 
     for service, cantidad in services.items():
         print(f"  - {service}: {cantidad}")

@@ -191,11 +191,21 @@ class Server:
             logging.error("action: client_handler_error | peer:%s | client_id:%s | error:%r", peer, client_id, e)
         finally:
             # Cleanup
-            for queue in middleware_queue_senders.items():
-                queue.close()
+            for name, queue in middleware_queue_senders.items():
+                try:
+                    queue.close()
+                except Exception as e:
+                    logging.warning("action: queue_close_error | peer:%s | queue:%s | error:%r", peer, name, e)
 
             if middleware_queue_receiver is not None:
-                middleware_queue_receiver.delete()
+                try:
+                    middleware_queue_receiver.close()
+                except Exception as e:
+                    logging.warning("action: queue_close_error | peer:%s | queue:%s | error:%r", peer, "to_merge_data", e)
+                try:
+                    middleware_queue_receiver.delete()
+                except Exception as e:
+                    logging.warning("action: queue_delete_error | peer:%s | queue:%s | error:%r", peer, "to_merge_data", e)
 
             current_thread = threading.current_thread()
             with self.clients_lock:
