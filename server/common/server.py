@@ -140,7 +140,7 @@ class Server:
 
             # -------- Recepción de archivos --------
             files_received = 0
-            while True:
+            while self._running:
                 header = self._recv_header_id(sock)
                 if header is None:
                     break
@@ -443,16 +443,29 @@ class Server:
     def _begin_shutdown(self, signum, frame) -> None:
         logging.info("action: sigterm_received | result: success")
         self._running = False
-        if self._server_socket:
-            try:
+        try:
+            if self._server_socket:
                 fd = self._server_socket.fileno()
-            except Exception:
-                fd = "unknown"
-            try:
                 self._server_socket.close()
                 logging.debug("action: fd_close | result: success | kind: listen_socket | fd:%s", fd)
-            except Exception as e:
-                logging.warning("action: listen_close_fail | error:%r", e)
+                
+            # Esperar a que terminen los threads de cliente
+            with self.clients_lock:
+                active_threads = list(self.client_threads.values())
+            
+            for thread in active_threads:
+                if thread.is_alive():
+                    thread.join(timeout=5)
+            
+            # Esperar threads generales
+            alive = [t for t in self._threads if t.is_alive()]
+            for t in alive:
+                t.join(timeout=30)
+                
+            logging.info("action: server_shutdown | result: success")
+        except Exception as e:
+            logging.warning("error: shutdown | error:%r", e)
+        
 
     def __graceful_shutdown(self) -> None:
         logging.info("action: shutdown | result: in_progress")

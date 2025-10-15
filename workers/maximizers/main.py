@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import os
+import signal
 import logging
 import argparse
 from configparser import ConfigParser
@@ -80,6 +81,8 @@ def main():
 
     maximizer = Maximizer(max_type, max_range)
 
+    signal.signal(signal.SIGTERM, maximizer.shutdown)
+        
     maximizer.run()
 
 

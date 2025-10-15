@@ -12,6 +12,7 @@ import logging
 from collections import defaultdict
 import datetime
 import threading
+import sys
 
 TIMEOUT = 3
 
@@ -35,6 +36,15 @@ class Joiner:
         self._pending_end_messages = []  # Track clients that need END messages sent
         self.lock = threading.Lock()
         self.ready_to_join = {}
+        self.data_receiver = None
+        self.data_join_receiver = None
+        self.data_sender = None
+
+        self.__running = True
+        
+        # Iniciar hilos para manejar data y join_data (eliminamos end_message_handler_thread)
+        self.data_handler_thread = threading.Thread(target=self.handle_data, name="DataHandler")
+        self.join_data_handler_thread = threading.Thread(target=self.handle_join_data, name="JoinDataHandler")
 
         self.define_queues()
 
@@ -46,7 +56,7 @@ class Joiner:
         def stop():
             self.data_join_receiver.stop_consuming()
 
-        while True:
+        while self.__running:
             # Escuchar datos de join (productos)
             self.data_join_receiver.connection.call_later(TIMEOUT, stop)
             self.data_join_receiver.start_consuming(callback)
@@ -79,7 +89,7 @@ class Joiner:
         def stop():
             self.data_receiver.stop_consuming()
 
-        while True:
+        while self.__running:
             # Escuchar datos del maximizer con timeout
             self.data_receiver.connection.call_later(TIMEOUT, stop)
             self.data_receiver.start_consuming(callback)
@@ -200,13 +210,10 @@ class Joiner:
     
     def run(self):
         logging.info(f"Joiner iniciado. Tipo: {self.joiner_type}")
-        # Iniciar hilos para manejar data y join_data (eliminamos end_message_handler_thread)
-        data_handler_thread = threading.Thread(target=self.handle_data, name="DataHandler")
-        join_data_handler_thread = threading.Thread(target=self.handle_join_data, name="JoinDataHandler")
         
-        data_handler_thread.start() 
-        join_data_handler_thread.start()
-    
+        self.data_handler_thread.start() 
+        self.join_data_handler_thread.start()
+
     def define_queues(self):
         raise NotImplementedError("Subclasses must implement define_queues method")
 
@@ -292,6 +299,30 @@ class Joiner:
             self._pending_end_messages.clear()
             logging.info(f"action: joiner_reset_for_new_session | type:{self.joiner_type}")
 
+    def shutdown(self, signum, frame):
+        logging.info(f"SIGTERM received: shutting down joiner {self.joiner_type}")
+        try:
+            self.__running = False  # Stop the handler loops
+            
+            # Detener hilos
+            if self.data_handler_thread.is_alive():
+                self.data_handler_thread.join(timeout=5)
+            if self.join_data_handler_thread.is_alive():
+                self.join_data_handler_thread.join(timeout=5)
+            
+            # Cerrar colas y conexiones
+            if self.data_receiver:
+                self.data_receiver.stop_consuming()
+                self.data_receiver.close()
+            if self.data_join_receiver:
+                self.data_join_receiver.stop_consuming()
+                self.data_join_receiver.close()
+            if self.data_sender:
+                self.data_sender.close()
+            logging.info(f"Joiner {self.joiner_type} shutdown complete.")
+        except Exception as e:
+            logging.error(f"Error during shutdown of joiner {self.joiner_type}: {e}")
+    
 class MenuItemsJoiner(Joiner):
     
     def define_queues(self):

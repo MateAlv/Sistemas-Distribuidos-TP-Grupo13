@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import os
+import signal
 import logging
 import argparse
 from configparser import ConfigParser
@@ -83,6 +84,8 @@ def main():
     filter = Filter(cfg)
 
     logging.debug(f"filter: {str(filter)}")
+    
+    signal.signal(signal.SIGTERM, filter.shutdown)
 
     filter.run()
 

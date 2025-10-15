@@ -47,6 +47,9 @@ class Client:
             root=self.data_dir,
             max_batch_size=self.batch_size,
         )
+
+        # Inicialización del sender
+        self.sender = Sender(self.server_host, self.server_port, connect_timeout=CONNECT_TIMEOUT_S, io_timeout=IO_TIMEOUT_S)
             
         logging.debug(
             "client_init | id=%s host=%s port=%s data_dir=%s output_dir=%s batch_size=%s",
@@ -63,12 +66,7 @@ class Client:
         """
 
         # Conexión persistente + handshake obligatorio
-        with Sender(
-            self.server_host,
-            self.server_port,
-            connect_timeout=CONNECT_TIMEOUT_S,
-            io_timeout=IO_TIMEOUT_S,
-        ) as sender:
+        with self.sender as sender:
             try:
                 logging.info("Cliente %s: conectando a %s:%s", self.id, self.server_host, self.server_port)
                 # Handshake SIEMPRE encendido
@@ -93,9 +91,14 @@ class Client:
                 self._wait_for_results(sender)
 
                 logging.info("Cliente %s: envío y recepción completados.", self.id)
+                
+                self.graceful_shutdown()
+                
             except Exception as e:
                 logging.error("Cliente %s: error en el envío: %s", self.id, e)
                 raise
+            
+            
     # ---------------------------
     # Helpers
     # ---------------------------
@@ -231,3 +234,17 @@ class Client:
                 if not data.endswith(b'\n'):
                     data += b'\n'
                 f.write(data) 
+    
+    def close(self) -> None:
+        try:
+            self.sender.close()
+        except Exception as e:
+            logging.error("Error al cerrar el cliente %s: %s", self.id, e)
+
+    def _begin_shutdown(self, signum, frame) -> None:
+        logging.info("SIGTERM recibida para el cliente %s: apagando cliente", self.id)
+        self.close()
+
+    def graceful_shutdown(self) -> None:
+        logging.info("Cliente %s: apagando cliente", self.id)
+        self.close()

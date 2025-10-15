@@ -13,6 +13,7 @@ from middleware.middleware_interface import MessageMiddlewareQueue, MessageMiddl
 from collections import defaultdict
 import datetime
 import heapq
+import sys
 
 TIMEOUT = 3
 
@@ -38,9 +39,12 @@ class Maximizer:
                 # Envía END message al joiner cuando termine
                 self.middleware_exchange_sender = MessageMiddlewareExchange("rabbitmq", "end_exchange_maximizer_PRODUCTS", [""], exchange_type="fanout")
                 self.expected_partial_maximizers = 3  # Sabemos que son 3: rango 1, 4, 7
+                self.middleware_exchange_receiver = None  # No necesita escuchar END de nadie
             else:
                 # Maximizers parciales - envían al absolute max
                 self.data_sender = MessageMiddlewareQueue("rabbitmq", "to_absolute_max")
+                self.middleware_exchange_sender = None  # No envía END directamente al joiner
+                
                 if self.maximizer_range == "1":
                     self.data_receiver = MessageMiddlewareQueue("rabbitmq", "to_max_1_3")
                 elif self.maximizer_range == "4":
@@ -65,9 +69,12 @@ class Maximizer:
                 self.expected_partial_top3 = 3  # Sabemos que son 3: rango 1, 4, 7
                 self.partial_top3_finished = 0  # Para contar cuántos parciales terminaron
                 self.received_ranges = set()  # Para trackear qué rangos han enviado datos
+                self.middleware_exchange_receiver = None  # No necesita escuchar END de nadie
             else:
                 # TOP3 parciales - envían al absoluto
                 self.data_sender = MessageMiddlewareQueue("rabbitmq", "to_top3_absolute")
+                self.middleware_exchange_sender = None  # No envía END directamente al joiner
+                self.middleware_exchange_receiver = None  # No necesita escuchar END de nadie
                 
                 # Configurar receiver basado en el rango
                 if self.maximizer_range == "1":
@@ -264,6 +271,25 @@ class Maximizer:
                     
                 results.remove(data)
     
+    def shutdown(self, signum, frame):
+        logging.info(f"SIGTERM recibida para el maximizer {self.maximizer_type} rango {self.maximizer_range}: apagando maximizer")
+        try:
+            if self.data_receiver:
+                self.data_receiver.stop_consuming()
+                self.data_receiver.close()
+            if self.data_sender:
+                self.data_sender.stop_consuming()
+                self.data_sender.close()
+            if self.middleware_exchange_sender:
+                self.middleware_exchange_sender.stop_consuming()
+                self.middleware_exchange_sender.close()
+            if self.middleware_exchange_receiver:
+                self.middleware_exchange_receiver.stop_consuming()
+                self.middleware_exchange_receiver.close()
+            logging.info(f"Maximizer {self.maximizer_type} rango {self.maximizer_range} apagado correctamente.")
+        except Exception as e:
+            logging.error(f"Error al apagar el maximizer {self.maximizer_type} rango {self.maximizer_range}: {e}")
+            
 
     def update_max(self, rows: list[TableProcessRow]) -> bool:
         """
@@ -491,13 +517,6 @@ class Maximizer:
         else:
             logging.warning(f"action: no_absolute_top3_results | client_id:{self.client_id or 1}")
 
-    def publish_results(self, chunk):
-        """
-        DEPRECATED - Solo para compatibilidad. Los maximizers parciales NO deben usar esto.
-        """
-        logging.warning(f"action: deprecated_publish_results_called | type:{self.maximizer_type} | range:{self.maximizer_range}")
-        return
-
     def publish_absolute_max_results(self):
         """
         Publica los resultados de máximos absolutos por mes.
@@ -568,4 +587,3 @@ class Maximizer:
             logging.info(f"action: publish_absolute_max_results | result: success | client_id:{self.client_id or 1} | months_selling:{len(monthly_max_selling)} | months_profit:{len(monthly_max_profit)} | total_rows:{len(accumulated_results)}")
         else:
             logging.warning(f"action: no_absolute_max_results | client_id:{self.client_id or 1}")
-
