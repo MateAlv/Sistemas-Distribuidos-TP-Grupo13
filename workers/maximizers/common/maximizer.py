@@ -346,8 +346,7 @@ class Maximizer:
                     # Si el nuevo count es mayor que el mínimo en el heap
                     if purchase_count > self.top3_by_store[store_id][0][0]:
                         heapq.heapreplace(self.top3_by_store[store_id], (purchase_count, user_id))
-                
-                logging.debug(f"action: update_top3 | store_id:{store_id} | user_id:{user_id} | count:{purchase_count}")
+                        logging.debug(f"action: update_top3 | store_id:{store_id} | user_id:{user_id} | count:{purchase_count}")
 
     def apply(self, chunk) -> bool:
         """
