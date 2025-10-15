@@ -339,10 +339,10 @@ class Server:
         all_data_received = False
         all_data_received_per_query = {
             ResultTableType.QUERY_1: False,  
-            ResultTableType.QUERY_2_1: True,
-            ResultTableType.QUERY_2_2: True,
-            ResultTableType.QUERY_3: True,
-            ResultTableType.QUERY_4: True,
+            ResultTableType.QUERY_2_1: False,
+            ResultTableType.QUERY_2_2: False,
+            ResultTableType.QUERY_3: False,
+            ResultTableType.QUERY_4: False,
         }
         results_for_client = []
         number_of_chunks_received = {
