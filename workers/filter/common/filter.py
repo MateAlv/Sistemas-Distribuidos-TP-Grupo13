@@ -240,7 +240,7 @@ class Filter:
 
             logging.info(f"action: client_stats_data_deleted | cli_id:{stats_end.client_id}")
         except KeyError:
-            pass  # Ya estaba limpio
+            pass  
 
 
     def _can_send_end_message(self, total_expected, client_id, table_type):

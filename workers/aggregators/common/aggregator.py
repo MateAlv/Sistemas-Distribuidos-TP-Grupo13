@@ -78,52 +78,72 @@ class Aggregator:
         else:
             raise ValueError(f"Tipo de agregador inválido: {self.aggregator_type}")
 
-    # ------------------------------------------------------------------
-    # Ciclo de vida
-    # ------------------------------------------------------------------
-    def shutdown(self, signum, frame):
+
+    def shutdown(self, signum=None, frame=None):
         logging.info(
-            f"action: shutdown_signal_received | type:{self.aggregator_type} | agg_id:{self.aggregator_id}"
+            f"SIGTERM recibido: cerrando aggregator {self.aggregator_type} (ID: {self.aggregator_id})"
         )
-        try:
-            self._running = False
-            self.middleware_queue_receiver.stop_consuming()
-            self.middleware_queue_receiver.close()
-            for sender in self.middleware_queue_sender.values():
-                sender.stop_consuming()
-                sender.close()
-            self.middleware_stats_exchange.stop_consuming()
-        except (OSError, RuntimeError, AttributeError):
-            pass
 
-        try:
-            self.middleware_end_exchange.stop_consuming()
-        except (OSError, RuntimeError, AttributeError):
-            pass
+        self._running = False
 
-        for sender in getattr(self, "middleware_queue_sender", {}).values():
+        # Detener consumos activos
+        for middleware in [
+            getattr(self, "middleware_queue_receiver", None),
+            getattr(self, "middleware_stats_exchange", None),
+            getattr(self, "middleware_data_exchange", None),
+        ]:
+            if middleware is None:
+                continue
+            try:
+                middleware.stop_consuming()
+            except (OSError, RuntimeError, AttributeError, ValueError):
+                pass
+
+        for sender in self.middleware_queue_sender.values():
             try:
                 sender.stop_consuming()
-            except (OSError, RuntimeError, AttributeError):
+            except (OSError, RuntimeError, AttributeError, ValueError):
                 pass
 
         # Cerrar conexiones
-        try:
-            self.middleware_queue_receiver.close()
-        except (OSError, RuntimeError, AttributeError):
-            pass
+        for middleware in [
+            getattr(self, "middleware_queue_receiver", None),
+            getattr(self, "middleware_stats_exchange", None),
+            getattr(self, "middleware_data_exchange", None),
+        ]:
+            if middleware is None:
+                continue
+            try:
+                middleware.close()
+            except (OSError, RuntimeError, AttributeError, ValueError):
+                pass
 
-        try:
-            self.middleware_stats_exchange.close()
-            self.middleware_data_exchange.stop_consuming()
-            self.middleware_data_exchange.close()
-            logging.info(
-                f"action: shutdown_completed | type:{self.aggregator_type} | agg_id:{self.aggregator_id}"
-            )
-        except Exception as e:
-            logging.error(
-                f"action: shutdown_error | type:{self.aggregator_type} | agg_id:{self.aggregator_id} | error:{e}"
-            )
+        for sender in self.middleware_queue_sender.values():
+            try:
+                sender.close()
+            except (OSError, RuntimeError, AttributeError, ValueError):
+                pass
+
+        # Limpiar estructuras internas
+        for attr in [
+            "end_message_received",
+            "chunks_received_per_client",
+            "chunks_processed_per_client",
+            "accumulated_chunks_per_client",
+            "chunks_to_receive",
+            "already_sent_stats",
+            "global_accumulator",
+        ]:
+            collection = getattr(self, attr, None)
+            if isinstance(collection, (dict, list, set)) and hasattr(collection, "clear"):
+                try:
+                    collection.clear()
+                except (OSError, RuntimeError, AttributeError, ValueError):
+                    pass
+
+        logging.info(
+            f"Aggregator {self.aggregator_type} (ID: {self.aggregator_id}) cerrado correctamente."
+        )
 
     def run(self):
         logging.info(
@@ -197,9 +217,6 @@ class Aggregator:
                         f"action: exception_in_main_processing | type:{self.aggregator_type} | error:{e}"
                     )
 
-    # ------------------------------------------------------------------
-    # Procesamiento de mensajes
-    # ------------------------------------------------------------------
     def _process_data_message(self, raw_msg: bytes):
         try:
             data = AggregatorDataMessage.decode(raw_msg)
@@ -373,9 +390,7 @@ class Aggregator:
         if self._can_send_end_message(client_id, table_type):
             self._send_end_message(client_id, table_type)
 
-    # ------------------------------------------------------------------
-    # Helpers para stats
-    # ------------------------------------------------------------------
+
     def _ensure_dict_entry(self, dictionary, client_id, table_type, default=0):
         if client_id not in dictionary:
             dictionary[client_id] = {}
@@ -536,9 +551,6 @@ class Aggregator:
             f"action: cleanup_state | client_id:{client_id} | table_type:{table_type} | aggregator_id:{self.aggregator_id}"
         )
 
-    # ------------------------------------------------------------------
-    # Acumuladores y publicación final
-    # ------------------------------------------------------------------
     def _ensure_global_entry(self, client_id):
         if client_id not in self.global_accumulator:
             self.global_accumulator[client_id] = {}
@@ -794,9 +806,6 @@ class Aggregator:
             f"action: publish_final_tpv | client_id:{client_id} | rows:{len(rows)}"
         )
 
-    # ------------------------------------------------------------------
-    # Lógica de agregación (sin cambios funcionales)
-    # ------------------------------------------------------------------
     def apply_products(self, chunk):
         YEARS = {2024, 2025}
         chunk_sellings = defaultdict(int)
