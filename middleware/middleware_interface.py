@@ -5,8 +5,8 @@ from abc import ABC, abstractmethod
 
 logging.getLogger("pika").setLevel(logging.CRITICAL)
 
-TIMEOUT = 0.1
-RETRY_DELAY = 0.1
+TIMEOUT = 3
+RETRY_DELAY = 3
 HEARTBEAT = 3000
 
 class MessageMiddlewareMessageError(Exception):
@@ -51,24 +51,34 @@ class MessageMiddleware(ABC):
 # Exchange Middleware
 # ----------------------------
 class MessageMiddlewareExchange(MessageMiddleware):
-    def __init__(self, host, exchange_name, route_keys, exchange_type="direct"):
+    def __init__(self, host: str, exchange_name: str, consumer_id: str, exchange_type: str = "fanout"):
         self.host = host
         self.exchange_name = exchange_name
-        self.route_keys = route_keys if isinstance(route_keys, list) else [route_keys]
         self.exchange_type = exchange_type
+        self.consumer_id = consumer_id
+        self.queue_name = f"{exchange_name}_{consumer_id}"
         self._connect()
 
     def _connect(self):
-        """Conecta y configura el canal con confirm_delivery y durable."""
         for attempt in range(3):
             try:
                 self.connection = pika.BlockingConnection(
-                    pika.ConnectionParameters(host=self.host, heartbeat=HEARTBEAT, blocked_connection_timeout=30)
+                    pika.ConnectionParameters(
+                        host=self.host,
+                        heartbeat=HEARTBEAT,
+                        blocked_connection_timeout=30,
+                    )
                 )
                 self.channel = self.connection.channel()
-                self.channel.exchange_declare(exchange=self.exchange_name, exchange_type=self.exchange_type, durable=True)
-                self.channel.confirm_delivery()
+                self.channel.exchange_declare(
+                    exchange=self.exchange_name,
+                    exchange_type=self.exchange_type,
+                    durable=True,
+                )
+                self.channel.queue_declare(queue=self.queue_name, durable=True)
+                self.channel.queue_bind(exchange=self.exchange_name, queue=self.queue_name)
                 self.channel.basic_qos(prefetch_count=1)
+                self.channel.confirm_delivery()
                 return
             except Exception as e:
                 if attempt < 2:
@@ -77,14 +87,7 @@ class MessageMiddlewareExchange(MessageMiddleware):
                     raise MessageMiddlewareDisconnectedError(f"Error al conectar con RabbitMQ: {e}")
 
     def start_consuming(self, on_message_callback):
-        """Consume con ACK manual y requeue en caso de error."""
         try:
-            result = self.channel.queue_declare(queue="", exclusive=True)
-            queue_name = result.method.queue
-
-            for rk in self.route_keys:
-                self.channel.queue_bind(exchange=self.exchange_name, queue=queue_name, routing_key=rk)
-
             def callback(ch, method, properties, body):
                 try:
                     on_message_callback(body)
@@ -93,8 +96,11 @@ class MessageMiddlewareExchange(MessageMiddleware):
                     ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
                     raise MessageMiddlewareMessageError(f"Error procesando mensaje: {e}")
 
-            self.channel.basic_consume(queue=queue_name, on_message_callback=callback, auto_ack=False)
-            self.connection.call_later(TIMEOUT, self.channel.stop_consuming)
+            self.channel.basic_consume(
+                queue=self.queue_name,
+                on_message_callback=callback,
+                auto_ack=False,
+            )
             self.channel.start_consuming()
         except pika.exceptions.AMQPConnectionError:
             self._connect()
@@ -108,23 +114,21 @@ class MessageMiddlewareExchange(MessageMiddleware):
         except pika.exceptions.AMQPConnectionError:
             raise MessageMiddlewareDisconnectedError("Conexión perdida al detener consumo.")
 
-    def send(self, message):
-        """Envía mensajes persistentes y confirmados."""
+    def send(self, message: bytes):
         try:
             props = pika.BasicProperties(delivery_mode=2)
-            for rk in self.route_keys:
-                self.channel.basic_publish(
-                    exchange=self.exchange_name,
-                    routing_key=rk,
-                    body=message,
-                    properties=props,
-                    mandatory=False,
-                )
+            self.channel.basic_publish(
+                exchange=self.exchange_name,
+                routing_key="",
+                body=message,
+                properties=props,
+                mandatory=False,
+            )
         except pika.exceptions.AMQPConnectionError:
             self._connect()
             raise MessageMiddlewareDisconnectedError("Conexión perdida al enviar mensaje.")
         except Exception as e:
-            raise MessageMiddlewareMessageError(f"Error al enviar: {e}")
+            raise MessageMiddlewareMessageError(f"Error al enviar mensaje: {e}")
 
     def close(self):
         try:
@@ -134,6 +138,7 @@ class MessageMiddlewareExchange(MessageMiddleware):
 
     def delete(self):
         try:
+            self.channel.queue_delete(queue=self.queue_name)
             self.channel.exchange_delete(exchange=self.exchange_name)
         except Exception as e:
             raise MessageMiddlewareDeleteError(f"Error eliminando exchange: {e}")
