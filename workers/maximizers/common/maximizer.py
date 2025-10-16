@@ -85,8 +85,8 @@ class Maximizer:
     def is_absolute_top3(self):
         return self.maximizer_range == "0"
     
-    def reset_client_state(self, client_id: int):
-        """Resetea el estado del maximizer para un cliente específico"""
+    def delete_client_data(self, client_id: int):
+        """Elimina la información almacenada de un cliente"""
         if self.maximizer_type == "MAX":
             if client_id in self.sellings_max:
                 del self.sellings_max[client_id]
@@ -100,7 +100,7 @@ class Maximizer:
             if self.is_absolute_top3():
                 self.partial_top3_finished.pop(client_id, None)
         
-        logging.info(f"action: reset_for_new_client | type:{self.maximizer_type} | range:{self.maximizer_range} | client_id:{client_id}")
+        logging.info(f"action: delete_client_data | type:{self.maximizer_type} | range:{self.maximizer_range} | client_id:{client_id}")
     
     def process_client_end(self, client_id: int, table_type: TableType):
         """Procesa el final de un cliente y envía resultados"""
@@ -134,7 +134,7 @@ class Maximizer:
                 logging.info(f"action: partial_top3_finished | range:{self.maximizer_range} | client_id:{client_id}")
 
         logging.info(f"action: maximizer_finished | type:{self.maximizer_type} | range:{self.maximizer_range} | client_id:{client_id}")
-        self.reset_client_state(client_id)
+        self.delete_client_data(client_id)
     
     def run(self):
         logging.info(f"Maximizer iniciado. Tipo: {self.maximizer_type}, Rango: {self.maximizer_range}, Receiver: {getattr(self.data_receiver, 'queue_name', 'unknown')}")
