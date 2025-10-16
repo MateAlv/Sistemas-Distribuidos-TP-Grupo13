@@ -46,6 +46,7 @@ up:
 test:
 	# Run the docker-compose setup
 	make clean-results
+	python3 generar-compose.py --config=${CONFIG}
 	docker compose -f ${DOCKER} up --build
 .PHONY: test
 
