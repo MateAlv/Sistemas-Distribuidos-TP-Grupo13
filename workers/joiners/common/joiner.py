@@ -7,7 +7,8 @@ from utils.file_utils.process_batch_reader import ProcessBatchReader
 from utils.file_utils.result_chunk import ResultChunk, ResultChunkHeader
 from utils.file_utils.file_table import DateTime
 from utils.file_utils.end_messages import MessageEnd, MessageQueryEnd
-from middleware.middleware_interface import MessageMiddlewareQueue, MessageMiddlewareExchange
+from middleware.middleware_interface import MessageMiddlewareQueue, MessageMiddlewareExchange, \
+    MessageMiddlewareMessageError
 import logging
 from collections import defaultdict
 import datetime
@@ -59,7 +60,10 @@ class Joiner:
         while self.__running:
             # Escuchar datos de join (productos)
             self.data_join_receiver.connection.call_later(TIMEOUT, stop)
-            self.data_join_receiver.start_consuming(callback)
+            try:
+                self.data_join_receiver.start_consuming(callback)
+            except (OSError, RuntimeError, MessageMiddlewareMessageError) as e:
+                logging.error(f"Error en consumo: {e}")
 
             for data in results:
                 try:
@@ -91,8 +95,11 @@ class Joiner:
 
         while self.__running:
             # Escuchar datos del maximizer con timeout
-            self.data_receiver.connection.call_later(TIMEOUT, stop)
-            self.data_receiver.start_consuming(callback)
+            try:
+                self.data_receiver.connection.call_later(TIMEOUT, stop)
+                self.data_receiver.start_consuming(callback)
+            except (OSError, RuntimeError, MessageMiddlewareMessageError) as e:
+                logging.error(f"Error en consumo: {e}")
 
             # Procesar datos del maximizer
             for data in results:
@@ -332,53 +339,69 @@ class Joiner:
             self._pending_end_messages.clear()
             logging.info(f"action: joiner_reset_for_new_session | type:{self.joiner_type}")
 
-    def shutdown(self, signum, frame):
-        logging.info(f"SIGTERM received: shutting down joiner {self.joiner_type}")
+    def shutdown(self, signum=None, frame=None):
+        logging.info(f"SIGTERM recibido: cerrando joiner {self.joiner_type}")
+
+        # Detener consumos
+        try:
+            self.data_receiver.stop_consuming()
+        except (OSError, RuntimeError, AttributeError):
+            pass
+        try:
+            self.data_join_receiver.stop_consuming()
+        except (OSError, RuntimeError, AttributeError):
+            pass
+
+        # Cerrar conexiones
+        try:
+            self.data_receiver.close()
+        except (OSError, RuntimeError, AttributeError):
+            pass
+        try:
+            self.data_join_receiver.close()
+        except (OSError, RuntimeError, AttributeError):
+            pass
+        try:
+            self.data_sender.close()
+        except (OSError, RuntimeError, AttributeError):
+            pass
+
+        # Detener bucle de manejo de datos
         self.__running = False
 
+        # Esperar hilos
         try:
-            # Esperar hilos
+            if self.data_handler_thread.is_alive():
+                self.data_handler_thread.join(timeout=5)
+        except (OSError, RuntimeError, AttributeError):
+            pass
+
+        try:
+            if self.data_handler_thread.is_alive():
+                self.join_data_handler_thread.join(timeout=5)
+        except (OSError, RuntimeError, AttributeError):
+            pass
+
+        # Limpiar estructuras
+        for attr in [
+            "data",
+            "joiner_data",
+            "joiner_results",
+            "joiner_data_chunks",
+            "client_end_messages_received",
+            "completed_clients",
+            "_pending_end_messages",
+            "ready_to_join"
+        ]:
             try:
-                self.data_handler_thread.join(timeout=3)
-            except Exception:
-                pass
-            try:
-                self.join_data_handler_thread.join(timeout=3)
-            except Exception:
+                obj = getattr(self, attr, None)
+                if isinstance(obj, (dict, list, set)) and hasattr(obj, "clear"):
+                    obj.clear()
+            except (OSError, RuntimeError, AttributeError):
                 pass
 
-            # Cerrar conexiones
-            try:
-                self.data_receiver.stop_consuming()
-                self.data_receiver.close()
-            except Exception:
-                pass
+        logging.info(f"Joiner {self.joiner_type} cerrado correctamente.")
 
-            try:
-                self.data_join_receiver.stop_consuming()
-                self.data_join_receiver.close()
-            except Exception:
-                pass
-
-            try:
-                self.data_sender.close()
-            except Exception:
-                pass
-
-            # Liberar estructuras
-            with self.lock:
-                self.data.clear()
-                self.joiner_data.clear()
-                self.joiner_results.clear()
-                self.joiner_data_chunks.clear()
-                self.client_end_messages_received.clear()
-                self.completed_clients.clear()
-                self._pending_end_messages.clear()
-                self.ready_to_join.clear()
-
-            logging.info(f"Joiner {self.joiner_type} shutdown complete.")
-        except Exception as e:
-            logging.error(f"Error during shutdown of joiner {self.joiner_type}: {e}")
     
 class MenuItemsJoiner(Joiner):
     

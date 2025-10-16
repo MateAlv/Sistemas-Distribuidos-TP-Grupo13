@@ -5,7 +5,8 @@ from utils.file_utils.process_chunk import ProcessChunk
 from utils.file_utils.process_batch_reader import ProcessBatchReader
 from utils.file_utils.file_table import DateTime
 from utils.file_utils.end_messages import MessageEnd
-from middleware.middleware_interface import MessageMiddlewareQueue, MessageMiddlewareExchange, TIMEOUT
+from middleware.middleware_interface import MessageMiddlewareQueue, MessageMiddlewareExchange, TIMEOUT, \
+    MessageMiddlewareMessageError
 from .aggregator_stats_messages import AggregatorStatsMessage, AggregatorStatsEndMessage
 from collections import defaultdict, deque
 import datetime
@@ -49,46 +50,73 @@ class Aggregator:
         else:
             raise ValueError(f"Tipo de agregador inválido: {self.aggregator_type}")
 
-    def shutdown(self, signum, frame):
+    def shutdown(self, signum=None, frame=None):
         logging.info(f"action: shutdown_signal_received | type:{self.aggregator_type} | agg_id:{self.aggregator_id}")
-        # Enviar stats finales a otros aggregators - Tolerancia a fallos
 
-        self.__running = False  # Stop the main loop
+        # Detener consumos de las colas y exchanges
+        try:
+            self.middleware_queue_receiver.stop_consuming()
+        except (OSError, RuntimeError, AttributeError):
+            pass
 
         try:
-            # Cerrar conexiones de middleware
+            self.middleware_stats_exchange.stop_consuming()
+        except (OSError, RuntimeError, AttributeError):
+            pass
+
+        try:
+            self.middleware_end_exchange.stop_consuming()
+        except (OSError, RuntimeError, AttributeError):
+            pass
+
+        for sender in getattr(self, "middleware_queue_sender", {}).values():
             try:
-                self.middleware_queue_receiver.close()
-            except Exception as e:
+                sender.stop_consuming()
+            except (OSError, RuntimeError, AttributeError):
                 pass
 
-            for sender in self.middleware_queue_sender.values():
-                try:
-                    sender.close()
-                except Exception as e:
-                    pass
+        # Cerrar conexiones
+        try:
+            self.middleware_queue_receiver.close()
+        except (OSError, RuntimeError, AttributeError):
+            pass
+
+        try:
+            self.middleware_stats_exchange.close()
+        except (OSError, RuntimeError, AttributeError):
+            pass
+
+        try:
+            self.middleware_end_exchange.close()
+        except (OSError, RuntimeError, AttributeError):
+            pass
+
+        for sender in getattr(self, "middleware_queue_sender", {}).values():
             try:
-                self.middleware_stats_exchange.close()
-            except Exception as e:
+                sender.close()
+            except (OSError, RuntimeError, AttributeError):
                 pass
 
-            # Liberar estructuras en memoria
-            if self.global_accumulator:
-                self.global_accumulator.clear()
-            if self.end_message_received:
-                self.end_message_received.clear()
-            if self.chunks_received_per_client:
-                self.chunks_received_per_client.clear()
-            if self.chunks_processed_per_client:
-                self.chunks_processed_per_client.clear()
-            if self.chunks_to_receive:
-                self.chunks_to_receive.clear()
-            if self.already_sent_stats:
-                self.already_sent_stats.clear()
+        # Detener procesamiento
+        self.__running = False
 
-            logging.info(f"action: shutdown_completed | type:{self.aggregator_type} | agg_id:{self.aggregator_id}")
-        except Exception as e:
-            logging.error(f"action: shutdown_error | type:{self.aggregator_type} | agg_id:{self.aggregator_id} | error:{e}")
+        # Liberar estructuras de datos
+        for attr in [
+            "global_accumulator",
+            "end_message_received",
+            "chunks_received_per_client",
+            "chunks_processed_per_client",
+            "chunks_to_receive",
+            "already_sent_stats"
+        ]:
+            try:
+                obj = getattr(self, attr, None)
+                if isinstance(obj, (dict, list, set)) and hasattr(obj, "clear"):
+                    obj.clear()
+            except (OSError, RuntimeError, AttributeError):
+                pass
+
+        logging.info(f"action: shutdown_completed | type:{self.aggregator_type} | agg_id:{self.aggregator_id}")
     
     def run(self):
         logging.info(f"Agregador iniciado. Tipo: {self.aggregator_type}, ID: {self.aggregator_id}")
@@ -98,18 +126,24 @@ class Aggregator:
         def callback(msg): results.append(msg)
         def stats_callback(msg): stats_results.append(msg)
         def stop():
-            self.middleware_queue_receiver.stop_consuming()
+                self.middleware_queue_receiver.stop_consuming()
         def stats_stop():
-            self.middleware_stats_exchange.stop_consuming()
+                self.middleware_stats_exchange.stop_consuming()
 
         while self.__running:
             # Escuchar stats de otros aggregators
-            self.middleware_stats_exchange.connection.call_later(TIMEOUT, stats_stop)
-            self.middleware_stats_exchange.start_consuming(stats_callback)
-            
+            try:
+                self.middleware_stats_exchange.connection.call_later(TIMEOUT, stats_stop)
+                self.middleware_stats_exchange.start_consuming(stats_callback)
+            except (OSError, RuntimeError, MessageMiddlewareMessageError) as e:
+                logging.error(f"Error en consumo: {e}")
+
             # Escuchar datos de filters
-            self.middleware_queue_receiver.connection.call_later(TIMEOUT, stop)
-            self.middleware_queue_receiver.start_consuming(callback)
+            try:
+                self.middleware_queue_receiver.connection.call_later(TIMEOUT, stop)
+                self.middleware_queue_receiver.start_consuming(callback)
+            except (OSError, RuntimeError, MessageMiddlewareMessageError) as e:
+                logging.error(f"Error en consumo: {e}")
 
             # Procesar mensajes de stats de otros aggregators
             while stats_results:

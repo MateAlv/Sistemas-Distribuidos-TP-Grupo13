@@ -297,50 +297,66 @@ class Maximizer:
                 return "7"
         return None
     
-    def shutdown(self, signum, frame):
+    def shutdown(self, signum=None, frame=None):
         logging.info(f"SIGTERM recibido: cerrando maximizer {self.maximizer_type} (rango {self.maximizer_range})")
 
+        # Detener consumos de las colas
+        try:
+            self.data_receiver.stop_consuming()
+        except (OSError, RuntimeError, AttributeError):
+            pass
+        try:
+            self.data_sender.stop_consuming()
+        except (OSError, RuntimeError, AttributeError):
+            pass
+        try:
+            self.middleware_exchange_sender.stop_consuming()
+        except (OSError, RuntimeError, AttributeError):
+            pass
+        try:
+            self.middleware_exchange_receiver.stop_consuming()
+        except (OSError, RuntimeError, AttributeError):
+            pass
+
+        # Cerrar conexiones
+        try:
+            self.data_receiver.close()
+        except (OSError, RuntimeError, AttributeError):
+            pass
+        try:
+            self.data_sender.close()
+        except (OSError, RuntimeError, AttributeError):
+            pass
+        try:
+            self.middleware_exchange_sender.close()
+        except (OSError, RuntimeError, AttributeError):
+            pass
+        try:
+            self.middleware_exchange_receiver.close()
+        except (OSError, RuntimeError, AttributeError):
+            pass
+
+        # Detener el loop principal
         self.__running = False
 
-        try:
-            # Cerrar conexiones
+        # Liberar estructuras
+        for attr in [
+            "sellings_max",
+            "profit_max",
+            "partial_ranges_seen",
+            "partial_end_counts",
+            "top3_by_store",
+            "partial_top3_finished",
+            "clients_end_processed"
+        ]:
             try:
-                self.data_receiver.stop_consuming()
-                self.data_receiver.close()
-            except Exception:
+                obj = getattr(self, attr, None)
+                if isinstance(obj, (dict, list, set)) and hasattr(obj, "clear"):
+                    obj.clear()
+            except (OSError, RuntimeError, AttributeError):
                 pass
 
-            try:
-                self.data_sender.stop_consuming()
-                self.data_sender.close()
-            except Exception:
-                pass
-
-            try:
-                self.middleware_exchange_sender.close()
-            except Exception:
-                pass
-
-            try:
-                self.middleware_exchange_receiver.close()
-            except Exception:
-                pass
-
-            # Liberar estructuras
-            if self.maximizer_type == "MAX":
-                self.sellings_max.clear()
-                self.profit_max.clear()
-                self.partial_ranges_seen.clear()
-                self.partial_end_counts.clear()
-            elif self.maximizer_type == "TOP3":
-                self.top3_by_store.clear()
-                self.partial_top3_finished.clear()
-
-            self.clients_end_processed.clear()
-            logging.info(f"Maximizer {self.maximizer_type} rango {self.maximizer_range} apagado correctamente.")
-        except Exception as e:
-            logging.error(f"Error al apagar el maximizer {self.maximizer_type} rango {self.maximizer_range}: {e}")
-            
+        logging.info(f"Maximizer {self.maximizer_type} rango {self.maximizer_range} apagado correctamente.")
 
     def update_max(self, client_id: int, rows: list[TableProcessRow]) -> bool:
         """
