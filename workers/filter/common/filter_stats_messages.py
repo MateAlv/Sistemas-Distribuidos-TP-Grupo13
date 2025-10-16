@@ -40,7 +40,7 @@ class FilterStatsEndMessage:
     def decode(cls, message: bytes) -> "FilterStatsEndMessage":
         decoded = message.decode("utf-8")
         parts = decoded.split(";")
-        if len(parts) != 3 or parts[0] != "STATS_END":
+        if len(parts) != 4 or parts[0] != "STATS_END":
             raise ValueError(f"Formato inválido de mensaje STATS_END: {decoded}")
         
         _, filter_id, client_id, table_type_value = parts

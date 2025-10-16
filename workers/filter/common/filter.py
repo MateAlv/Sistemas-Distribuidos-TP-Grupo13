@@ -1,6 +1,5 @@
-from asyncio.tasks import sleep
 import logging
-import sys
+from collections import deque
 from utils.file_utils.process_table import TableProcessRow
 from utils.file_utils.process_chunk import ProcessChunk
 from utils.file_utils.result_chunk import ResultChunkHeader, ResultChunk
@@ -9,8 +8,6 @@ from utils.file_utils.end_messages import MessageEnd, MessageQueryEnd
 from utils.file_utils.table_type import TableType, ResultTableType
 from middleware.middleware_interface import MessageMiddlewareQueue, MessageMiddlewareExchange, TIMEOUT
 from .filter_stats_messages import FilterStatsMessage, FilterStatsEndMessage
-
-
 
 class Filter:
     def __init__(self, cfg: dict):
@@ -32,7 +29,7 @@ class Filter:
 
         self.middleware_end_exchange = MessageMiddlewareExchange("rabbitmq", 
                                                                  f"end_exchange_filter_{self.filter_type}", 
-                                                                 [""], 
+                                                                 [f"{self.id}"], 
                                                                  "fanout")
         
         if self.filter_type == "year":
@@ -56,8 +53,8 @@ class Filter:
 
     def run(self):
         logging.info(f"Filtro iniciado. Tipo: {self.filter_type}, ID: {self.id}")
-        results = []
-        stats_results = []
+        results = deque()
+        stats_results = deque()
         def callback(msg): results.append(msg)
         def stats_callback(msg): stats_results.append(msg)
         def stop():
@@ -72,49 +69,50 @@ class Filter:
             self.middleware_queue_receiver.connection.call_later(TIMEOUT, stop)
             self.middleware_queue_receiver.start_consuming(callback)
 
-            for stats_msg in stats_results:
+            while stats_results:
+                stats_msg = stats_results.popleft()
                 try:
-                    
-                    logging.debug(f"action: stats_message_received | msg:{stats_msg}")
-                    
                     if stats_msg.startswith(b"STATS_END"):
                         stats_end = FilterStatsEndMessage.decode(stats_msg)
                         if stats_end.filter_id == self.id:
-                            stats_results.remove(stats_msg)
                             continue
                         logging.debug(f"action: stats_end_received | type:{self.filter_type} | filter_id:{stats_end.filter_id} | cli_id:{stats_end.client_id} | table_type:{stats_end.table_type}")
                         self.delete_client_stats_data(stats_end)
                     else:
                         stats = FilterStatsMessage.decode(stats_msg)
                         if stats.filter_id == self.id:
-                            stats_results.remove(stats_msg)
                             continue
                         logging.debug(f"action: stats_received | type:{self.filter_type} | filter_id:{stats.filter_id} | cli_id:{stats.client_id} | file_type:{stats.table_type} | chunks_received:{stats.chunks_received} | chunks_not_sent:{stats.chunks_not_sent}")
-                        if stats.client_id not in self.end_message_received:
-                            self.end_message_received[stats.client_id] = {}
-                        self.end_message_received[stats.client_id][stats.table_type] = True
-                        self.number_of_chunks_to_receive[stats.client_id][stats.table_type] = stats.total_expected
 
                         self._ensure_dict_entry(self.number_of_chunks_received_per_client, stats.client_id, stats.table_type)
                         self._ensure_dict_entry(self.number_of_chunks_not_sent_per_client, stats.client_id, stats.table_type)
-                        self.number_of_chunks_received_per_client[stats.client_id][stats.table_type] += stats.chunks_received
-                        self.number_of_chunks_not_sent_per_client[stats.client_id][stats.table_type] += stats.chunks_not_sent
-                        
                         total_received = self.number_of_chunks_received_per_client[stats.client_id][stats.table_type]
                         total_not_sent = self.number_of_chunks_not_sent_per_client[stats.client_id][stats.table_type]
-                        
+
                         if (stats.client_id, stats.table_type) not in self.already_sent_stats:
                             self.already_sent_stats[(stats.client_id, stats.table_type)] = True
                             stats_msg = FilterStatsMessage(self.id, stats.client_id, stats.table_type, stats.total_expected, total_received, total_not_sent)
                             self.middleware_end_exchange.send(stats_msg.encode())
-                            
+
+                        if stats.client_id not in self.end_message_received:
+                            self.end_message_received[stats.client_id] = {}
+                        self.end_message_received[stats.client_id][stats.table_type] = True
+
+                        if client_id not in self.number_of_chunks_to_receive:
+                            self.number_of_chunks_to_receive[stats.client_id] = {}
+                        self.number_of_chunks_to_receive[stats.client_id][stats.table_type] = stats.total_expected
+
+                        self.number_of_chunks_received_per_client[stats.client_id][stats.table_type] += stats.chunks_received
+                        self.number_of_chunks_not_sent_per_client[stats.client_id][stats.table_type] += stats.chunks_not_sent
+
                         if self._can_send_end_message(stats.total_expected, stats.client_id, stats.table_type):
                             self._send_end_message(stats.client_id, stats.table_type, stats.total_expected, self.number_of_chunks_not_sent_per_client[stats.client_id][stats.table_type])
+
                 except Exception as e:
                     logging.error(f"action: error_decoding_stats_message | error:{e}")
-                stats_results.remove(stats_msg)
 
-            for msg in results:
+            while results:
+                msg = results.popleft()
                 try:
                     if msg.startswith(b"END;"):
                         end_message = MessageEnd.decode(msg)
@@ -148,7 +146,7 @@ class Filter:
                         if self._can_send_end_message(total_expected, client_id, table_type):
                             self._send_end_message(client_id, table_type, total_expected, self.number_of_chunks_not_sent_per_client[client_id][table_type])
                         else:
-                            logging.info(f"action: not_sending_end_message_yet | type:{self.filter_type} | cli_id:{client_id} | file_type:{table_type.name} | chunks_received:{self.number_of_chunks_received_per_client[client_id][table_type]} | chunks_not_sent:{self.number_of_chunks_not_sent_per_client[client_id][table_type]} | chunks_expected:{total_expected}")
+                            logging.debug(f"action: not_sending_end_message_yet | type:{self.filter_type} | cli_id:{client_id} | file_type:{table_type.name} | chunks_received:{self.number_of_chunks_received_per_client[client_id][table_type]} | chunks_not_sent:{self.number_of_chunks_not_sent_per_client[client_id][table_type]} | chunks_expected:{total_expected}")
                     else:
                         chunk = ProcessBatchReader.from_bytes(msg)
                         client_id = chunk.client_id()
@@ -188,7 +186,6 @@ class Filter:
                             total_received = self.number_of_chunks_received_per_client[client_id][table_type]
                             total_not_sent = self.number_of_chunks_not_sent_per_client[client_id][table_type]
 
-
                             if (client_id, table_type) not in self.already_sent_stats:
                                 self.already_sent_stats[(client_id, table_type)] = True
                                 stats_msg = FilterStatsMessage(self.id, client_id, table_type, total_expected, total_received, total_not_sent)
@@ -200,8 +197,6 @@ class Filter:
                     
                 except Exception as e:
                     logging.error(f"action: error_decoding_message | error:{e}")
-                
-                results.remove(msg)
                 
 
     def delete_client_stats_data(self, stats_end):
