@@ -93,6 +93,27 @@ class Aggregator:
                 sender.stop_consuming()
                 sender.close()
             self.middleware_stats_exchange.stop_consuming()
+        except (OSError, RuntimeError, AttributeError):
+            pass
+
+        try:
+            self.middleware_end_exchange.stop_consuming()
+        except (OSError, RuntimeError, AttributeError):
+            pass
+
+        for sender in getattr(self, "middleware_queue_sender", {}).values():
+            try:
+                sender.stop_consuming()
+            except (OSError, RuntimeError, AttributeError):
+                pass
+
+        # Cerrar conexiones
+        try:
+            self.middleware_queue_receiver.close()
+        except (OSError, RuntimeError, AttributeError):
+            pass
+
+        try:
             self.middleware_stats_exchange.close()
             self.middleware_data_exchange.stop_consuming()
             self.middleware_data_exchange.close()
@@ -126,7 +147,7 @@ class Aggregator:
             self.middleware_data_exchange.stop_consuming()
 
         def stats_stop():
-            self.middleware_stats_exchange.stop_consuming()
+                self.middleware_stats_exchange.stop_consuming()
 
         def chunk_stop():
             self.middleware_queue_receiver.stop_consuming()
