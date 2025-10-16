@@ -16,7 +16,8 @@ from common.sender import Sender
 # Conexión: SIEMPRE 1 socket TCP persistente
 CONNECT_TIMEOUT_S: float = 10.0
 IO_TIMEOUT_S: float = 30.0
-
+CLIENT_TIMEOUT: float = 600.0  # Timeout para esperar resultados (10 minutos)
+# ============================
 class Client:
    
     def __init__(self, config: Dict, default_data_dir: str = "/data", default_output_dir: str = None) -> None:
@@ -122,7 +123,7 @@ class Client:
         
         try:
             # Configurar timeout más largo para esperar resultados
-            sender._sock.settimeout(300.0)  # 5 minutos
+            # sender._sock.settimeout(CLIENT_TIMEOUT)
             
             results_received = 0
             total_bytes = 0
