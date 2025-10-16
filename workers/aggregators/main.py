@@ -18,7 +18,8 @@ def initialize_config():
     try:
         logging_level = os.getenv("LOGGING_LEVEL", "DEBUG")
         agg_type = os.getenv("AGGREGATOR_TYPE")
-        agg_id = int(os.getenv("AGGREGATOR_ID", "1"))
+        agg_id_env = os.getenv("AGGREGATOR_ID") or os.getenv("WORKER_ID") or "1"
+        agg_id = int(agg_id_env)
 
         if agg_type != "PRODUCTS" and agg_type != "PURCHASES" and agg_type != "TPV":
             raise ValueError(f"Tipo de agregador inválido: {agg_type}")
