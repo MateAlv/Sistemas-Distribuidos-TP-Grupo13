@@ -146,7 +146,7 @@ class Filter:
                         chunk = ProcessBatchReader.from_bytes(msg)
                         client_id = chunk.client_id()
                         
-                        if self.filter_type == "amount" and client_id not in self.middleware_queue_sender:
+                        if self.filter_type == "amount" and f"to_merge_data_{client_id}" not in self.middleware_queue_sender:
                             self.middleware_queue_sender[f"to_merge_data_{client_id}"] = MessageMiddlewareQueue("rabbitmq", f"to_merge_data_{client_id}")
 
                         table_type = chunk.table_type()
@@ -155,9 +155,9 @@ class Filter:
                         logging.debug(f"action: filter_result | type:{self.filter_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()} | rows_out:{len(filtered_rows)}")
                         if filtered_rows:
                             for queue_name, queue in self.middleware_queue_sender.items():
-                                logging.debug(f"action: sending_to_queue | type:{self.filter_type} | queue:{queue_name} | rows:{len(filtered_rows)/len(chunk.rows):.2%} | cli_id:{chunk.client_id()}")
-                                if self._should_skip_queue(table_type, queue_name):
+                                if self._should_skip_queue(table_type, queue_name, client_id):
                                     continue
+                                logging.debug(f"action: sending_to_queue | type:{self.filter_type} | queue:{queue_name} | rows:{len(filtered_rows)/len(chunk.rows):.2%} | cli_id:{chunk.client_id()}")
                                 if self.filter_type != "amount":
                                     queue.send(ProcessChunk(chunk.header, filtered_rows).serialize())
                                 else:
@@ -187,7 +187,6 @@ class Filter:
                                 self.middleware_end_exchange.send(stats_msg.encode())
                             else:
                                 stats_msg = FilterStatsMessage(self.id, client_id, table_type, total_expected, 1, 0 if filtered_rows else 1)
-
                             if self._can_send_end_message(total_expected, client_id, table_type):
                                 self._send_end_message(client_id, table_type, total_expected, total_not_sent)
                     
@@ -215,13 +214,14 @@ class Filter:
             del self.number_of_chunks_to_receive[stats_end.client_id]
 
     def _can_send_end_message(self, total_expected, client_id, table_type):
+        logging.debug(f"Count: {self.number_of_chunks_received_per_client[client_id][table_type]} | cli_id:{client_id}")
         return total_expected == self.number_of_chunks_received_per_client[client_id][table_type] and self.id == 1
 
     def _send_end_message(self, client_id, table_type, total_expected, total_not_sent):
         logging.info(f"action: sending_end_message | type:{self.filter_type} | cli_id:{client_id} | file_type:{table_type.name} | total_chunks:{total_expected-total_not_sent}")
         
         for queue_name, queue in self.middleware_queue_sender.items():
-            if self._should_skip_queue(table_type, queue_name):
+            if self._should_skip_queue(table_type, queue_name, client_id):
                 continue
             logging.info(f"action: sending_end_to_queue | type:{self.filter_type} | queue:{queue_name} | total_chunks:{total_expected-total_not_sent}")
             msg_to_send = self._end_message_to_send(client_id, table_type, total_expected, total_not_sent)
@@ -259,15 +259,16 @@ class Filter:
         if table_type not in dictionary[client_id]:
             dictionary[client_id][table_type] = default
 
-    def _should_skip_queue(self, table_type: TableType, queue_name: str) -> bool:
-        # Omitir TRANSACTION_ITEMS hacia to_filter_2 y to_agg_4 (que necesitan TRANSACTIONS)
+    def _should_skip_queue(self, table_type: TableType, queue_name: str, client_id: int) -> bool:
         if table_type == TableType.TRANSACTION_ITEMS and queue_name in ["to_filter_2", "to_agg_4"]:
             return True
-        # Omitir TRANSACTIONS hacia to_agg_1+2 (que necesitan TRANSACTION_ITEMS)
         if table_type == TableType.TRANSACTIONS and queue_name in ["to_agg_1+2"]:
             return True
+        if self.filter_type == "amount" and queue_name != f"to_merge_data_{client_id}":
+            return True
+        
         return False
-    
+
     def shutdown(self, signum, frame):
         logging.info("SIGTERM recibido, cerrando filtro")
         try:
