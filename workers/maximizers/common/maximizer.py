@@ -33,8 +33,8 @@ class Maximizer:
                 self.data_sender = MessageMiddlewareQueue("rabbitmq", "to_transaction_items_to_join")
                 self.data_receiver = MessageMiddlewareQueue("rabbitmq", "to_absolute_max")
                 self.middleware_exchange_sender = MessageMiddlewareExchange("rabbitmq", "end_exchange_maximizer_PRODUCTS", [""], exchange_type="fanout")
-                self.middleware_exchange_receiver = None  # No necesita escuchar END de nadie
-                self.expected_partial_maximizers = 3  # Sabemos que son 3: rango 1, 4, 7
+                self.middleware_exchange_receiver = None 
+                self.expected_partial_maximizers = 3 
                 self.partial_ranges_seen = defaultdict(set)  # client_id -> {range_id}
                 self.partial_end_counts = defaultdict(int)   # client_id -> cantidad de END recibidos
             else:
@@ -530,7 +530,6 @@ class Maximizer:
         else:
             logging.warning(f"action: no_partial_results_to_send | range:{self.maximizer_range} | client_id:{client_id}")
         
-        # NO cerrar la conexión aquí para permitir que otros maximizers usen la misma queue
 
     def publish_partial_top3_results(self, client_id: int):
         """
@@ -548,9 +547,9 @@ class Maximizer:
                 # Usar PurchasesPerUserStoreRow para enviar los datos al TOP3 absoluto
                 row = PurchasesPerUserStoreRow(
                     store_id=store_id,
-                    store_name="",  # Placeholder - lo llenará el joiner
+                    store_name="",  # Placeholder - lo llena el joiner
                     user_id=user_id,
-                    user_birthdate=marker_date,  # Placeholder - lo llenará el joiner
+                    user_birthdate=marker_date,  # Placeholder - lo llena el joiner
                     purchases_made=purchase_count,  # Cantidad real de compras, no el rank
                 )
                 accumulated_results.append(row)
@@ -593,9 +592,9 @@ class Maximizer:
             for purchase_count, user_id in top3_heap:
                 row = PurchasesPerUserStoreRow(
                     store_id=store_id,
-                    store_name="",  # Placeholder - lo llenará el joiner
+                    store_name="",  # Placeholder - lo llena el joiner
                     user_id=user_id,
-                    user_birthdate=marker_date,  # Placeholder - lo llenará el joiner
+                    user_birthdate=marker_date,  # Placeholder - lo llena el joiner
                     purchases_made=purchase_count,
                 )
                 accumulated_results.append(row)

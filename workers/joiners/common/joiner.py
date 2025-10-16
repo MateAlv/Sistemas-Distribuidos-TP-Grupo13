@@ -484,7 +484,6 @@ class StoresTpvJoiner(Joiner):
     def define_queues(self):
         self.data_receiver = MessageMiddlewareQueue("rabbitmq", "to_join_with_stores_tvp")
         self.data_join_receiver = MessageMiddlewareQueue("rabbitmq", "stores_for_tpv_joiner")
-        # No necesitamos data_sender fijo porque enviamos a colas específicas por cliente
         
     def save_data_join_fields(self, row, client_id):
         self.joiner_data[client_id][row.store_id] = row.store_name
@@ -522,7 +521,6 @@ class StoresTpvJoiner(Joiner):
                 "year_half": row.year_half,
             }
         else:
-            # Fallback para TransactionsProcessRow (compatibilidad)
             result = {
                 "store_id": row.store_id,
                 "store_name": self.joiner_data[client_id].get(row.store_id, "UNKNOWN"),
@@ -618,9 +616,9 @@ class StoresTop3Joiner(Joiner):
                 # Crear nueva fila con store_name llenado
                 joined_row = PurchasesPerUserStoreRow(
                     store_id=store_id,
-                    store_name=store_name,  # ¡Ahora con el nombre real!
+                    store_name=store_name,
                     user_id=row.user_id,
-                    user_birthdate=row.user_birthdate,  # Sigue siendo placeholder
+                    user_birthdate=row.user_birthdate,
                     purchases_made=row.purchases_made
                 )
                 
@@ -700,7 +698,6 @@ class UsersJoiner(Joiner):
         for row in rows:
             if hasattr(row, 'user_id') and hasattr(row, 'birthdate'):
                 self.joiner_data[client_id][row.user_id] = row.birthdate
-                # logging.debug(f"action: save_user_join_data | type:{self.joiner_type} | user_id:{row.user_id} | birthdate:{row.birthdate}")
             else:
                 logging.warning(f"action: invalid_users_join_row | type:{self.joiner_type} | row_type:{type(row)} | missing_fields | has_user_id:{hasattr(row, 'user_id')} | has_birthdate:{hasattr(row, 'birthdate')}")
             
