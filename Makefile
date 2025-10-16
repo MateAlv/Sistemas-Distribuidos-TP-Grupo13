@@ -46,6 +46,7 @@ up:
 test:
 	# Run the docker-compose setup
 	make clean-results
+	python3 generar-compose.py --config=${CONFIG}
 	docker compose -f ${DOCKER} up --build
 .PHONY: test
 
@@ -103,4 +104,5 @@ hard-down:
 prune:
 	docker image prune -a -f
 	docker system prune -f
+    # docker system prune -a --volumes
 .PHONY: prune

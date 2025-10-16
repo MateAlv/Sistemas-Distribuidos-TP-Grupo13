@@ -5,7 +5,8 @@ from utils.file_utils.process_chunk import ProcessChunk
 from utils.file_utils.process_batch_reader import ProcessBatchReader
 from utils.file_utils.file_table import DateTime
 from utils.file_utils.end_messages import MessageEnd
-from middleware.middleware_interface import MessageMiddlewareQueue, MessageMiddlewareExchange, TIMEOUT
+from middleware.middleware_interface import MessageMiddlewareQueue, MessageMiddlewareExchange, TIMEOUT, \
+    MessageMiddlewareMessageError
 from .aggregator_stats_messages import AggregatorStatsMessage, AggregatorStatsEndMessage
 from collections import defaultdict, deque
 import datetime
@@ -14,7 +15,7 @@ class Aggregator:
     def __init__(self, agg_type: str, agg_id: int = 1):
         logging.getLogger('pika').setLevel(logging.CRITICAL)
         
-        self._running = True
+        self.__running = True
         
         self.aggregator_type = agg_type
         self.aggregator_id = agg_id
@@ -49,24 +50,73 @@ class Aggregator:
         else:
             raise ValueError(f"Tipo de agregador inválido: {self.aggregator_type}")
 
-    def shutdown(self, signum, frame):
+    def shutdown(self, signum=None, frame=None):
         logging.info(f"action: shutdown_signal_received | type:{self.aggregator_type} | agg_id:{self.aggregator_id}")
-        # Enviar stats finales a otros aggregators - Tolerancia a fallos
+
+        # Detener consumos de las colas y exchanges
         try:
-            self._running = False  # Stop the main loop
-            # Cerrar conexiones de middleware
             self.middleware_queue_receiver.stop_consuming()
-            self.middleware_queue_receiver.close()
-            for sender in self.middleware_queue_sender.values():
-                sender.stop_consuming()
-                sender.close()
-                
+        except (OSError, RuntimeError, AttributeError):
+            pass
+
+        try:
             self.middleware_stats_exchange.stop_consuming()
+        except (OSError, RuntimeError, AttributeError):
+            pass
+
+        try:
+            self.middleware_end_exchange.stop_consuming()
+        except (OSError, RuntimeError, AttributeError):
+            pass
+
+        for sender in getattr(self, "middleware_queue_sender", {}).values():
+            try:
+                sender.stop_consuming()
+            except (OSError, RuntimeError, AttributeError):
+                pass
+
+        # Cerrar conexiones
+        try:
+            self.middleware_queue_receiver.close()
+        except (OSError, RuntimeError, AttributeError):
+            pass
+
+        try:
             self.middleware_stats_exchange.close()
-            
-            logging.info(f"action: shutdown_completed | type:{self.aggregator_type} | agg_id:{self.aggregator_id}")
-        except Exception as e:
-            logging.error(f"action: shutdown_error | type:{self.aggregator_type} | agg_id:{self.aggregator_id} | error:{e}")
+        except (OSError, RuntimeError, AttributeError):
+            pass
+
+        try:
+            self.middleware_end_exchange.close()
+        except (OSError, RuntimeError, AttributeError):
+            pass
+
+        for sender in getattr(self, "middleware_queue_sender", {}).values():
+            try:
+                sender.close()
+            except (OSError, RuntimeError, AttributeError):
+                pass
+
+        # Detener procesamiento
+        self.__running = False
+
+        # Liberar estructuras de datos
+        for attr in [
+            "global_accumulator",
+            "end_message_received",
+            "chunks_received_per_client",
+            "chunks_processed_per_client",
+            "chunks_to_receive",
+            "already_sent_stats"
+        ]:
+            try:
+                obj = getattr(self, attr, None)
+                if isinstance(obj, (dict, list, set)) and hasattr(obj, "clear"):
+                    obj.clear()
+            except (OSError, RuntimeError, AttributeError):
+                pass
+
+        logging.info(f"action: shutdown_completed | type:{self.aggregator_type} | agg_id:{self.aggregator_id}")
     
     def run(self):
         logging.info(f"Agregador iniciado. Tipo: {self.aggregator_type}, ID: {self.aggregator_id}")
@@ -76,18 +126,24 @@ class Aggregator:
         def callback(msg): results.append(msg)
         def stats_callback(msg): stats_results.append(msg)
         def stop():
-            self.middleware_queue_receiver.stop_consuming()
+                self.middleware_queue_receiver.stop_consuming()
         def stats_stop():
-            self.middleware_stats_exchange.stop_consuming()
+                self.middleware_stats_exchange.stop_consuming()
 
-        while self._running:
+        while self.__running:
             # Escuchar stats de otros aggregators
-            self.middleware_stats_exchange.connection.call_later(TIMEOUT, stats_stop)
-            self.middleware_stats_exchange.start_consuming(stats_callback)
-            
+            try:
+                self.middleware_stats_exchange.connection.call_later(TIMEOUT, stats_stop)
+                self.middleware_stats_exchange.start_consuming(stats_callback)
+            except (OSError, RuntimeError, MessageMiddlewareMessageError) as e:
+                logging.error(f"Error en consumo: {e}")
+
             # Escuchar datos de filters
-            self.middleware_queue_receiver.connection.call_later(TIMEOUT, stop)
-            self.middleware_queue_receiver.start_consuming(callback)
+            try:
+                self.middleware_queue_receiver.connection.call_later(TIMEOUT, stop)
+                self.middleware_queue_receiver.start_consuming(callback)
+            except (OSError, RuntimeError, MessageMiddlewareMessageError) as e:
+                logging.error(f"Error en consumo: {e}")
 
             # Procesar mensajes de stats de otros aggregators
             while stats_results:
@@ -97,21 +153,22 @@ class Aggregator:
                         stats_end = AggregatorStatsEndMessage.decode(stats_msg)
                         if stats_end.aggregator_id == self.aggregator_id:
                             continue
-                    
+
                         logging.info(f"action: stats_end_received | type:{self.aggregator_type} | agg_id:{stats_end.aggregator_id} | cli_id:{stats_end.client_id} | table_type:{stats_end.table_type}")
-                        self.delete_client_data(stats_end)
+                        self.delete_stats_client_data(stats_end)
+                        self.delete_client_accumulator(stats_end)
                     else:
                         stats = AggregatorStatsMessage.decode(stats_msg)
                         if stats.aggregator_id == self.aggregator_id:
                             continue
                         
                         logging.info(f"action: stats_received | type:{self.aggregator_type} | agg_id:{stats.aggregator_id} | cli_id:{stats.client_id} | file_type:{stats.table_type} | chunks_received:{stats.chunks_received} | chunks_processed:{stats.chunks_processed}")
-                        
+
                         self._ensure_dict_entry(self.chunks_received_per_client, stats.client_id, stats.table_type)
                         self._ensure_dict_entry(self.chunks_processed_per_client, stats.client_id, stats.table_type)
                         total_received = self.chunks_received_per_client[stats.client_id][stats.table_type]
                         total_processed = self.chunks_processed_per_client[stats.client_id][stats.table_type]
-                        
+
                         if (stats.client_id, stats.table_type) not in self.already_sent_stats:
                             self.already_sent_stats[(stats.client_id, stats.table_type)] = True
                             my_stats_msg = AggregatorStatsMessage(self.aggregator_id, stats.client_id, stats.table_type, 
@@ -125,10 +182,10 @@ class Aggregator:
                         if stats.client_id not in self.end_message_received:
                             self.end_message_received[stats.client_id] = {}
                         self.end_message_received[stats.client_id][stats.table_type] = True
-                        
+
                         self.chunks_received_per_client[stats.client_id][stats.table_type] += stats.chunks_received
                         self.chunks_processed_per_client[stats.client_id][stats.table_type] += stats.chunks_processed
-                            
+
                         # Verificar si puedo enviar end message
                         if self._can_send_end_message(stats.total_expected, stats.client_id, stats.table_type):
                             self._send_end_message(stats.client_id, stats.table_type, stats.total_expected, total_processed)
@@ -144,7 +201,8 @@ class Aggregator:
                     msg_len = len(msg) if hasattr(msg, '__len__') else 'unknown'
                     msg_preview = str(msg)[:100] if len(str(msg)) > 100 else str(msg)
                     logging.debug(f"action: received_message | type:{self.aggregator_type} | msg_type:{msg_type} | msg_len:{msg_len} | preview:{msg_preview}")
-                    
+
+                    # PRIMERO: Verificar si es un END message
                     if msg.startswith(b"END;"):
                         try:
                             end_message = MessageEnd.decode(msg)
@@ -165,18 +223,21 @@ class Aggregator:
 
                             logging.info(f"action: end_message_received | type:{self.aggregator_type} | cli_id:{client_id} | file_type:{table_type} | total_chunks_receive:{self.chunks_received_per_client[client_id][table_type]}| total_chunks_expected:{total_expected}")
                             
+                            # Enviar stats message
                             stats_msg = AggregatorStatsMessage(self.aggregator_id, client_id, table_type, total_expected,
                                                               self.chunks_received_per_client[client_id][table_type],
                                                               self.chunks_processed_per_client[client_id][table_type])
                             logging.info(f"action: sending_stats_message | msg:{stats_msg.encode()}")
                             self.middleware_stats_exchange.send(stats_msg.encode())
 
+                            # Verificar si puedo enviar end message
                             if self._can_send_end_message(total_expected, client_id, table_type):
                                 self._send_end_message(client_id, table_type, total_expected, self.chunks_processed_per_client[client_id][table_type])
                                 
                         except Exception as e:
                             logging.error(f"action: error_processing_end_message | type:{self.aggregator_type} | error:{e}")
                     else:
+                        # SEGUNDO: Procesar como chunk de datos
                         chunk = ProcessBatchReader.from_bytes(msg)
                         client_id = chunk.client_id()
                         table_type = chunk.table_type()
@@ -190,6 +251,7 @@ class Aggregator:
                         
                         logging.info(f"action: processing_start | type:{self.aggregator_type} | cli_id:{client_id}")
                         
+                        # Procesar según tipo de aggregator - ACUMULAR no enviar
                         has_output = False
                         if self.aggregator_type == "PRODUCTS":
                             logging.info(f"action: applying_products | cli_id:{client_id}")
@@ -238,7 +300,7 @@ class Aggregator:
                                                                   total_expected, total_received, total_processed)
                                 self.middleware_stats_exchange.send(stats_msg.encode())
                             else:
-                                stats_msg = AggregatorStatsMessage(self.aggregator_id, client_id, table_type, 
+                                stats_msg = AggregatorStatsMessage(self.aggregator_id, client_id, table_type,
                                                                   total_expected, 1, 1 if has_output else 0)
                                 self.middleware_stats_exchange.send(stats_msg.encode())
 
@@ -504,18 +566,30 @@ class Aggregator:
             try:
                 end_msg = MessageEnd(client_id, table_type, total_processed)
                 for queue in self.middleware_queue_sender.values():
-                    queue.send(end_msg.encode()) 
+                    queue.send(end_msg.encode())
                 logging.info(f"action: sent_end_to_maximizers | type:{self.aggregator_type} | chunks:{total_processed}")
             except Exception as e:
                 logging.error(f"action: error_sending_end_message | error:{e}")
-        
+
             # Limpiar estado
             end_msg = AggregatorStatsEndMessage(self.aggregator_id, client_id, table_type)
             self.middleware_stats_exchange.send(end_msg.encode())
-            self.delete_client_data(end_msg)
+            self.delete_client_stats_data(end_msg)
+            self.delete_client_accumulator(end_msg)
 
-    def delete_client_data(self, stats_end):
+    def delete_client_accumulator(self, stats_end):
+        # Limpiar acumulador global
+        logging.info(f"action: deleting_client_accumulator | cli_id:{stats_end.client_id}")
+        try:
+            if stats_end.client_id in self.global_accumulator:
+                del self.global_accumulator[stats_end.client_id]
+        except KeyError:
+            pass  # Ya estaba limpio
+        logging.info(f"action: client_accumulator_deleted | cli_id:{stats_end.client_id}")
+
+    def delete_client_stats_data(self, stats_end):
         """Limpia datos del cliente después de procesar"""
+        logging.info(f"action: deleting_client_stats_data | cli_id:{stats_end.client_id}")
         try:
             if stats_end.client_id in self.end_message_received:
                 if stats_end.table_type in self.end_message_received[stats_end.client_id]:
@@ -544,11 +618,8 @@ class Aggregator:
             if (stats_end.client_id, stats_end.table_type) in self.already_sent_stats:
                 del self.already_sent_stats[(stats_end.client_id, stats_end.table_type)]
             
-            # Limpiar acumulador global
-            if stats_end.client_id in self.global_accumulator:
-                del self.global_accumulator[stats_end.client_id]
-                logging.info(f"action: cleanup_accumulator | client_id:{stats_end.client_id} | aggregator_id:{self.aggregator_id}")
-                
+
+            logging.info(f"action: client_stats_data_deleted | cli_id:{stats_end.client_id}")
         except KeyError:
             pass  # Ya estaba limpio
 
@@ -784,7 +855,7 @@ class Aggregator:
         from utils.file_utils.table_type import TableType
         header = ProcessChunkHeader(client_id=client_id, table_type=TableType.TPV)
         chunk = ProcessChunk(header, rows)
-        
+
         queue = MessageMiddlewareQueue("rabbitmq", "to_join_with_stores_tvp")
         chunk_data = chunk.serialize()
         queue.send(chunk_data)  # Enviar datos directos, no en base64

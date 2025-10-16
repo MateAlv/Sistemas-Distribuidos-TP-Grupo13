@@ -6,7 +6,8 @@ from utils.file_utils.result_chunk import ResultChunkHeader, ResultChunk
 from utils.file_utils.process_batch_reader import ProcessBatchReader
 from utils.file_utils.end_messages import MessageEnd, MessageQueryEnd
 from utils.file_utils.table_type import TableType, ResultTableType
-from middleware.middleware_interface import MessageMiddlewareQueue, MessageMiddlewareExchange, TIMEOUT
+from middleware.middleware_interface import MessageMiddlewareQueue, MessageMiddlewareExchange, TIMEOUT, \
+    MessageMiddlewareMessageError
 from .filter_stats_messages import FilterStatsMessage, FilterStatsEndMessage
 
 class Filter:
@@ -18,11 +19,13 @@ class Filter:
         self.id = cfg["id"]
         self.cfg = cfg
         self.filter_type = cfg["filter_type"]
+
         self.end_message_received = {}
         self.number_of_chunks_received_per_client = {}
         self.number_of_chunks_not_sent_per_client = {}
         self.number_of_chunks_to_receive = {}
         self.already_sent_stats = {}
+
         self.middleware_queue_sender = {}
 
         self.middleware_end_exchange = MessageMiddlewareExchange("rabbitmq", 
@@ -56,16 +59,23 @@ class Filter:
         def callback(msg): results.append(msg)
         def stats_callback(msg): stats_results.append(msg)
         def stop():
-            self.middleware_queue_receiver.stop_consuming()
+                self.middleware_queue_receiver.stop_consuming()
         def stats_stop():
-            self.middleware_end_exchange.stop_consuming()
+                self.middleware_end_exchange.stop_consuming()
 
         while self.__running:
-            self.middleware_end_exchange.connection.call_later(TIMEOUT, stats_stop)
-            self.middleware_end_exchange.start_consuming(stats_callback)       
 
-            self.middleware_queue_receiver.connection.call_later(TIMEOUT, stop)
-            self.middleware_queue_receiver.start_consuming(callback)
+            try:
+                self.middleware_end_exchange.connection.call_later(TIMEOUT, stats_stop)
+                self.middleware_end_exchange.start_consuming(stats_callback)
+            except (OSError, RuntimeError, MessageMiddlewareMessageError) as e:
+                logging.error(f"Error en consumo: {e}")
+
+            try:
+                self.middleware_queue_receiver.connection.call_later(TIMEOUT, stop)
+                self.middleware_queue_receiver.start_consuming(callback)
+            except (OSError, RuntimeError, MessageMiddlewareMessageError) as e:
+                 logging.error(f"Error en consumo: {e}")
 
             while stats_results:
                 stats_msg = stats_results.popleft()
@@ -75,7 +85,7 @@ class Filter:
                         if stats_end.filter_id == self.id:
                             continue
                         logging.debug(f"action: stats_end_received | type:{self.filter_type} | filter_id:{stats_end.filter_id} | cli_id:{stats_end.client_id} | table_type:{stats_end.table_type}")
-                        # self.delete_client_data(stats_end)
+                        self.delete_client_stats_data(stats_end)
                     else:
                         stats = FilterStatsMessage.decode(stats_msg)
                         if stats.filter_id == self.id:
@@ -197,22 +207,41 @@ class Filter:
                     logging.error(f"action: error_decoding_message | error:{e}")
                 
 
-    def delete_client_data(self, stats_end):
-        del self.end_message_received[stats_end.client_id][stats_end.table_type]
-        del self.number_of_chunks_received_per_client[stats_end.client_id][stats_end.table_type]
-        del self.number_of_chunks_not_sent_per_client[stats_end.client_id][stats_end.table_type]
-        del self.number_of_chunks_to_receive[stats_end.client_id][stats_end.table_type]
+    def delete_client_stats_data(self, stats_end):
+        """Limpia datos del cliente después de procesar"""
+        logging.info(f"action: deleting_client_stats_data | cli_id:{stats_end.client_id}")
+        try:
+            if stats_end.client_id in self.end_message_received:
+                if stats_end.table_type in self.end_message_received[stats_end.client_id]:
+                    del self.end_message_received[stats_end.client_id][stats_end.table_type]
+                if not self.end_message_received[stats_end.client_id]:
+                    del self.end_message_received[stats_end.client_id]
 
-        if (stats_end.client_id, stats_end.table_type) in self.already_sent_stats:
-            del self.already_sent_stats[(stats_end.client_id, stats_end.table_type)]
-        if self.end_message_received[stats_end.client_id] == {}:
-            del self.end_message_received[stats_end.client_id]
-        if self.number_of_chunks_received_per_client[stats_end.client_id] == {}:
-            del self.number_of_chunks_received_per_client[stats_end.client_id]
-        if self.number_of_chunks_not_sent_per_client[stats_end.client_id] == {}:
-            del self.number_of_chunks_not_sent_per_client[stats_end.client_id]
-        if self.number_of_chunks_to_receive[stats_end.client_id] == {}:
-            del self.number_of_chunks_to_receive[stats_end.client_id]
+            if stats_end.client_id in self.number_of_chunks_to_receive:
+                if stats_end.table_type in self.number_of_chunks_to_receive[stats_end.client_id]:
+                    del self.number_of_chunks_to_receive[stats_end.client_id][stats_end.table_type]
+                if not self.number_of_chunks_to_receive[stats_end.client_id]:
+                    del self.number_of_chunks_to_receive[stats_end.client_id]
+
+            if stats_end.client_id in self.number_of_chunks_received_per_client:
+                if stats_end.table_type in self.number_of_chunks_received_per_client[stats_end.client_id]:
+                    del self.number_of_chunks_received_per_client[stats_end.client_id][stats_end.table_type]
+                if not self.number_of_chunks_received_per_client[stats_end.client_id]:
+                    del self.number_of_chunks_received_per_client[stats_end.client_id]
+
+            if stats_end.client_id in self.number_of_chunks_to_receive:
+                if stats_end.table_type in self.number_of_chunks_to_receive[stats_end.client_id]:
+                    del self.number_of_chunks_to_receive[stats_end.client_id][stats_end.table_type]
+                if not self.number_of_chunks_to_receive[stats_end.client_id]:
+                    del self.number_of_chunks_to_receive[stats_end.client_id]
+
+            if (stats_end.client_id, stats_end.table_type) in self.already_sent_stats:
+                del self.already_sent_stats[(stats_end.client_id, stats_end.table_type)]
+
+            logging.info(f"action: client_stats_data_deleted | cli_id:{stats_end.client_id}")
+        except KeyError:
+            pass  # Ya estaba limpio
+
 
     def _can_send_end_message(self, total_expected, client_id, table_type):
         logging.debug(f"Count: {self.number_of_chunks_received_per_client[client_id][table_type]} | cli_id:{client_id}")
@@ -229,7 +258,7 @@ class Filter:
             queue.send(msg_to_send.encode())
         end_msg = FilterStatsEndMessage(self.id, client_id, table_type)
         self.middleware_end_exchange.send(end_msg.encode())
-        # self.delete_client_data(end_msg)
+        self.delete_client_stats_data(end_msg)
 
     def _end_message_to_send(self, client_id, table_type, total_expected, total_not_sent):
         if self.filter_type != "amount":
@@ -270,19 +299,59 @@ class Filter:
         
         return False
 
-    def shutdown(self, signum, frame):
-        logging.info("SIGTERM recibido, cerrando filtro")
+    def shutdown(self, signum=None, frame=None):
+        logging.info(f"SIGTERM recibido: cerrando filtro {self.filter_type} (ID: {self.id})")
+
+        # Detener consumo de las colas
         try:
-            self.__running = False
-            
-            for queue in self.middleware_queue_sender.values():
-                queue.stop_consuming()
-                queue.close()
-            
             self.middleware_queue_receiver.stop_consuming()
-            self.middleware_queue_receiver.close()
+        except (OSError, RuntimeError, AttributeError):
+            pass
+
+        try:
             self.middleware_end_exchange.stop_consuming()
+        except (OSError, RuntimeError, AttributeError):
+            pass
+
+        for sender in getattr(self, "middleware_queue_sender", {}).values():
+            try:
+                sender.stop_consuming()
+            except (OSError, RuntimeError, AttributeError):
+                pass
+
+        # Cerrar conexiones
+        try:
+            self.middleware_queue_receiver.close()
+        except (OSError, RuntimeError, AttributeError):
+            pass
+
+        try:
             self.middleware_end_exchange.close()
-            logging.info(f"Filtro {self.filter_type} cerrado")
-        except Exception as e:
-            logging.error(f"Error cerrando filtro: {e}")
+        except (OSError, RuntimeError, AttributeError):
+            pass
+
+        for sender in getattr(self, "middleware_queue_sender", {}).values():
+            try:
+                sender.close()
+            except (OSError, RuntimeError, AttributeError):
+                pass
+
+        # Detener el loop principal
+        self.__running = False
+
+        # Limpiar estructuras
+        for attr in [
+            "end_message_received",
+            "number_of_chunks_received_per_client",
+            "number_of_chunks_not_sent_per_client",
+            "number_of_chunks_to_receive",
+            "already_sent_stats"
+        ]:
+            try:
+                obj = getattr(self, attr, None)
+                if isinstance(obj, (dict, list, set)) and hasattr(obj, "clear"):
+                    obj.clear()
+            except (OSError, RuntimeError, AttributeError):
+                pass
+
+        logging.info(f"Filtro {self.filter_type} cerrado correctamente.")
