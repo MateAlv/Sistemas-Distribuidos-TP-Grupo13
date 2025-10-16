@@ -15,8 +15,8 @@ from common.sender import Sender
 # ============================
 # Conexión: SIEMPRE 1 socket TCP persistente
 CONNECT_TIMEOUT_S: float = 10.0
-IO_TIMEOUT_S: float = 30.0
-CLIENT_TIMEOUT: float = 600.0  # Timeout para esperar resultados (10 minutos)
+IO_TIMEOUT_S: float = 60000.0
+CLIENT_TIMEOUT: float = 60000.0  # Timeout para esperar resultados (10 minutos)
 # ============================
 class Client:
    
