@@ -19,7 +19,7 @@ class Aggregator:
     def __init__(self, agg_type: str, agg_id: int = 1):
         logging.getLogger('pika').setLevel(logging.CRITICAL)
         
-        self._running = True
+        self.__running = True
         
         self.aggregator_type = agg_type
         self.aggregator_id = agg_id
@@ -57,18 +57,40 @@ class Aggregator:
     def shutdown(self, signum, frame):
         logging.info(f"action: shutdown_signal_received | type:{self.aggregator_type} | agg_id:{self.aggregator_id}")
         # Enviar stats finales a otros aggregators - Tolerancia a fallos
+
+        self.__running = False  # Stop the main loop
+
         try:
-            self._running = False  # Stop the main loop
             # Cerrar conexiones de middleware
-            self.middleware_queue_receiver.stop_consuming()
-            self.middleware_queue_receiver.close()
+            try:
+                self.middleware_queue_receiver.close()
+            except Exception as e:
+                pass
+
             for sender in self.middleware_queue_sender.values():
-                sender.stop_consuming()
-                sender.close()
-                
-            self.middleware_stats_exchange.stop_consuming()
-            self.middleware_stats_exchange.close()
-            
+                try:
+                    sender.close()
+                except Exception as e:
+                    pass
+            try:
+                self.middleware_stats_exchange.close()
+            except Exception as e:
+                pass
+
+            # Liberar estructuras en memoria
+            if self.global_accumulator:
+                self.global_accumulator.clear()
+            if self.end_message_received:
+                self.end_message_received.clear()
+            if self.chunks_received_per_client:
+                self.chunks_received_per_client.clear()
+            if self.chunks_processed_per_client:
+                self.chunks_processed_per_client.clear()
+            if self.chunks_to_receive:
+                self.chunks_to_receive.clear()
+            if self.already_sent_stats:
+                self.already_sent_stats.clear()
+
             logging.info(f"action: shutdown_completed | type:{self.aggregator_type} | agg_id:{self.aggregator_id}")
         except Exception as e:
             logging.error(f"action: shutdown_error | type:{self.aggregator_type} | agg_id:{self.aggregator_id} | error:{e}")
@@ -85,7 +107,7 @@ class Aggregator:
         def stats_stop():
             self.middleware_stats_exchange.stop_consuming()
 
-        while self._running:
+        while self.__running:
             # Escuchar stats de otros aggregators
             self.middleware_stats_exchange.connection.call_later(TIMEOUT, stats_stop)
             self.middleware_stats_exchange.start_consuming(stats_callback)

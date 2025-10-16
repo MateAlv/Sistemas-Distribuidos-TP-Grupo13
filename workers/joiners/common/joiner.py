@@ -334,24 +334,48 @@ class Joiner:
 
     def shutdown(self, signum, frame):
         logging.info(f"SIGTERM received: shutting down joiner {self.joiner_type}")
+        self.__running = False
+
         try:
-            self.__running = False  # Stop the handler loops
-            
-            # Detener hilos
-            if self.data_handler_thread.is_alive():
-                self.data_handler_thread.join(timeout=5)
-            if self.join_data_handler_thread.is_alive():
-                self.join_data_handler_thread.join(timeout=5)
-            
-            # Cerrar colas y conexiones
-            if self.data_receiver:
+            # Esperar hilos
+            try:
+                self.data_handler_thread.join(timeout=3)
+            except Exception:
+                pass
+            try:
+                self.join_data_handler_thread.join(timeout=3)
+            except Exception:
+                pass
+
+            # Cerrar conexiones
+            try:
                 self.data_receiver.stop_consuming()
                 self.data_receiver.close()
-            if self.data_join_receiver:
+            except Exception:
+                pass
+
+            try:
                 self.data_join_receiver.stop_consuming()
                 self.data_join_receiver.close()
-            if self.data_sender:
+            except Exception:
+                pass
+
+            try:
                 self.data_sender.close()
+            except Exception:
+                pass
+
+            # Liberar estructuras
+            with self.lock:
+                self.data.clear()
+                self.joiner_data.clear()
+                self.joiner_results.clear()
+                self.joiner_data_chunks.clear()
+                self.client_end_messages_received.clear()
+                self.completed_clients.clear()
+                self._pending_end_messages.clear()
+                self.ready_to_join.clear()
+
             logging.info(f"Joiner {self.joiner_type} shutdown complete.")
         except Exception as e:
             logging.error(f"Error during shutdown of joiner {self.joiner_type}: {e}")

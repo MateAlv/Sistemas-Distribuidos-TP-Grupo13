@@ -17,7 +17,9 @@ TIMEOUT = 3
 class Maximizer:
     def __init__(self, max_type: str, max_range: str):
         logging.getLogger('pika').setLevel(logging.CRITICAL)
-        
+
+        self.__running = True
+
         self.maximizer_type = max_type
         self.maximizer_range = max_range
         self.clients_end_processed = set()
@@ -151,7 +153,7 @@ class Maximizer:
             except Exception as e:
                 logging.debug(f"action: stop_consuming_warning | type:{self.maximizer_type} | range:{self.maximizer_range} | error:{e}")
 
-        while True:
+        while self.__running:
             try:
                 if hasattr(self.data_receiver, "connection"):
                     self.data_receiver.connection.call_later(TIMEOUT, stop)
@@ -296,20 +298,45 @@ class Maximizer:
         return None
     
     def shutdown(self, signum, frame):
-        logging.info(f"SIGTERM recibida para el maximizer {self.maximizer_type} rango {self.maximizer_range}: apagando maximizer")
+        logging.info(f"SIGTERM recibido: cerrando maximizer {self.maximizer_type} (rango {self.maximizer_range})")
+
+        self.__running = False
+
         try:
-            if self.data_receiver:
+            # Cerrar conexiones
+            try:
                 self.data_receiver.stop_consuming()
                 self.data_receiver.close()
-            if self.data_sender:
+            except Exception:
+                pass
+
+            try:
                 self.data_sender.stop_consuming()
                 self.data_sender.close()
-            if self.middleware_exchange_sender:
-                self.middleware_exchange_sender.stop_consuming()
+            except Exception:
+                pass
+
+            try:
                 self.middleware_exchange_sender.close()
-            if self.middleware_exchange_receiver:
-                self.middleware_exchange_receiver.stop_consuming()
+            except Exception:
+                pass
+
+            try:
                 self.middleware_exchange_receiver.close()
+            except Exception:
+                pass
+
+            # Liberar estructuras
+            if self.maximizer_type == "MAX":
+                self.sellings_max.clear()
+                self.profit_max.clear()
+                self.partial_ranges_seen.clear()
+                self.partial_end_counts.clear()
+            elif self.maximizer_type == "TOP3":
+                self.top3_by_store.clear()
+                self.partial_top3_finished.clear()
+
+            self.clients_end_processed.clear()
             logging.info(f"Maximizer {self.maximizer_type} rango {self.maximizer_range} apagado correctamente.")
         except Exception as e:
             logging.error(f"Error al apagar el maximizer {self.maximizer_type} rango {self.maximizer_range}: {e}")

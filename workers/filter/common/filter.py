@@ -298,17 +298,39 @@ class Filter:
 
     def shutdown(self, signum, frame):
         logging.info("SIGTERM recibido, cerrando filtro")
+        self.__running = False
+
         try:
-            self.__running = False
-            
+
             for queue in self.middleware_queue_sender.values():
-                queue.stop_consuming()
-                queue.close()
-            
-            self.middleware_queue_receiver.stop_consuming()
-            self.middleware_queue_receiver.close()
-            self.middleware_end_exchange.stop_consuming()
-            self.middleware_end_exchange.close()
+                try:
+                    queue.close()
+                except Exception as e:
+                    pass
+
+            try:
+                self.middleware_queue_receiver.stop_consuming()
+                self.middleware_queue_receiver.close()
+            except Exception as e:
+                pass
+
+            try:
+                self.middleware_end_exchange.close()
+            except Exception as e:
+                pass
+
+            # Liberar estructuras
+            if self.end_message_received:
+                self.end_message_received.clear()
+            if self.number_of_chunks_received_per_client:
+                self.number_of_chunks_received_per_client.clear()
+            if self.number_of_chunks_not_sent_per_client:
+                self.number_of_chunks_not_sent_per_client.clear()
+            if self.number_of_chunks_to_receive:
+                self.number_of_chunks_to_receive.clear()
+            if self.already_sent_stats:
+                self.already_sent_stats.clear()
+
             logging.info(f"Filtro {self.filter_type} cerrado")
         except Exception as e:
             logging.error(f"Error cerrando filtro: {e}")
