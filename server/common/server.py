@@ -65,6 +65,8 @@ class Server:
         # Lock para acceso seguro a estructuras compartidas
         self.clients_lock = threading.Lock()
         
+        self.number_of_clients = 0
+        
         self._running = True
         self._server_socket: Optional[socket.socket] = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -80,14 +82,14 @@ class Server:
         if SAVE_DIR:
             try:
                 os.makedirs(SAVE_DIR, exist_ok=True)
-                logging.info("action: save_dir_ready | dir: %s", SAVE_DIR)
+                logging.debug("action: save_dir_ready | dir: %s", SAVE_DIR)
             except Exception as e:
                 logging.warning("action: save_dir_create_fail | dir: %s | error: %r", SAVE_DIR, e)
 
     # ---------------------------------------------------------------------
 
     def run(self) -> None:
-        logging.info("action: accept_loop | result: start | ip:%s | port:%s | backlog:%s",
+        logging.debug("action: accept_loop | result: start | ip:%s | port:%s | backlog:%s",
                      self.host, self.port, self.listen_backlog)
         
         try:
@@ -114,6 +116,15 @@ class Server:
         finally:
             self.__graceful_shutdown()
 
+
+    def generate_id(self) -> int:
+        """
+        Genera un ID único para cada cliente.
+        """
+        with self.clients_lock:
+            self.number_of_clients += 1
+            return self.number_of_clients
+
     # ---------------------------------------------------------------------
 
     def _handle_client(self, sock: socket.socket, addr: Tuple[str, int]) -> None:
@@ -122,7 +133,7 @@ class Server:
         Mantiene el socket abierto y escucha resultados después del finish.
         """
         peer = f"{addr[0]}:{addr[1]}"
-        client_id = None
+        client_id = self.generate_id()
         number_of_chunks_per_file = {}
         middleware_queue_senders = {}
         middleware_queue_senders["to_filter_1"] = MessageMiddlewareQueue("rabbitmq", "to_filter_1")
@@ -136,7 +147,7 @@ class Server:
         
         try:
             sock.settimeout(DEFAULT_IO_TIMEOUT)
-            logging.info("action: client_connected | peer:%s", peer)
+            logging.debug("action: client_connected | peer:%s", peer)
 
             # -------- Handshake obligatorio --------
             self._do_handshake(sock)
@@ -150,7 +161,7 @@ class Server:
 
                 if header == H_ID_DATA:
                     # Recibe y procesa chunk
-                    client_id = self._handle_file_chunks(sock, peer, middleware_queue_senders, number_of_chunks_per_file)
+                    self._handle_file_chunks(sock, peer, middleware_queue_senders, number_of_chunks_per_file, client_id)
                     if middleware_queue_receiver is None and client_id is not None:
                         middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", f"to_merge_data_{client_id}")
                     files_received += 1
@@ -159,11 +170,11 @@ class Server:
                     continue
 
                 elif header == H_ID_FINISH:
-                    logging.info("action: recv_finished | peer:%s | client_id:%s | files:%d", 
+                    logging.debug("action: recv_finished | peer:%s | client_id:%s | files:%d", 
                                peer, client_id, files_received)
                     for table_type, count in number_of_chunks_per_file.items():
                         message = MessageEnd(client_id, table_type=table_type, count=count).encode()
-                        logging.info("action: sending_end_message | peer:%s | client_id:%s | table_type:%s | count:%d", 
+                        logging.debug("action: sending_end_message | peer:%s | client_id:%s | table_type:%s | count:%d", 
                                    peer, client_id, table_type.name, count)
                         if table_type == TableType.TRANSACTIONS or table_type == TableType.TRANSACTION_ITEMS:
                             middleware_queue_senders["to_filter_1"].send(message)
@@ -179,7 +190,7 @@ class Server:
                     sendall(sock, self.header_id_to_bytes(H_ID_OK))
                     
                     if client_id is not None:
-                        logging.info("action: waiting_for_results | peer:%s | client_id:%s", peer, client_id)
+                        logging.debug("action: waiting_for_results | peer:%s | client_id:%s", peer, client_id)
                         self._listen_and_send_results(sock, client_id, peer, middleware_queue_receiver)
                     break
                 
@@ -211,7 +222,7 @@ class Server:
             with self.clients_lock:
                 if client_id is not None and client_id in self.client_threads:
                     del self.client_threads[client_id]
-                    logging.info("action: client_thread_cleanup | peer:%s | client_id:%s", peer, client_id)
+                    logging.debug("action: client_thread_cleanup | peer:%s | client_id:%s", peer, client_id)
             
             try:
                 fd = sock.fileno()
@@ -223,7 +234,7 @@ class Server:
             except Exception:
                 pass
             
-            logging.info("action: client_thread_finished | peer:%s | client_id:%s | thread:%s", 
+            logging.debug("action: client_thread_finished | peer:%s | client_id:%s | thread:%s", 
                         peer, client_id, current_thread.name)
 
     # ---------------------------------------------------------------------
@@ -249,14 +260,13 @@ class Server:
         logging.debug("action: handshake_ok | byte:%r", header)
         sendall(sock, self.header_id_to_bytes(H_ID_OK))
 
-    def _handle_file_chunks(self, sock: socket.socket, peer: str, middleware_queue_senders: dict, number_of_chunks_per_file: dict) -> int:
+    def _handle_file_chunks(self, sock: socket.socket, peer: str, middleware_queue_senders: dict, number_of_chunks_per_file: dict, client_id: int) :
         """
         Recibe y procesa un FileChunk del cliente.
         Retorna el client_id.
         """
         # Recibir el FileChunk
         chunk = FileChunk.recv(sock)
-        client_id = chunk.client_id()
         
         logging.debug("action: recv_file_chunk | cli_id:%s | file:%s | bytes:%s ", client_id, chunk.path(), chunk.payload_size())
         
@@ -302,8 +312,6 @@ class Server:
             if table_type not in number_of_chunks_per_file:
                 number_of_chunks_per_file[table_type] = 0
             number_of_chunks_per_file[table_type] += 1
-
-        return client_id
     
     # ---------------- Internos ----------------
     
@@ -387,7 +395,7 @@ class Server:
 
                         if number_of_chunks_received[query] == total_chunks:
                             all_data_received_per_query[query] = True
-                            logging.info(
+                            logging.debug(
                                 "action: all_data_received_for_query | client_id:%s | query:%s",
                                 client_id,
                                 query.name,
@@ -400,16 +408,16 @@ class Server:
                         query = result_chunk.query_type()
                         number_of_chunks_received[query] += 1
                         chunks_received[query].append(result_chunk)
-                        logging.info(f"action: result_receiver | client_id:{client_id} | rows:{len(result_chunk.rows)} | query:{query.name}")
+                        logging.debug(f"action: result_receiver | client_id:{client_id} | rows:{len(result_chunk.rows)} | query:{query.name}")
 
                         if len(chunks_received[query]) >= maximum_chunks:
                             self._send_batch_results_to_client(sock, client_id, chunks_received[query])
                             chunks_received[query] = []
-                            logging.info(f"action: result_sent | client_id:{client_id} | rows:{len(result_chunk.rows)} | query:{query.name}")
+                            logging.debug(f"action: result_sent | client_id:{client_id} | rows:{len(result_chunk.rows)} | query:{query.name}")
 
                         if expected_total_chunks[query] is not None and number_of_chunks_received[query] == expected_total_chunks[query]:
                             all_data_received_per_query[query] = True
-                            logging.info(f"action: all_data_received_for_query | client_id:{client_id} | query:{query.name}")
+                            logging.debug(f"action: all_data_received_for_query | client_id:{client_id} | query:{query.name}")
                             if chunks_received[query]:
                                 self._send_batch_results_to_client(sock, client_id, chunks_received[query])
                                 chunks_received[query] = []
@@ -423,7 +431,7 @@ class Server:
             all_data_received = all(all_data_received_per_query.values())
 
         sendall(sock, self.header_id_to_bytes(H_ID_FINISH))
-        logging.info("action: results_finished_signal_sent | client_id:%s", client_id)
+        logging.debug("action: results_finished_signal_sent | client_id:%s", client_id)
 
     def _max_number_of_chunks_in_batch(self) -> int:
         with self.clients_lock:
@@ -443,14 +451,14 @@ class Server:
                 sendall(sock, self.header_id_to_bytes(H_ID_DATA))
                 sendall(sock, results_data)
 
-                logging.info(f"action: result_chunk_sent | client_id:{client_id} | chunk:{i+1}/{len(results)} | bytes:{len(results_data)} | query:{result_chunk.query_type().name}")
+                logging.debug(f"action: result_chunk_sent | client_id:{client_id} | chunk:{i+1}/{len(results)} | bytes:{len(results_data)} | query:{result_chunk.query_type().name}")
 
         except Exception as e:
             logging.error(f"action: send_batch_results_error | client_id:{client_id} | error:{e}")
             raise
 
     def _begin_shutdown(self, signum, frame) -> None:
-        logging.info("action: sigterm_received | result: success")
+        logging.debug("action: sigterm_received | result: success")
         self._running = False
         try:
             if self._server_socket:
@@ -471,13 +479,13 @@ class Server:
             for t in alive:
                 t.join(timeout=30)
                 
-            logging.info("action: server_shutdown | result: success")
+            logging.debug("action: server_shutdown | result: success")
         except Exception as e:
             logging.warning("error: shutdown | error:%r", e)
         
 
     def __graceful_shutdown(self) -> None:
-        logging.info("action: shutdown | result: in_progress")
+        logging.debug("action: shutdown | result: in_progress")
         self._running = False
         
         # Cerrar server socket
@@ -505,4 +513,4 @@ class Server:
         for t in alive:
             t.join(timeout=30)
             
-        logging.info("action: server_shutdown | result: success")
+        logging.debug("action: server_shutdown | result: success")

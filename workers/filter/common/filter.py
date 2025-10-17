@@ -106,7 +106,7 @@ class Filter:
                             self.end_message_received[stats.client_id] = {}
                         self.end_message_received[stats.client_id][stats.table_type] = True
 
-                        if client_id not in self.number_of_chunks_to_receive:
+                        if stats.client_id not in self.number_of_chunks_to_receive:
                             self.number_of_chunks_to_receive[stats.client_id] = {}
                         self.number_of_chunks_to_receive[stats.client_id][stats.table_type] = stats.total_expected
 
