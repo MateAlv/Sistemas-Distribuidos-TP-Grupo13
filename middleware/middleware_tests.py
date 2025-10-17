@@ -98,8 +98,8 @@ def test_exchange_1_to_1():
 def test_exchange_1_to_n():
     ex = "fanout_test"
 
-    consumer1 = MessageMiddlewareExchange("rabbitmq", ex, [""], exchange_type="fanout")
-    consumer2 = MessageMiddlewareExchange("rabbitmq", ex, [""], exchange_type="fanout")
+    consumer1 = MessageMiddlewareExchange("rabbitmq", ex, ["1"], exchange_type="fanout")
+    consumer2 = MessageMiddlewareExchange("rabbitmq", ex, ["2"], exchange_type="fanout")
 
     results_1, results_2 = [], []
     def callback1(msg): results_1.append(msg)
@@ -110,7 +110,7 @@ def test_exchange_1_to_n():
     t1.start(); t2.start()
     time.sleep(0.5)
 
-    producer = MessageMiddlewareExchange("rabbitmq", ex, [""], exchange_type="fanout")
+    producer = MessageMiddlewareExchange("rabbitmq", ex, ["3"], exchange_type="fanout")
     producer.send("broadcast")
     producer.close()
 
