@@ -11,7 +11,7 @@ FILES = [
 
 KAGGLE_REDUCED_DIR = ".kaggle_reduced_results"
 KAGGLE_FULL_DIR = ".kaggle_results"
-RESULTS_DIR = ".results"
+RESULTS_DIR = "../.results"
 
 def load_rows(path):
     rows = []

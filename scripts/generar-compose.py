@@ -267,7 +267,7 @@ def is_client(nodo: str):
 
 def define_client(meta: dict, compose: dict, nodo: str, index: int):
     service_name = f"{nodo.lower()}-{index}"
-    output_path = meta.get("output_path", "./.results")
+    output_path = meta.get("output_path", "../.results")
     compose["services"][service_name] = {
         "build": {
             "context": ".",             # project root
