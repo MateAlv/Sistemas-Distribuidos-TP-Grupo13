@@ -1,8 +1,5 @@
 middleware/__pycache__/
-.data/
-.data-reduced/
-.data-test/
-.data-test-reduced/
+data/.*
 .kaggle_results/
 .kaggle_reduced_results/
 .results/
