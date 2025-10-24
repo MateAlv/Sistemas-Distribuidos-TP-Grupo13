@@ -5,15 +5,15 @@ DOCKER ?= docker-compose.yaml
 QUERY ?= all
 
 ifeq ($(QUERY),all)
-CONFIG := q-all-config.ini
+CONFIG := config/config.ini
 else ifeq ($(QUERY),1)
-CONFIG := q1-config.ini
+CONFIG := config/q1-config.ini
 else ifeq ($(QUERY),2)
-CONFIG := q2-config.ini
+CONFIG := config/q2-config.ini
 else ifeq ($(QUERY),3)
-CONFIG := q3-config.ini
+CONFIG := config/q3-config.ini
 else ifeq ($(QUERY),4)
-CONFIG := q4-config.ini
+CONFIG := config/q4-config.ini
 else
 $(error Invalid QUERY value '$(QUERY)'. Use 'all', '1', '2', '3', or '4'.)
 endif
