@@ -34,9 +34,16 @@ docker-image:
 
 .PHONY: docker-image
 
+compose:
+	# Generate docker-compose file based on the selected query configuration
+	python3 $(COMPOSE_SCRIPT) --config=${CONFIG}
+.PHONY: compose
+
 build:
 	# Generate docker-compose file based on the selected query configuration
 	python3 $(COMPOSE_SCRIPT) --config=${CONFIG}
+	docker compose -f ${DOCKER} build
+.PHONY: build
 
 up:
 	make clean-results
