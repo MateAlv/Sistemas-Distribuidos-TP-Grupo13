@@ -124,7 +124,8 @@ class Query3ResultRow(TableResultRow):
         return f"{self.year_half},{self.store_id},{self.store_name},{self.tpv}\n".encode("utf-8")
 
     def to_csv(self) -> str:
-        return f"{self.year_half},{self.store_name},{self.tpv}\n"
+        tpv_rounded = round(self.tpv, 2)
+        return f"{self.year_half},{self.store_name},{tpv_rounded}\n"
 
     @staticmethod
     def deserialize(data: bytes):
