@@ -41,10 +41,9 @@ cp $KAGGLE_PATH/5.transaction_items/transaction_items_202401.csv $KAGGLE_REDUCED
 cp $KAGGLE_PATH/5.transaction_items/transaction_items_202501.csv $KAGGLE_REDUCED_PATH/5.transaction_items/
 
 # Copy other necessary files
-mkdir -p $KAGGLE_REDUCED_PATH/1.stores $KAGGLE_REDUCED_PATH/2.menu_items $KAGGLE_REDUCED_PATH/3.users
-cp $KAGGLE_PATH/1.stores/stores.csv $KAGGLE_REDUCED_PATH/1.stores/
-cp $KAGGLE_PATH/2.menu_items/menu_items.csv $KAGGLE_REDUCED_PATH/2.menu_items/
-cp $KAGGLE_PATH/3.users/users.csv $KAGGLE_REDUCED_PATH/3.users/
+cp -r $KAGGLE_PATH/1.stores/ $KAGGLE_REDUCED_PATH/1.stores/
+cp -r $KAGGLE_PATH/2.menu_items/ $KAGGLE_REDUCED_PATH/2.menu_items/
+cp -r $KAGGLE_PATH/3.users/ $KAGGLE_REDUCED_PATH/3.users/
 
 # Unzip test data
 unzip -o $DATA_PATH/data-test.zip -d $DATA_PATH
