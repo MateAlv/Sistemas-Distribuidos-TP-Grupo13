@@ -410,15 +410,25 @@ class Maximizer:
                 store_id = int(row.store_id)
                 user_id = int(row.user_id)
                 purchase_count = int(row.purchases_made)
-                
-                # Mantener solo los top 3 usando un heap
-                if len(client_top3[store_id]) < 3:
-                    heapq.heappush(client_top3[store_id], (purchase_count, user_id))
+
+                if store_id not in client_top3:
+                    client_top3[store_id] = []
+
+                heap = client_top3[store_id]
+                if len(heap) < 3:
+                    heapq.heappush(heap, (purchase_count, user_id))
+                    logging.debug(f"action: push | store:{store_id} | user:{user_id} | count:{purchase_count}")
                 else:
-                    # Si el nuevo count es mayor que el mínimo en el heap
-                    if purchase_count > client_top3[store_id][0][0]:
-                        heapq.heapreplace(client_top3[store_id], (purchase_count, user_id))
-                        logging.debug(f"action: update_top3 | store_id:{store_id} | user_id:{user_id} | count:{purchase_count}")
+                    root_count, root_user = heap[0]
+                    # Compara ambos campos sobre el mínimo del heap
+                    if (purchase_count, user_id) > (root_count, root_user):
+                        heapq.heapreplace(heap, (purchase_count, user_id))
+                        logging.debug(
+                            f"action: replace | store:{store_id} | user:{user_id} "
+                            f"| count:{purchase_count} | replaced:{(root_count, root_user)}"
+                        )
+
+        logging.info(f"action: top3_result | type:{self.maximizer_type} | client_id:{client_id}  | stores_processed:{len(client_top3)} | stores_after:{list(client_top3.keys())}")
 
     def apply(self, client_id: int, chunk) -> bool:
         """
@@ -441,42 +451,7 @@ class Maximizer:
                 logging.info(f"action: maximizer_partial_result | type:{self.maximizer_type} | client_id:{client_id} | file_type:{chunk.table_type()} | sellings_max_partial:{selling_summary} | profit_max_partial:{profit_summary}")
             return True
         elif self.maximizer_type == "TOP3":
-            if self.is_absolute_top3():
-                client_top3 = self.top3_by_store[client_id]
-                logging.debug(f"action: processing_absolute_top3_chunk | client_id:{client_id} | rows_count:{len(chunk.rows)} | stores_before:{list(client_top3.keys())}")
-                
-                for row in chunk.rows:
-                    if isinstance(row, PurchasesPerUserStoreRow):
-                        store_id = int(row.store_id)
-                        user_id = int(row.user_id)
-                        purchase_count = int(row.purchases_made)
-                        
-                        logging.debug(f"action: processing_absolute_row | client_id:{client_id} | store_id:{store_id} | user_id:{user_id} | purchase_count:{purchase_count} | heap_size_before:{len(client_top3[store_id])}")
-                        
-                        # Acumular directamente en top3_by_store
-                        if len(client_top3[store_id]) < 3:
-                            heapq.heappush(client_top3[store_id], (purchase_count, user_id))
-                            logging.debug(f"action: pushed_to_heap | client_id:{client_id} | store_id:{store_id} | user_id:{user_id} | heap_size_after:{len(client_top3[store_id])}")
-                        else:
-                            # Si el nuevo count es mayor que el mínimo en el heap
-                            if purchase_count > client_top3[store_id][0][0]:
-                                old_min = client_top3[store_id][0]
-                                heapq.heapreplace(client_top3[store_id], (purchase_count, user_id))
-                                logging.debug(f"action: replaced_in_heap | client_id:{client_id} | store_id:{store_id} | user_id:{user_id} | old_min:{old_min}")
-                            else:
-                                logging.debug(f"action: skipped_lower_count | client_id:{client_id} | store_id:{store_id} | user_id:{user_id} | count:{purchase_count} | min_heap:{client_top3[store_id][0][0]}")
-                        
-                        logging.debug(f"action: absolute_top3_accumulate | client_id:{client_id} | store_id:{store_id} | user_id:{user_id} | count:{purchase_count}")
-                
-                logging.info(f"action: absolute_top3_result | type:{self.maximizer_type} | client_id:{client_id} | file_type:{chunk.table_type()} | stores_processed:{len(client_top3)} | stores_after:{list(client_top3.keys())}")
-                
-                # Log de estado completo
-                for store_id, heap in client_top3.items():
-                    logging.debug(f"action: store_heap_state | client_id:{client_id} | store_id:{store_id} | heap:{list(heap)}")
-            else:
-                # Los maximizers parciales usan la lógica normal
-                self.update_top3(client_id, chunk.rows)
-                logging.info(f"action: top3_result | type:{self.maximizer_type} | client_id:{client_id} | file_type:{chunk.table_type()} | stores_processed:{len(self.top3_by_store[client_id])}")
+            self.update_top3(client_id, chunk.rows)
             return True
         else:
             logging.error(f"Maximizador desconocido: {self.maximizer_type}")
