@@ -89,5 +89,5 @@ hard-down:
 prune:
 	docker image prune -a -f
 	docker system prune -f
-    # docker system prune -a --volumes
+	#docker system prune -a --volumes
 .PHONY: prune
