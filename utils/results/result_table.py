@@ -1,6 +1,5 @@
-from .table_type import ResultTableType
-from .file_table import CSV_DELIMITER
-from .process_table import YearHalf, MonthYear
+from utils.file_utils.file_table import CSV_DELIMITER
+from utils.processing.process_table import YearHalf, MonthYear
 from datetime import date
 
 # =========================================

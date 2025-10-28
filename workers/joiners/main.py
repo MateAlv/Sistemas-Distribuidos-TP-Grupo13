@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-
-from common.joiner import StoresTop3Joiner
 import os
 import signal
 import logging
@@ -8,9 +6,12 @@ import argparse
 from configparser import ConfigParser
 
 # Importar Joiners
-from common import MenuItemsJoiner, StoresTpvJoiner, StoresTop3Joiner, UsersJoiner
 from common import ITEMS_JOINER, STORES_TPV_JOINER, STORES_TOP3_JOINER, USERS_JOINER
-    
+from common.menu_items_joiner import MenuItemsJoiner
+from common.stores_top3_joiner import StoresTop3Joiner
+from common.stores_tpv_joiner import StoresTpvJoiner
+from common.users_joiner import UsersJoiner
+
 # Configurar logging de pika MUY temprano y de forma agresiva
 logging.getLogger('pika').setLevel(logging.CRITICAL)
 logging.getLogger('pika').disabled = True

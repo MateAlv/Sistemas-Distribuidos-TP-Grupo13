@@ -1,10 +1,10 @@
-from utils.file_utils.process_table import TransactionItemsProcessRow, PurchasesPerUserStoreRow
+from utils.processing.process_table import TransactionItemsProcessRow, PurchasesPerUserStoreRow
 import logging
-from utils.file_utils.process_table import TableProcessRow
-from utils.file_utils.process_chunk import ProcessChunk
-from utils.file_utils.process_batch_reader import ProcessBatchReader
+from utils.processing.process_table import TableProcessRow
+from utils.processing.process_chunk import ProcessChunk
+from utils.processing.process_batch_reader import ProcessBatchReader
 from utils.file_utils.file_table import DateTime
-from utils.file_utils.end_messages import MessageEnd
+from utils.eof_protocol.end_messages import MessageEnd
 from utils.file_utils.table_type import TableType
 from middleware.middleware_interface import MessageMiddlewareQueue, MessageMiddlewareExchange
 from collections import defaultdict, deque
@@ -493,7 +493,7 @@ class Maximizer:
         
         # Enviar resultados al absolute max
         if accumulated_results:
-            from utils.file_utils.process_chunk import ProcessChunkHeader
+            from utils.processing.process_chunk import ProcessChunkHeader
             from utils.file_utils.table_type import TableType
             header = ProcessChunkHeader(client_id=client_id, table_type=TableType.TRANSACTION_ITEMS)
             chunk = ProcessChunk(header, accumulated_results)
@@ -532,7 +532,7 @@ class Maximizer:
                 logging.debug(f"action: partial_top3_client | client_id:{client_id} | store_id:{store_id} | user_id:{user_id} | rank:{rank} | purchases:{purchase_count}")
         
         if accumulated_results:
-            from utils.file_utils.process_chunk import ProcessChunkHeader
+            from utils.processing.process_chunk import ProcessChunkHeader
             from utils.file_utils.table_type import TableType
             header = ProcessChunkHeader(client_id=client_id, table_type=TableType.PURCHASES_PER_USER_STORE)
             chunk = ProcessChunk(header, accumulated_results)
@@ -576,7 +576,7 @@ class Maximizer:
                 logging.debug(f"action: forward_top3_result | client_id:{client_id} | store_id:{store_id} | user_id:{user_id} | purchases:{purchase_count}")
         
         if accumulated_results:
-            from utils.file_utils.process_chunk import ProcessChunkHeader
+            from utils.processing.process_chunk import ProcessChunkHeader
             from utils.file_utils.table_type import TableType
             header = ProcessChunkHeader(client_id=client_id, table_type=TableType.PURCHASES_PER_USER_STORE)
             chunk = ProcessChunk(header, accumulated_results)
@@ -649,7 +649,7 @@ class Maximizer:
         
         # Enviar resultados al joiner
         if accumulated_results:
-            from utils.file_utils.process_chunk import ProcessChunkHeader
+            from utils.processing.process_chunk import ProcessChunkHeader
             from utils.file_utils.table_type import TableType
             header = ProcessChunkHeader(client_id=client_id, table_type=TableType.TRANSACTION_ITEMS)
             chunk = ProcessChunk(header, accumulated_results)

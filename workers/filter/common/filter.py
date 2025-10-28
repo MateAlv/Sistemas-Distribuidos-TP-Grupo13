@@ -1,10 +1,10 @@
 import logging
 from collections import deque
-from utils.file_utils.process_table import TableProcessRow
-from utils.file_utils.process_chunk import ProcessChunk
-from utils.file_utils.result_chunk import ResultChunkHeader, ResultChunk
-from utils.file_utils.process_batch_reader import ProcessBatchReader
-from utils.file_utils.end_messages import MessageEnd, MessageQueryEnd
+from utils.processing.process_table import TableProcessRow
+from utils.processing.process_chunk import ProcessChunk
+from utils.results.result_chunk import ResultChunkHeader, ResultChunk
+from utils.processing.process_batch_reader import ProcessBatchReader
+from utils.eof_protocol.end_messages import MessageEnd, MessageQueryEnd
 from utils.file_utils.table_type import TableType, ResultTableType
 from middleware.middleware_interface import MessageMiddlewareQueue, MessageMiddlewareExchange, TIMEOUT, \
     MessageMiddlewareMessageError
@@ -174,7 +174,7 @@ class Filter:
                                 if self.filter_type != "amount":
                                     queue.send(ProcessChunk(chunk.header, filtered_rows).serialize())
                                 else:
-                                    from utils.file_utils.result_table import Query1ResultRow
+                                    from utils.results.result_table import Query1ResultRow
                                     converted_rows = [ Query1ResultRow(tx.transaction_id, tx.final_amount) for tx in filtered_rows]
                                     queue.send(ResultChunk(ResultChunkHeader(client_id, ResultTableType.QUERY_1), converted_rows).serialize())
                         else:

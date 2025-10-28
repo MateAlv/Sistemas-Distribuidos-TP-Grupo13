@@ -1,12 +1,9 @@
 # common/client.py
 import os
 import logging
-from datetime import datetime
 from typing import Dict, Tuple
 
-from utils.communication.directory_reader import DirectoryReader
 from utils.communication.batch_reader import BatchReader
-from utils.file_utils.result_table import ResultTableType
 from common.sender import Sender
 
 
@@ -142,9 +139,9 @@ class Client:
                         
                     if header == 2:  # H_ID_DATA - son resultados como ProcessChunk
                         # Leer el ProcessChunk serializado
-                        from utils.file_utils.result_batch_reader import ResultBatchReader
+                        from utils.results.result_batch_reader import ResultBatchReader
                         from utils.communication.socket_utils import recv_exact
-                        from utils.file_utils.result_chunk import ResultChunkHeader
+                        from utils.results.result_chunk import ResultChunkHeader
                         
                         # Leer header del ProcessChunk para saber el tamaño
                         header_data = recv_exact(sender._sock, ResultChunkHeader.HEADER_SIZE)

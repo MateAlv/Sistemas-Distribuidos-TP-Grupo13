@@ -2,7 +2,7 @@
 import os
 import pytest
 from ..batch_reader import BatchReader
-from ..file_chunk import FileChunk
+from utils.file_utils.file_chunk import FileChunk
 
 TEST_PATH = "./data/.data-test"  # Directorio con datos de prueba generados
 MAX_BATCH_SIZE = 8 * 1024  # 8KB

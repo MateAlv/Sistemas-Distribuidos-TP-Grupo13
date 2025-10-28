@@ -1,7 +1,7 @@
-from .table_type import TableType, ResultTableType
-from .process_table import *
-from .file_table import *
-from .result_table import *
+from utils.file_utils.table_type import ResultTableType, TableType
+from utils.processing.process_table import *
+from utils.file_utils.file_table import *
+from utils.results.result_table import *
 
 PROCESS_CLASSES = {
     TableType.TRANSACTIONS: TransactionsProcessRow,

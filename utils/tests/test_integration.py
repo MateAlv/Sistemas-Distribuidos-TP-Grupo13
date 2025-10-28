@@ -1,7 +1,6 @@
 from utils.communication.batch_reader import BatchReader
-from utils.communication.file_chunk import FileChunk, FileChunkHeader
-from utils.file_utils.process_table import StoresProcessRow
-from utils.file_utils.process_batch_reader import ProcessBatchReader
+from utils.file_utils.file_chunk import FileChunk, FileChunkHeader
+from utils.processing.process_batch_reader import ProcessBatchReader
 from utils.file_utils.table_type import TableType
 
 SHORT_TEST_PATH = "./utils/tests/test_short_data"

@@ -3,17 +3,17 @@ import logging
 from collections import defaultdict, deque
 from types import SimpleNamespace
 
-from utils.file_utils.process_table import (
+from utils.processing.process_table import (
     TransactionItemsProcessRow,
     TransactionsProcessRow,
     PurchasesPerUserStoreRow,
     TPVProcessRow,
     YearHalf,
 )
-from utils.file_utils.process_chunk import ProcessChunk
-from utils.file_utils.process_batch_reader import ProcessBatchReader
+from utils.processing.process_chunk import ProcessChunk
+from utils.processing.process_batch_reader import ProcessBatchReader
 from utils.file_utils.file_table import DateTime
-from utils.file_utils.end_messages import MessageEnd
+from utils.eof_protocol.end_messages import MessageEnd
 from utils.file_utils.table_type import TableType
 from middleware.middleware_interface import (
     MessageMiddlewareQueue,
@@ -715,7 +715,7 @@ class Aggregator:
         if not data:
             return
 
-        from utils.file_utils.process_chunk import ProcessChunkHeader
+        from utils.processing.process_chunk import ProcessChunkHeader
 
         header = ProcessChunkHeader(client_id=client_id, table_type=TableType.TRANSACTION_ITEMS)
 
@@ -751,7 +751,7 @@ class Aggregator:
         if not data:
             return
 
-        from utils.file_utils.process_chunk import ProcessChunkHeader
+        from utils.processing.process_chunk import ProcessChunkHeader
 
         placeholder_date = datetime.date(2024, 1, 1)
 
@@ -792,7 +792,7 @@ class Aggregator:
         if not data:
             return
 
-        from utils.file_utils.process_chunk import ProcessChunkHeader
+        from utils.processing.process_chunk import ProcessChunkHeader
 
         rows = []
         for (year, semester, store_id), total in data.items():
@@ -919,7 +919,7 @@ class Aggregator:
             )
             rows.append(row)
 
-        from utils.file_utils.process_chunk import ProcessChunkHeader
+        from utils.processing.process_chunk import ProcessChunkHeader
 
         header = ProcessChunkHeader(client_id=chunk.header.client_id, table_type=TableType.TRANSACTIONS)
         return ProcessChunk(header, rows)
@@ -990,7 +990,7 @@ class Aggregator:
             row = TPVProcessRow(store_id=store_id, tpv=total_tpv, year_half=year_half)
             rows.append(row)
 
-        from utils.file_utils.process_chunk import ProcessChunkHeader
+        from utils.processing.process_chunk import ProcessChunkHeader
 
         header = ProcessChunkHeader(client_id=chunk.header.client_id, table_type=TableType.TPV)
         return ProcessChunk(header, rows)

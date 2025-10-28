@@ -1,4 +1,4 @@
-from .table_type import TableType, ResultTableType
+from utils.file_utils.table_type import TableType, ResultTableType
 
 class MessageEnd:
     def __init__(self, client_id: int, table_type: TableType, count: int):
