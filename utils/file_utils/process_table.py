@@ -32,7 +32,7 @@ class MonthYear:
         self.year = year
 
     def __str__(self):
-        return f"{self.month:02d}-{self.year}"
+        return f"{self.year}-{self.month:02d}"
 
     @staticmethod
     def from_date(date: datetime.date):
@@ -41,14 +41,14 @@ class MonthYear:
     @staticmethod
     def from_str(string: str):
         try:
-            month_part, year_part = string.split('-')
+            year_part, month_part = string.split('-')
             month = int(month_part)
             year = int(year_part)
             if month < 1 or month > 12:
                 raise ValueError("El valor de 'month' debe estar entre 1 y 12.")
             return MonthYear(month, year)
         except Exception as e:
-            raise ValueError(f"Formato inválido para MonthYear: '{string}'. Debe ser 'MM-YYYY'.") from e
+            raise ValueError(f"Formato inválido para MonthYear: '{string}'. Debe ser 'YYYY-MM'.") from e
 
 # =========================================
 # BASE PROCESS ROW

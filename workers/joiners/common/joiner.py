@@ -414,19 +414,12 @@ class MenuItemsJoiner(Joiner):
         self.joiner_data[client_id][row.item_id] = row.name
     
     def join_result(self, row: TableProcessRow, client_id):
-        # Extraer mes/año de created_at
-        if hasattr(row.created_at, 'date'):
-            date_obj = row.created_at.date
-            month_year = f"{date_obj.month:02d}-{date_obj.year}"
-        else:
-            month_year = "UNKNOWN"
-            
         result = {
             "item_id": row.item_id,
             "item_name": self.joiner_data[client_id].get(row.item_id, "UNKNOWN"),
             "quantity": row.quantity,
             "subtotal": row.subtotal,
-            "month_year": month_year
+            "month_year": row.month_year_created_at,
         }
         return result
     
