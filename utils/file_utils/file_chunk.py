@@ -1,5 +1,5 @@
 import socket
-from .socket_utils import recv_exact
+from utils.communication.socket_utils import recv_exact
 
 class FileChunkHeader:
     

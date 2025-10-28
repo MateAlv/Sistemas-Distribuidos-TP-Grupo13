@@ -3,13 +3,13 @@ import os
 import socket
 import threading
 import logging
-from typing import Dict, Tuple, Optional
+from typing import Tuple, Optional
 from utils.communication.socket_utils import ensure_socket, recv_exact, sendall
-from utils.file_utils.process_batch_reader import ProcessBatchReader
-from utils.file_utils.result_batch_reader import ResultBatchReader
-from utils.communication.file_chunk import FileChunk, FileChunkHeader
+from utils.processing.process_batch_reader import ProcessBatchReader
+from utils.results.result_batch_reader import ResultBatchReader
+from utils.file_utils.file_chunk import FileChunk
 from utils.file_utils.table_type import TableType, ResultTableType
-from utils.file_utils.end_messages import MessageEnd, MessageQueryEnd
+from utils.eof_protocol.end_messages import MessageEnd, MessageQueryEnd
 from middleware.middleware_interface import MessageMiddlewareQueue, TIMEOUT
 
 # Delimitadores / framing

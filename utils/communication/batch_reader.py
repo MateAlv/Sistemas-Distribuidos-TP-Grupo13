@@ -3,9 +3,8 @@ from __future__ import annotations
 
 import os
 import logging
-from dataclasses import dataclass
-from typing import Iterable, Optional, Generator, List, Tuple
-from .file_chunk import FileChunk
+from typing import Generator
+from utils.file_utils.file_chunk import FileChunk
 from .directory_reader import DirectoryReader
 from utils.file_utils.table_type import TableType
 

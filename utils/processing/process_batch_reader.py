@@ -1,7 +1,7 @@
 from .process_chunk import ProcessChunk, ProcessChunkHeader
-from .table_type import TableType
-from .table_row_registry import TableRowRegistry
-from ..communication.socket_utils import recv_exact
+from utils.file_utils.table_type import TableType
+from utils.common.table_row_registry import TableRowRegistry
+from utils.communication.socket_utils import recv_exact
 
 import socket
 

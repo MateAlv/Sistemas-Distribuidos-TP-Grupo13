@@ -8,6 +8,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copiar el código fuente después
 COPY client/ .
+COPY utils/ /client/utils/
+COPY middleware/ /client/middleware/
 
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/client

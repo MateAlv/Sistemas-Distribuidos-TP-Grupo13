@@ -9,9 +9,9 @@ FILES = [
     "results_query_4.csv",
 ]
 
-KAGGLE_REDUCED_DIR = ".kaggle_reduced_results"
-KAGGLE_FULL_DIR = ".kaggle_results"
-RESULTS_DIR = ".results"
+KAGGLE_REDUCED_DIR = "./data/.kaggle-results-reduced"
+KAGGLE_FULL_DIR = "./data/.kaggle-results"
+RESULTS_DIR = "./.results"
 
 def load_rows(path):
     rows = []

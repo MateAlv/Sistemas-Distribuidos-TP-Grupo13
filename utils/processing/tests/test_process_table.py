@@ -1,29 +1,13 @@
 import datetime
-from ..process_table import (
-    YearHalf, MonthYear,
+from utils.processing.process_table import (
     TransactionsProcessRow, TransactionItemsProcessRow,
     MenuItemsProcessRow, StoresProcessRow, UsersProcessRow,
     DateTime
 )
-from ..file_table import (
+from utils.file_utils.file_table import (
     TransactionsFileRow, TransactionsItemsFileRow,
     MenuItemsFileRow, StoresFileRow, UsersFileRow
 )
-
-def test_year_half_from_date():
-    date = datetime.date(2023, 5, 10)
-    yh = YearHalf.from_date(date)
-    assert str(yh) == "2023-H1"
-
-def test_month_year_from_date():
-    date = datetime.date(2023, 11, 2)
-    my = MonthYear.from_date(date)
-    assert str(my) == "11-2023"
-
-def test_month_year_from_date_january():
-    date = datetime.date(2023, 1, 15)
-    my = MonthYear.from_date(date)
-    assert str(my) == "01-2023"
 
 def test_transactions_process_row_from_file_row():
     date = DateTime(datetime.date(2023, 2, 1), datetime.time(6, 0))
@@ -61,7 +45,7 @@ def test_transactions_items_process_row_from_file_row():
     assert process_row.subtotal == 100.0
     assert process_row.created_at.date == datetime.date(2023, 9, 1)
     assert process_row.created_at.time == datetime.time(12, 0)
-    assert str(process_row.month_year_created_at) == "09-2023"
+    assert str(process_row.month_year_created_at) == "2023-09"
 
 def test_transactions_items_process_row_serialize_deserialize():
     date = DateTime(datetime.date(2023, 12, 25), datetime.time(18, 45))
@@ -74,7 +58,7 @@ def test_transactions_items_process_row_serialize_deserialize():
     assert deserialized.subtotal == 30.0
     assert deserialized.created_at.date == datetime.date(2023, 12, 25)
     assert deserialized.created_at.time == datetime.time(18, 45)
-    assert str(deserialized.month_year_created_at) == "12-2023"
+    assert str(deserialized.month_year_created_at) == "2023-12"
     assert consumed == len(serialized)
     
 def test_menu_items_process_row_from_file_row():

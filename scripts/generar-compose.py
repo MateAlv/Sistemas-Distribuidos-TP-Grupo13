@@ -73,8 +73,6 @@ def define_server(compose: dict, client_amount: int):
         ],
         "volumes": [
             "./server/config.ini:/config.ini:ro",
-            "./utils:/server/utils:ro",
-            "./middleware:/server/middleware:ro",
         ],
         "networks": ["testing_net"],
         "depends_on": {"rabbitmq": {"condition": "service_healthy"}}
@@ -116,8 +114,6 @@ def define_filter(meta: dict, compose: dict, nodo: str, worker_id: int):
         ],
         "volumes": [
             f".{config_path}:{config_path}:ro",
-            "./utils:/workers/utils:ro",
-            "./middleware:/workers/middleware:ro",
         ],
         "networks": ["testing_net"],
         "depends_on": {
@@ -145,10 +141,6 @@ def define_aggregator(meta: dict, compose: dict, nodo: str, worker_id: int):
             f"LOGGING_LEVEL={meta['logging_level']}",
             f"AGGREGATOR_TYPE={nodo.split('_')[1].upper()}",
             f"WORKER_ID={worker_id}",
-        ],
-        "volumes": [
-            "./utils:/workers/utils:ro",
-            "./middleware:/workers/middleware:ro",
         ],
         "networks": ["testing_net"],
         "depends_on": {
@@ -208,10 +200,6 @@ def define_maximizer(meta: dict, compose: dict, nodo: str, worker_id: int):
             f"MAXIMIZER_RANGE={get_maximizer_range(nodo)}",
             f"WORKER_ID={worker_id}",
         ],
-        "volumes": [
-            "./utils:/workers/utils:ro",
-            "./middleware:/workers/middleware:ro",
-        ],
         "networks": ["testing_net"],
         "depends_on": {
             "server": {"condition": "service_started"},
@@ -250,10 +238,6 @@ def define_joiner(meta: dict, compose: dict, nodo: str, worker_id: int):
             f"JOINER_TYPE={get_joiner_type(nodo)}",
             f"WORKER_ID={worker_id}",
         ],
-        "volumes": [
-            "./utils:/workers/utils:ro",
-            "./middleware:/workers/middleware:ro",
-        ],
         "networks": ["testing_net"],
         "depends_on": {
             "server": {"condition": "service_started"},
@@ -267,7 +251,7 @@ def is_client(nodo: str):
 
 def define_client(meta: dict, compose: dict, nodo: str, index: int):
     service_name = f"{nodo.lower()}-{index}"
-    output_path = meta.get("output_path", "./.results")
+    output_path = meta.get("output_path", "../.results")
     compose["services"][service_name] = {
         "build": {
             "context": ".",             # project root
@@ -286,8 +270,6 @@ def define_client(meta: dict, compose: dict, nodo: str, index: int):
             f".{meta['data_path']}:/data:ro",
             f"{output_path.rstrip('/')}/client-{index}:/output",
             "./client/config.ini:/config.ini:ro",
-            "./utils:/client/utils:ro",
-            "./middleware:/client/middleware:ro",
         ],
         "networks": ["testing_net"],
         "depends_on": {

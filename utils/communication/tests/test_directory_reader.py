@@ -2,12 +2,12 @@ from _thread import start_new_thread
 import os
 from ..directory_reader import DirectoryReader
 
-TEST_PATH = "./.data-test-reduced"  # Directorio con datos de prueba generados
+TEST_PATH = "./data/.data-test"  # Directorio con datos de prueba generados
 
 def test_directory_reader_creation():
     # Crear reader
     reader = DirectoryReader(TEST_PATH)
-    assert reader.root_dir.endswith("data-test-reduced")
+    assert reader.root_dir.endswith("data-test")
     assert reader.rel_root_dir == TEST_PATH
     assert reader.total_files == 0
 

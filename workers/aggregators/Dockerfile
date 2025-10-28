@@ -8,6 +8,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copiar el código fuente después
 COPY workers/aggregators/ ./aggregators/
+COPY utils/ /workers/utils/
+COPY middleware/ /workers/middleware/
 
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/workers/

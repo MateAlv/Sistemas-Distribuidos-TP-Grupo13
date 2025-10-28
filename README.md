@@ -1,19 +1,92 @@
 # Sistemas-Distribuidos-TP-Grupo13
 Se solicita un sistema distribuido que analice la información de ventas en una cadena de negocios de Cafés en Malasia. 
 
+## Requisitos del sistema
+
+### Python environment
+
+    python3 -m venv .venv 
+    source .venv/bin/activate 
+    pip install -r requirements.txt
+
+### Docker y Docker-Compose
+
+- Instalar Docker: https://docs.docker.com/get-docker/
+- Instalar Docker-Compose: https://docs.docker.com/compose/install/
+
+### Datasets
+
+    ./scripts/generar-data.sh
 
 ## Instrucciones de uso
-El repositorio cuenta con un **Makefile** que incluye distintos comandos en forma de targets. Los targets se ejecutan mediante la invocación de:  **make \<target\>**. Los target imprescindibles para iniciar y detener el sistema son **docker-compose-up** y **docker-compose-down**, siendo los restantes targets de utilidad para el proceso de depuración.
+El repositorio cuenta con un **Makefile** que incluye distintos comandos en forma de targets. Los targets se ejecutan mediante la invocación de:  **make \<target\>**.
+
+Se cuenta con otros archivos de configuración para pruebas sobre queries específicas, ubicados en `./config/`. Entre los que se encuentran:
+
+- `./config/q1-config.yml` para la query 1
+- `./config/q2-config.yml` para la query 2
+- `./config/q3-config.yml` para la query 3
+- `./config/q4-config.yml` para la query 4
+
+Y la forma de utilizarlos es pasando el número de query como parámetro al target de make. Por ejemplo, para utilizar la configuración de la query 1:
+
+    make up QUERY=1
+
+Por defecto, si no se pasa el parámetro QUERY, se utilizará la configuración general ubicada en `./config/config.yml` que contiene la información para ejecutar todas las queries.
 
 Los targets disponibles son:
 
-| target  | accion  |
-|---|---|
-|  `docker-compose-up`  | Inicializa el ambiente de desarrollo. Construye las imágenes del cliente y el servidor, inicializa los recursos a utilizar (volúmenes, redes, etc) e inicia los propios containers. |
-| `docker-compose-down`  | Ejecuta `docker-compose stop` para detener los containers asociados al compose y luego  `docker-compose down` para destruir todos los recursos asociados al proyecto que fueron inicializados. Se recomienda ejecutar este comando al finalizar cada ejecución para evitar que el disco de la máquina host se llene de versiones de desarrollo y recursos sin liberar. |
-|  `docker-compose-logs` | Permite ver los logs actuales del proyecto. Acompañar con `grep` para lograr ver mensajes de una aplicación específica dentro del compose. |
-| `docker-image`  | Construye las imágenes a ser utilizadas tanto en el servidor como en el cliente. Este target es utilizado por **docker-compose-up**, por lo cual se lo puede utilizar para probar nuevos cambios en las imágenes antes de arrancar el proyecto. |
-| `build` | Compila la aplicación cliente para ejecución en el _host_ en lugar de en Docker. De este modo la compilación es mucho más veloz, pero requiere contar con todo el entorno de Golang y Python instalados en la máquina _host_. |
+- **compose** - Crea el docker compose según el archivo de configuración
+
+    make compose [QUERY=<number_of_query>]
+
+- **build** - Construye las imágenes Docker necesarias para el sistema según el archivo de configuración
+
+    make build [QUERY=<number_of_query>]
+
+- **up** - Inicia el sistema distribuido
+
+    make up [QUERY=<number_of_query>]
+
+- **test** - Inicia el sistema distribuido en modo test (con logs más detallados)
+
+    make test [QUERY=<number_of_query>]
+
+- **down** - Detiene el sistema distribuido
+
+    make down
+
+- **rebuild** - Reconstruye las imágenes Docker y reinicia el sistema distribuido con up
+
+    make rebuild [QUERY=<number_of_query>]
+
+- **logs** - Muestra los logs de todos los contenedores en ejecución escribiendo un archivo `logs.txt`
+
+    make logs
+
+- **clean-results** - Elimina los resultados generados en la carpeta `./results/` (esta accion se realiza por defecto al ejecutar `make up` y `make test`)
+
+    make clean-results
+
+- **hard-down** - Detiene y elimina todos los contenedores, redes e imágenes creadas por Docker Compose
+
+    make hard-down
+
+- **prune** - Elimina todos los contenedores, redes e imágenes no utilizados por Docker
+
+    make prune
+
+### Comparación de resultados
+
+    python3 scripts/results_compare.py <number_of_clients>
+    -- full - Compara con los resultados de dataset completo (./data/.kaggle-results) - (por defecto: ./data/.kaggle-results-reduced)
+    -- verbose - Muestra información detallada de las diferencias encontradas
+
+Ejemplo de uso:
+
+Para 5 clientes y comparación con dataset completo y salida detallada:
+
+    python3 scripts/results_compare.py 5 --full --verbose
 
 
 ## Queries Disponibles
@@ -30,9 +103,8 @@ transacciones realizadas entre las 06:00 AM y las 11:00 PM.
 - 4. Fecha de cumpleaños de los 3 clientes que han hecho más compras durante 2024 y
 2025, para cada sucursal.
 
-
-
-## Protocolo de comunicación (Cliente ↔ Servidor)
+     
+## Protocolo de comunicación (Cliente ↔ Servidor) - DEPRECATED
 
 ### 1. Handshake inicial
 - Cliente → Servidor:

@@ -1,7 +1,5 @@
 from .result_chunk import ResultChunk, ResultChunkHeader
-from .table_type import ResultTableType
-from .table_row_registry import TableRowRegistry
-from ..communication.socket_utils import recv_exact
+from utils.communication.socket_utils import recv_exact
 
 import socket
 
