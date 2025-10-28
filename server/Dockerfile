@@ -8,6 +8,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copiar el código fuente después
 COPY server/ .
+COPY utils/ /server/utils/
+COPY middleware/ /server/middleware/
 
 # Copy shared utils and install it
 # COPY utils/ ./utils
