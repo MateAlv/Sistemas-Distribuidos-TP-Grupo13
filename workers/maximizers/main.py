@@ -20,27 +20,50 @@ def initialize_config():
         
         logging_level = config['DEFAULT']['LOGGING_LEVEL']
         max_type = os.getenv('MAXIMIZER_TYPE')
-        max_range = os.getenv('MAXIMIZER_RANGE')
-        
+
         if max_type is None:
             raise ValueError(f"Tipo de maximizer inválido: {max_type}")
-        
-        if max_range is None:
-            raise ValueError(f"Rango de maximizer inválido: {max_range}")
-        
+
         # Validar que sea uno de los tipos válidos
         valid_types = ["MAX", "TOP3"]
         if max_type not in valid_types:
             raise ValueError(f"Tipo de maximizer inválido: {max_type}")
-        
-        # Validar que sea uno de los rangos válidos
-        valid_ranges = ["0", "1", "4", "7"]
-        if max_range not in valid_ranges:
-            raise ValueError(f"Rango de maximizer inválido: {max_range}")
-        
-        # No loggear aquí porque logging aún no está configurado
-        
-        return (logging_level, max_type, max_range)
+
+        if max_type == "MAX":
+            shard_env = "MAX_SHARD_ID"
+            partial_shards_env = "MAX_PARTIAL_SHARDS"
+        else:
+            shard_env = "TOP3_SHARD_ID"
+            partial_shards_env = "TOP3_PARTIAL_SHARDS"
+
+        shard_id = os.getenv(shard_env)
+        partial_shards_spec = os.getenv(partial_shards_env)
+
+        if shard_id and partial_shards_spec:
+            raise ValueError(
+                f"Configuración inválida: defina solo {shard_env} para maximizers parciales o {partial_shards_env} para maximizers absolutos."
+            )
+
+        role = None
+        partial_shards: list[str] = []
+
+        if shard_id:
+            shard_id = shard_id.strip()
+            if not shard_id:
+                raise ValueError(f"{shard_env} no puede ser vacío.")
+            role = "partial"
+        elif partial_shards_spec:
+            candidates = [entry.strip() for entry in partial_shards_spec.split(",") if entry.strip()]
+            if not candidates:
+                raise ValueError(f"{partial_shards_env} no puede ser vacío.")
+            role = "absolute"
+            partial_shards = candidates
+        else:
+            raise ValueError(
+                f"Debe configurarse {shard_env} para un maximizer parcial o {partial_shards_env} para uno absoluto."
+            )
+
+        return (logging_level, max_type, role, shard_id, partial_shards)
         
     except Exception as e:
         logging.error(f"Error cargando configuración: {e}")
@@ -74,12 +97,14 @@ def main():
     parser = argparse.ArgumentParser(description="Procesador de transacciones con maximizador.")
     args = parser.parse_args()
 
-    (logging_level, max_type, max_range) = initialize_config()
+    (logging_level, max_type, role, shard_id, partial_shards) = initialize_config()
     initialize_log(logging_level)
 
-    logging.info(f"action: config | result: success | max_type:{max_type} | max_range:{max_range} | log_level:{logging_level}")
+    logging.info(
+        f"action: config | result: success | max_type:{max_type} | role:{role} | shard_id:{shard_id} | partial_shards:{partial_shards} | log_level:{logging_level}"
+    )
 
-    maximizer = Maximizer(max_type, max_range)
+    maximizer = Maximizer(max_type, role, shard_id, partial_shards)
 
     signal.signal(signal.SIGTERM, maximizer.shutdown)
         
