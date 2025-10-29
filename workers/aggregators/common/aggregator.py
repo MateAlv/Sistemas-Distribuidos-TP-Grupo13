@@ -20,20 +20,12 @@ from middleware.middleware_interface import (
     MessageMiddlewareExchange,
     TIMEOUT,
 )
-try:
-    from workers.common.sharding import (
-        ShardConfig,
-        ShardingConfigError,
-        build_id_lookup,
-        load_shards_from_env,
-    )
-except ModuleNotFoundError:  # Fallback when package root isn't on sys.path
-    from ...common.sharding import (
-        ShardConfig,
-        ShardingConfigError,
-        build_id_lookup,
-        load_shards_from_env,
-    )
+from workers.common.sharding import (
+    ShardConfig,
+    ShardingConfigError,
+    build_id_lookup,
+    load_shards_from_env,
+)
 from .aggregator_stats_messages import (
     AggregatorStatsMessage,
     AggregatorStatsEndMessage,

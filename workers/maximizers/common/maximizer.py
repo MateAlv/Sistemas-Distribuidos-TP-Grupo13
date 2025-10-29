@@ -13,10 +13,7 @@ import datetime
 import heapq
 import re
 
-try:
-    from workers.common.sharding import queue_name_for, slugify_shard_id
-except ModuleNotFoundError:  # Fallback when package root isn't on sys.path
-    from ...common.sharding import queue_name_for, slugify_shard_id
+from workers.common.sharding import queue_name_for, slugify_shard_id
 
 TIMEOUT = 3
 
