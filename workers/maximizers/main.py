@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
 
 import os
+import sys
 import signal
 import logging
 import argparse
+from pathlib import Path
 from configparser import ConfigParser
+
+ROOT_DIR = Path(__file__).resolve().parents[2]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
 # Importar Maximizer
 from common import Maximizer
