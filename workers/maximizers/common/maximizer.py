@@ -300,6 +300,9 @@ class Maximizer:
     def shutdown(self, signum=None, frame=None):
         logging.info(f"SIGTERM recibido: cerrando maximizer {self.maximizer_type} (rango {self.maximizer_range})")
 
+        # Detener el loop principal
+        self.__running = False
+
         # Detener consumos de las colas
         try:
             self.data_receiver.stop_consuming()
@@ -335,9 +338,6 @@ class Maximizer:
             self.middleware_exchange_receiver.close()
         except (OSError, RuntimeError, AttributeError):
             pass
-
-        # Detener el loop principal
-        self.__running = False
 
         # Liberar estructuras
         for attr in [

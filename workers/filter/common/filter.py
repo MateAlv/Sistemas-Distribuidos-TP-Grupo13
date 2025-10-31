@@ -67,12 +67,20 @@ class Filter:
 
             try:
                 self.middleware_end_exchange.connection.call_later(TIMEOUT, stats_stop)
+            except (OSError, RuntimeError, MessageMiddlewareMessageError) as e:
+                logging.error(f"Error en consumo: {e}")
+
+            try:
                 self.middleware_end_exchange.start_consuming(stats_callback)
             except (OSError, RuntimeError, MessageMiddlewareMessageError) as e:
                 logging.error(f"Error en consumo: {e}")
 
             try:
                 self.middleware_queue_receiver.connection.call_later(TIMEOUT, stop)
+            except (OSError, RuntimeError, MessageMiddlewareMessageError) as e:
+                logging.error(f"Error en consumo: {e}")
+
+            try:
                 self.middleware_queue_receiver.start_consuming(callback)
             except (OSError, RuntimeError, MessageMiddlewareMessageError) as e:
                  logging.error(f"Error en consumo: {e}")
@@ -119,7 +127,7 @@ class Filter:
                 except Exception as e:
                     logging.error(f"action: error_decoding_stats_message | error:{e}")
 
-            while results:
+            while results and self.__running:
                 msg = results.popleft()
                 try:
                     if msg.startswith(b"END;"):
@@ -205,7 +213,7 @@ class Filter:
                     
                 except Exception as e:
                     logging.error(f"action: error_decoding_message | error:{e}")
-                
+
 
     def delete_client_stats_data(self, stats_end):
         """Limpia datos del cliente después de procesar"""
@@ -302,6 +310,9 @@ class Filter:
     def shutdown(self, signum=None, frame=None):
         logging.info(f"SIGTERM recibido: cerrando filtro {self.filter_type} (ID: {self.id})")
 
+        # Detener el loop principal
+        self.__running = False
+
         # Detener consumo de las colas
         try:
             self.middleware_queue_receiver.stop_consuming()
@@ -336,8 +347,6 @@ class Filter:
             except (OSError, RuntimeError, AttributeError):
                 pass
 
-        # Detener el loop principal
-        self.__running = False
 
         # Limpiar estructuras
         for attr in [

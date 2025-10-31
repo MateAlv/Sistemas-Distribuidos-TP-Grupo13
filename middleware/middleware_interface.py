@@ -110,7 +110,8 @@ class MessageMiddlewareExchange(MessageMiddleware):
 
     def stop_consuming(self):
         try:
-            self.channel.stop_consuming()
+            if self.channel.is_open:
+                self.channel.stop_consuming()
         except pika.exceptions.AMQPConnectionError:
             raise MessageMiddlewareDisconnectedError("Conexión perdida al detener consumo.")
 
@@ -132,7 +133,8 @@ class MessageMiddlewareExchange(MessageMiddleware):
 
     def close(self):
         try:
-            self.connection.close()
+            if self.connection and self.connection.is_open:
+                self.connection.close()
         except Exception as e:
             raise MessageMiddlewareCloseError(f"Error cerrando conexión: {e}")
 
@@ -192,7 +194,8 @@ class MessageMiddlewareQueue(MessageMiddleware):
 
     def stop_consuming(self):
         try:
-            self.channel.stop_consuming()
+            if self.channel.is_open:
+                self.channel.stop_consuming()
         except pika.exceptions.AMQPConnectionError:
             raise MessageMiddlewareDisconnectedError("Conexión perdida al detener consumo.")
 
@@ -215,7 +218,8 @@ class MessageMiddlewareQueue(MessageMiddleware):
 
     def close(self):
         try:
-            self.connection.close()
+            if self.connection and self.connection.is_open:
+                self.connection.close()
         except Exception as e:
             raise MessageMiddlewareCloseError(f"Error cerrando conexión: {e}")
 

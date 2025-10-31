@@ -50,7 +50,11 @@ class Joiner:
 
         while self.__running:
             # Escuchar datos de join (productos)
-            self.data_join_receiver.connection.call_later(TIMEOUT, stop)
+            try:
+                self.data_join_receiver.connection.call_later(TIMEOUT, stop)
+            except Exception as e:
+                logging.error(f"Error setting timeout for join data consumption: {e}")
+
             try:
                 self.data_join_receiver.start_consuming(callback)
             except (OSError, RuntimeError, MessageMiddlewareMessageError) as e:
@@ -333,6 +337,9 @@ class Joiner:
     def shutdown(self, signum=None, frame=None):
         logging.info(f"SIGTERM recibido: cerrando joiner {self.joiner_type}")
 
+        # Detener bucle de manejo de datos
+        self.__running = False
+
         # Detener consumos
         try:
             self.data_receiver.stop_consuming()
@@ -356,9 +363,6 @@ class Joiner:
             self.data_sender.close()
         except (OSError, RuntimeError, AttributeError):
             pass
-
-        # Detener bucle de manejo de datos
-        self.__running = False
 
         # Esperar hilos
         try:
