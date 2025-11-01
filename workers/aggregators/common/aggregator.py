@@ -804,7 +804,12 @@ class Aggregator:
                 client_id=client_id, table_type=TableType.PURCHASES_PER_USER_STORE
             )
             chunk = ProcessChunk(header, rows)
-            self.middleware_queue_sender[queue_name].send(chunk.serialize())
+            chunk_data = chunk.serialize()
+            logging.info(
+                f"action: publish_final_purchases_chunk | client_id:{client_id} | queue:{queue_name} "
+                f"| rows:{len(rows)} | bytes:{len(chunk_data)}"
+            )
+            self.middleware_queue_sender[queue_name].send(chunk_data)
             logging.info(
                 f"action: publish_final_purchases | client_id:{client_id} | queue:{queue_name} | rows:{len(rows)}"
             )

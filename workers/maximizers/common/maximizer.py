@@ -248,6 +248,12 @@ class Maximizer:
             logging.debug(f"action: ignoring_data_after_end_processed | type:{self.maximizer_type} | range:{self.maximizer_range} | client_id:{client_id}")
             return
 
+        if self.maximizer_type == "TOP3" and not self.is_absolute_top3():
+            logging.info(
+                f"action: top3_chunk_processing_started | range:{self.maximizer_range} | client_id:{client_id} "
+                f"| rows:{len(chunk.rows)}"
+            )
+
         logging.info(f"action: maximize | type:{self.maximizer_type} | range:{self.maximizer_range} | client_id:{client_id} | file_type:{table_type} | rows_in:{len(chunk.rows)}")
         self.apply(client_id, chunk)
 
