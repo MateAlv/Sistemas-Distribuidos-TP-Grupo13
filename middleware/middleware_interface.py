@@ -143,6 +143,15 @@ class MessageMiddlewareExchange(MessageMiddleware):
         except Exception as e:
             raise MessageMiddlewareDeleteError(f"Error eliminando exchange: {e}")
 
+    def purge(self):
+        try:
+            self.channel.queue_purge(queue=self.queue_name)
+        except pika.exceptions.AMQPConnectionError:
+            self._connect()
+            raise MessageMiddlewareDisconnectedError("Conexión perdida al purgar exchange.")
+        except Exception as e:
+            raise MessageMiddlewareMessageError(f"Error al purgar exchange: {e}")
+
 
 # ----------------------------
 # Queue Middleware

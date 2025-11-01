@@ -11,17 +11,36 @@ from collections import defaultdict, deque
 from typing import Optional
 import datetime
 import heapq
+import re
+
+from workers.common.sharding import queue_name_for, slugify_shard_id
 
 TIMEOUT = 3
 
 class Maximizer:
-    def __init__(self, max_type: str, max_range: str):
+    def __init__(self, max_type: str, role: str, shard_id: Optional[str], partial_shards: list[str]):
         logging.getLogger('pika').setLevel(logging.CRITICAL)
 
         self.__running = True
 
         self.maximizer_type = max_type
-        self.maximizer_range = max_range
+        if role not in {"partial", "absolute"}:
+            raise ValueError(f"Rol de maximizer inválido: {role}")
+        self.role = role
+        self.shard_id = shard_id
+        self.maximizer_range = shard_id if shard_id else "absolute"
+        self.partial_shards = partial_shards or []
+        self.shard_slug = slugify_shard_id(shard_id) if shard_id else None
+        self.partial_shards_lookup = {slugify_shard_id(s): s for s in self.partial_shards}
+        self.expected_shard_slugs = set(self.partial_shards_lookup.keys())
+        self.expected_partial_maximizers = len(self.expected_shard_slugs) if role == "absolute" and max_type == "MAX" else 0
+        self.expected_partial_top3 = len(self.expected_shard_slugs) if role == "absolute" and max_type == "TOP3" else 0
+
+        if self.role == "partial" and not self.shard_id:
+            raise ValueError("Los maximizers parciales requieren un identificador de shard.")
+        if self.role == "absolute" and self.maximizer_type in {"MAX", "TOP3"} and not self.partial_shards:
+            raise ValueError("Los maximizers absolutos requieren la lista de shards parciales configurados.")
+
         self.clients_end_processed = set()
         
         if self.maximizer_type == "MAX":
@@ -34,7 +53,6 @@ class Maximizer:
                 self.data_receiver = MessageMiddlewareQueue("rabbitmq", "to_absolute_max")
                 self.middleware_exchange_sender = MessageMiddlewareExchange("rabbitmq", "end_exchange_maximizer_PRODUCTS", [""], exchange_type="fanout")
                 self.middleware_exchange_receiver = None 
-                self.expected_partial_maximizers = 3 
                 self.partial_ranges_seen = defaultdict(set)  # client_id -> {range_id}
                 self.partial_end_counts = defaultdict(int)   # client_id -> cantidad de END recibidos
             else:
@@ -42,14 +60,8 @@ class Maximizer:
                 self.data_sender = MessageMiddlewareQueue("rabbitmq", "to_absolute_max")
                 self.middleware_exchange_sender = None  # No envía END directamente al joiner
                 
-                if self.maximizer_range == "1":
-                    self.data_receiver = MessageMiddlewareQueue("rabbitmq", "to_max_1_3")
-                elif self.maximizer_range == "4":
-                    self.data_receiver = MessageMiddlewareQueue("rabbitmq", "to_max_4_6")
-                elif self.maximizer_range == "7":
-                    self.data_receiver = MessageMiddlewareQueue("rabbitmq", "to_max_7_8")
-                else:
-                    raise ValueError(f"Rango de maximizer inválido: {self.maximizer_range}")
+                queue_name = queue_name_for("MAX", self.shard_id)
+                self.data_receiver = MessageMiddlewareQueue("rabbitmq", queue_name)
                 self.middleware_exchange_receiver = MessageMiddlewareExchange("rabbitmq", "end_exchange_aggregator_PRODUCTS", [""], exchange_type="fanout")
                     
         elif self.maximizer_type == "TOP3":
@@ -62,7 +74,6 @@ class Maximizer:
                 self.data_receiver = MessageMiddlewareQueue("rabbitmq", "to_top3_absolute")
                 self.middleware_exchange_sender = MessageMiddlewareExchange("rabbitmq", "end_exchange_maximizer_TOP3", [""], exchange_type="fanout")
                 self.middleware_exchange_receiver = None  # No necesita escuchar END de nadie
-                self.expected_partial_top3 = 3  # Sabemos que son 3: rango 1, 4, 7
                 self.partial_top3_finished = defaultdict(int)  # client_id -> cantidad de END recibidos
             else:
                 # TOP3 parciales - envían al absoluto
@@ -70,22 +81,16 @@ class Maximizer:
                 self.middleware_exchange_sender = None
                 self.middleware_exchange_receiver = None
                 
-                if self.maximizer_range == "1":
-                    self.data_receiver = MessageMiddlewareQueue("rabbitmq", "to_top_1_3")
-                elif self.maximizer_range == "4":
-                    self.data_receiver = MessageMiddlewareQueue("rabbitmq", "to_top_4_6")
-                elif self.maximizer_range == "7":
-                    self.data_receiver = MessageMiddlewareQueue("rabbitmq", "to_top_7_10")
-                else:
-                    raise ValueError(f"Rango de maximizer TOP3 inválido: {self.maximizer_range}")
+                queue_name = queue_name_for("TOP3", self.shard_id)
+                self.data_receiver = MessageMiddlewareQueue("rabbitmq", queue_name)
         else:
             raise ValueError(f"Tipo de maximizer inválido: {self.maximizer_type}")
 
     def is_absolute_max(self):
-        return self.maximizer_range == "0"
+        return self.maximizer_type == "MAX" and self.role == "absolute"
     
     def is_absolute_top3(self):
-        return self.maximizer_range == "0"
+        return self.maximizer_type == "TOP3" and self.role == "absolute"
     
     def delete_client_data(self, client_id: int):
         """Elimina la información almacenada de un cliente"""
@@ -243,19 +248,34 @@ class Maximizer:
             logging.debug(f"action: ignoring_data_after_end_processed | type:{self.maximizer_type} | range:{self.maximizer_range} | client_id:{client_id}")
             return
 
+        if self.maximizer_type == "TOP3" and not self.is_absolute_top3():
+            logging.info(
+                f"action: top3_chunk_processing_started | range:{self.maximizer_range} | client_id:{client_id} "
+                f"| rows:{len(chunk.rows)}"
+            )
+
         logging.info(f"action: maximize | type:{self.maximizer_type} | range:{self.maximizer_range} | client_id:{client_id} | file_type:{table_type} | rows_in:{len(chunk.rows)}")
         self.apply(client_id, chunk)
 
         if self.maximizer_type == "MAX" and self.is_absolute_max():
             ranges_seen = self.partial_ranges_seen[client_id]
             for row in chunk.rows:
-                range_id = self._extract_range_from_row(row)
-                if range_id:
-                    ranges_seen.add(range_id)
+                shard_slug = self._extract_shard_from_row(row)
+                if shard_slug:
+                    ranges_seen.add(shard_slug)
 
-            logging.info(f"action: absolute_max_tracking | client_id:{client_id} | partial_maximizers_seen:{len(ranges_seen)}/{self.expected_partial_maximizers} | received_ranges:{sorted(ranges_seen)}")
+            received_labels = sorted(self.partial_shards_lookup.get(slug, slug) for slug in ranges_seen)
+            logging.info(
+                f"action: absolute_max_tracking | client_id:{client_id} | partial_maximizers_seen:{len(ranges_seen)}/{self.expected_partial_maximizers} | received_shards:{received_labels}"
+            )
 
-            if len(ranges_seen) >= self.expected_partial_maximizers:
+            ready = False
+            if self.expected_shard_slugs:
+                ready = self.expected_shard_slugs.issubset(ranges_seen)
+            elif self.expected_partial_maximizers > 0:
+                ready = len(ranges_seen) >= self.expected_partial_maximizers
+
+            if ready:
                 logging.info(f"action: absolute_max_ready | client_id:{client_id} | all_partial_data_received")
                 self.process_client_end(client_id, table_type)
 
@@ -287,14 +307,13 @@ class Maximizer:
 
         return False
 
-    def _extract_range_from_row(self, row) -> Optional[str]:
-        if hasattr(row, "transaction_id") and row.transaction_id:
-            if "range_1" in row.transaction_id:
-                return "1"
-            if "range_4" in row.transaction_id:
-                return "4"
-            if "range_7" in row.transaction_id:
-                return "7"
+    def _extract_shard_from_row(self, row) -> Optional[str]:
+        transaction_id = getattr(row, "transaction_id", None)
+        if not transaction_id:
+            return None
+        match = re.search(r"partial_max_(?:selling|profit)_shard_([a-z0-9_]+)", transaction_id)
+        if match:
+            return match.group(1)
         return None
     
     def shutdown(self, signum=None, frame=None):
@@ -469,27 +488,27 @@ class Maximizer:
         for (item_id, month_year), quantity in client_sellings.items():
             created_at = DateTime(datetime.date(month_year.year, month_year.month, 1), datetime.time(0, 0))
             new_row = TransactionItemsProcessRow(
-                transaction_id=f"partial_max_selling_range_{self.maximizer_range}",
+                transaction_id=f"partial_max_selling_shard_{self.shard_slug}",
                 item_id=item_id,
                 quantity=quantity,
                 subtotal=None,  # Solo cantidad para ventas
                 created_at=created_at
             )
             accumulated_results.append(new_row)
-            logging.debug(f"action: send_partial_selling_max | range:{self.maximizer_range} | item_id:{item_id} | month:{month_year.month}/{month_year.year} | quantity:{quantity}")
+            logging.debug(f"action: send_partial_selling_max | shard:{self.shard_id} | item_id:{item_id} | month:{month_year.month}/{month_year.year} | quantity:{quantity}")
         
         # Enviar máximos de ganancias  
         for (item_id, month_year), profit in client_profit.items():
             created_at = DateTime(datetime.date(month_year.year, month_year.month, 1), datetime.time(0, 0))
             new_row = TransactionItemsProcessRow(
-                transaction_id=f"partial_max_profit_range_{self.maximizer_range}",
+                transaction_id=f"partial_max_profit_shard_{self.shard_slug}",
                 item_id=item_id,
                 quantity=None,  # Solo ganancia para profits
                 subtotal=profit,
                 created_at=created_at
             )
             accumulated_results.append(new_row)
-            logging.debug(f"action: send_partial_profit_max | range:{self.maximizer_range} | item_id:{item_id} | month:{month_year.month}/{month_year.year} | profit:{profit}")
+            logging.debug(f"action: send_partial_profit_max | shard:{self.shard_id} | item_id:{item_id} | month:{month_year.month}/{month_year.year} | profit:{profit}")
         
         # Enviar resultados al absolute max
         if accumulated_results:
@@ -501,9 +520,9 @@ class Maximizer:
             chunk_data = chunk.serialize()
             self.data_sender.send(chunk_data)
             
-            logging.info(f"action: publish_partial_max_results | range:{self.maximizer_range} | client_id:{client_id} | rows_sent:{len(accumulated_results)} | selling_entries:{len(client_sellings)} | profit_entries:{len(client_profit)} | bytes_sent:{len(chunk_data)} | queue:{self.data_sender.queue_name}")
+            logging.info(f"action: publish_partial_max_results | shard:{self.shard_id} | client_id:{client_id} | rows_sent:{len(accumulated_results)} | selling_entries:{len(client_sellings)} | profit_entries:{len(client_profit)} | bytes_sent:{len(chunk_data)} | queue:{self.data_sender.queue_name}")
         else:
-            logging.warning(f"action: no_partial_results_to_send | range:{self.maximizer_range} | client_id:{client_id}")
+            logging.warning(f"action: no_partial_results_to_send | shard:{self.shard_id} | client_id:{client_id}")
         
 
     def publish_partial_top3_results(self, client_id: int):
@@ -539,9 +558,11 @@ class Maximizer:
             self.data_sender.send(chunk.serialize())
             # NO cerrar la conexión aquí - se cerrará después de enviar el END message
             
-            logging.info(f"action: publish_partial_top3_results | result: success | client_id:{client_id} | stores:{len(client_top3)} | total_clients:{len(accumulated_results)}")
+            logging.info(
+                f"action: publish_partial_top3_results | shard:{self.shard_id} | client_id:{client_id} | stores:{len(client_top3)} | total_clients:{len(accumulated_results)}"
+            )
         else:
-            logging.warning(f"action: no_partial_top3_results_to_send | client_id:{client_id}")
+            logging.warning(f"action: no_partial_top3_results_to_send | shard:{self.shard_id} | client_id:{client_id}")
 
     def publish_absolute_top3_results(self, client_id: int):
         """

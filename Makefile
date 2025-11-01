@@ -89,5 +89,6 @@ hard-down:
 prune:
 	docker image prune -a -f
 	docker system prune -f
-	#docker system prune -a --volumes
+	docker system prune -a --volumes
+	sudo sh -c 'truncate -s 0 /var/lib/docker/containers/*/*-json.log || true'
 .PHONY: prune

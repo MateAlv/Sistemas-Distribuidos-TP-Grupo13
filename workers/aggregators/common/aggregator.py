@@ -18,7 +18,14 @@ from utils.file_utils.table_type import TableType
 from middleware.middleware_interface import (
     MessageMiddlewareQueue,
     MessageMiddlewareExchange,
+    MessageMiddlewareMessageError,
     TIMEOUT,
+)
+from workers.common.sharding import (
+    ShardConfig,
+    ShardingConfigError,
+    build_id_lookup,
+    load_shards_from_env,
 )
 from .aggregator_stats_messages import (
     AggregatorStatsMessage,
@@ -61,17 +68,41 @@ class Aggregator:
             f"{self.aggregator_type}_{self.aggregator_id}_data",
             "fanout",
         )
+        try:
+            self.middleware_stats_exchange.purge()
+            self.middleware_data_exchange.purge()
+        except MessageMiddlewareMessageError as purge_error:
+            logging.warning(
+                f"action: purge_exchange_warning | type:{self.aggregator_type} | agg_id:{self.aggregator_id} | error:{purge_error}"
+            )
+
+        self.shard_configs: list[ShardConfig] = []
+        self.id_to_shard: dict[int, ShardConfig] = {}
 
         if self.aggregator_type == "PRODUCTS":
             self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", "to_agg_1+2")
-            self.middleware_queue_sender["to_max_1_3"] = MessageMiddlewareQueue("rabbitmq", "to_max_1_3")
-            self.middleware_queue_sender["to_max_4_6"] = MessageMiddlewareQueue("rabbitmq", "to_max_4_6")
-            self.middleware_queue_sender["to_max_7_8"] = MessageMiddlewareQueue("rabbitmq", "to_max_7_8")
+            try:
+                self.shard_configs = load_shards_from_env("MAX_SHARDS", worker_kind="MAX")
+            except ShardingConfigError as exc:
+                raise ShardingConfigError(
+                    f"Invalid MAX shards configuration: {exc}"
+                ) from exc
+            self.id_to_shard = build_id_lookup(self.shard_configs)
+            for shard in self.shard_configs:
+                self.middleware_queue_sender[shard.queue_name] = MessageMiddlewareQueue("rabbitmq", shard.queue_name)
+
         elif self.aggregator_type == "PURCHASES":
             self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", "to_agg_4")
-            self.middleware_queue_sender["to_top_1_3"] = MessageMiddlewareQueue("rabbitmq", "to_top_1_3")
-            self.middleware_queue_sender["to_top_4_6"] = MessageMiddlewareQueue("rabbitmq", "to_top_4_6")
-            self.middleware_queue_sender["to_top_7_10"] = MessageMiddlewareQueue("rabbitmq", "to_top_7_10")
+            try:
+                self.shard_configs = load_shards_from_env("TOP3_SHARDS", worker_kind="TOP3")
+            except ShardingConfigError as exc:
+                raise ShardingConfigError(
+                    f"Invalid TOP3 shards configuration: {exc}"
+                ) from exc
+            self.id_to_shard = build_id_lookup(self.shard_configs)
+            for shard in self.shard_configs:
+                self.middleware_queue_sender[shard.queue_name] = MessageMiddlewareQueue("rabbitmq", shard.queue_name)
+
         elif self.aggregator_type == "TPV":
             self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", "to_agg_3")
             self.middleware_queue_sender["to_join_with_stores_tvp"] = MessageMiddlewareQueue("rabbitmq", "to_join_with_stores_tvp")
@@ -339,11 +370,10 @@ class Aggregator:
         payload = None
 
         if self.aggregator_type == "PRODUCTS":
-            aggregated = self.apply_products(chunk)
-            if aggregated:
-                rows_1_3, rows_4_6, rows_7_8 = aggregated
-                self.accumulate_products(client_id, rows_1_3, rows_4_6, rows_7_8)
-                payload = self._build_products_payload(rows_1_3, rows_4_6, rows_7_8)
+            aggregated_rows = self.apply_products(chunk)
+            if aggregated_rows:
+                self.accumulate_products(client_id, aggregated_rows)
+                payload = self._build_products_payload(aggregated_rows)
                 has_output = True
         elif self.aggregator_type == "PURCHASES":
             aggregated_chunk = self.apply_purchases(chunk)
@@ -564,31 +594,25 @@ class Aggregator:
             return "tpv"
         return "unknown"
 
-    def accumulate_products(self, client_id, rows_1_3, rows_4_6, rows_7_8):
+    def accumulate_products(self, client_id, rows):
         self._ensure_global_entry(client_id)
         data = self.global_accumulator[client_id].setdefault(
             "products",
-            {
-                "1_3": defaultdict(lambda: {"quantity": 0, "subtotal": 0.0}),
-                "4_6": defaultdict(lambda: {"quantity": 0, "subtotal": 0.0}),
-                "7_8": defaultdict(lambda: {"quantity": 0, "subtotal": 0.0}),
-            },
+            defaultdict(lambda: {"quantity": 0, "subtotal": 0.0}),
         )
 
-        for row in rows_1_3:
-            key = (row.item_id, row.created_at.date.year, row.created_at.date.month)
-            data["1_3"][key]["quantity"] += row.quantity
-            data["1_3"][key]["subtotal"] += row.subtotal
-
-        for row in rows_4_6:
-            key = (row.item_id, row.created_at.date.year, row.created_at.date.month)
-            data["4_6"][key]["quantity"] += row.quantity
-            data["4_6"][key]["subtotal"] += row.subtotal
-
-        for row in rows_7_8:
-            key = (row.item_id, row.created_at.date.year, row.created_at.date.month)
-            data["7_8"][key]["quantity"] += row.quantity
-            data["7_8"][key]["subtotal"] += row.subtotal
+        for row in rows:
+            created_at = getattr(row, "created_at", None)
+            if not created_at or not hasattr(created_at, "date"):
+                logging.warning(
+                    f"action: accumulate_products_invalid_date | client_id:{client_id} | row_item:{getattr(row, 'item_id', 'unknown')}"
+                )
+                continue
+            year = created_at.date.year
+            month = created_at.date.month
+            key = (int(row.item_id), year, month)
+            data[key]["quantity"] += int(row.quantity)
+            data[key]["subtotal"] += float(row.subtotal)
 
     def accumulate_purchases(self, client_id, aggregated_chunk: ProcessChunk):
         self._ensure_global_entry(client_id)
@@ -616,20 +640,18 @@ class Aggregator:
                 key = (year, semester, int(row.store_id))
                 data[key] += float(row.final_amount)
 
-    def _build_products_payload(self, rows_1_3, rows_4_6, rows_7_8):
+    def _build_products_payload(self, rows):
         return {
-            "products_1_3": [
-                [int(row.item_id), int(row.created_at.date.year), int(row.created_at.date.month), int(row.quantity), float(row.subtotal)]
-                for row in rows_1_3
-            ],
-            "products_4_6": [
-                [int(row.item_id), int(row.created_at.date.year), int(row.created_at.date.month), int(row.quantity), float(row.subtotal)]
-                for row in rows_4_6
-            ],
-            "products_7_8": [
-                [int(row.item_id), int(row.created_at.date.year), int(row.created_at.date.month), int(row.quantity), float(row.subtotal)]
-                for row in rows_7_8
-            ],
+            "products": [
+                [
+                    int(row.item_id),
+                    int(row.created_at.date.year),
+                    int(row.created_at.date.month),
+                    int(row.quantity),
+                    float(row.subtotal),
+                ]
+                for row in rows
+            ]
         }
 
     def _build_purchases_payload(self, aggregated_chunk: ProcessChunk):
@@ -659,18 +681,20 @@ class Aggregator:
         payload = data_msg.payload
 
         if self.aggregator_type == "PRODUCTS":
-            rows_1_3, rows_4_6, rows_7_8 = [], [], []
-            for item_id, year, month, quantity, subtotal in payload.get("products_1_3", []):
+            rows = []
+            for item_id, year, month, quantity, subtotal in payload.get("products", []):
                 created_at = DateTime(datetime.date(int(year), int(month), 1), datetime.time(0, 0))
-                rows_1_3.append(TransactionItemsProcessRow("", int(item_id), int(quantity), float(subtotal), created_at))
-            for item_id, year, month, quantity, subtotal in payload.get("products_4_6", []):
-                created_at = DateTime(datetime.date(int(year), int(month), 1), datetime.time(0, 0))
-                rows_4_6.append(TransactionItemsProcessRow("", int(item_id), int(quantity), float(subtotal), created_at))
-            for item_id, year, month, quantity, subtotal in payload.get("products_7_8", []):
-                created_at = DateTime(datetime.date(int(year), int(month), 1), datetime.time(0, 0))
-                rows_7_8.append(TransactionItemsProcessRow("", int(item_id), int(quantity), float(subtotal), created_at))
-            if rows_1_3 or rows_4_6 or rows_7_8:
-                self.accumulate_products(client_id, rows_1_3, rows_4_6, rows_7_8)
+                rows.append(
+                    TransactionItemsProcessRow(
+                        "",
+                        int(item_id),
+                        int(quantity),
+                        float(subtotal),
+                        created_at,
+                    )
+                )
+            if rows:
+                self.accumulate_products(client_id, rows)
 
         elif self.aggregator_type == "PURCHASES":
             rows = []
@@ -718,33 +742,33 @@ class Aggregator:
         from utils.processing.process_chunk import ProcessChunkHeader
 
         header = ProcessChunkHeader(client_id=client_id, table_type=TableType.TRANSACTION_ITEMS)
+        rows_by_queue = defaultdict(list)
 
-        def send_rows(key, queue_name):
-            bucket = data.get(key)
-            if not bucket:
-                return
-            rows = []
-            for (item_id, year, month), totals in bucket.items():
-                created_at = DateTime(datetime.date(year, month, 1), datetime.time(0, 0))
-                rows.append(
-                    TransactionItemsProcessRow(
-                        "",
-                        item_id,
-                        totals["quantity"],
-                        totals["subtotal"],
-                        created_at,
-                    )
+        for (item_id, year, month), totals in data.items():
+            shard = self.id_to_shard.get(item_id)
+            if shard is None:
+                logging.warning(
+                    f"action: publish_final_products_missing_shard | client_id:{client_id} | item_id:{item_id}"
                 )
-            if rows:
-                chunk = ProcessChunk(header, rows).serialize()
-                self.middleware_queue_sender[queue_name].send(chunk)
-                logging.info(
-                    f"action: publish_final_products | client_id:{client_id} | bucket:{key} | rows:{len(rows)}"
-                )
+                continue
 
-        send_rows("1_3", "to_max_1_3")
-        send_rows("4_6", "to_max_4_6")
-        send_rows("7_8", "to_max_7_8")
+            created_at = DateTime(datetime.date(year, month, 1), datetime.time(0, 0))
+            rows_by_queue[shard.queue_name].append(
+                TransactionItemsProcessRow(
+                    "",
+                    item_id,
+                    totals["quantity"],
+                    totals["subtotal"],
+                    created_at,
+                )
+            )
+
+        for queue_name, rows in rows_by_queue.items():
+            chunk = ProcessChunk(header, rows).serialize()
+            self.middleware_queue_sender[queue_name].send(chunk)
+            logging.info(
+                f"action: publish_final_products | client_id:{client_id} | queue:{queue_name} | rows:{len(rows)}"
+            )
 
     def _publish_final_purchases(self, client_id):
         data = self.global_accumulator[client_id].get("purchases")
@@ -755,34 +779,37 @@ class Aggregator:
 
         placeholder_date = datetime.date(2024, 1, 1)
 
-        def build_rows(stores):
-            rows = []
-            for store_id in stores:
-                for user_id, count in data[store_id].items():
-                    rows.append(
-                        PurchasesPerUserStoreRow(
-                            store_id=store_id,
-                            store_name="",
-                            user_id=user_id,
-                            user_birthdate=placeholder_date,
-                            purchases_made=count,
-                        )
-                    )
-            return rows
+        rows_by_queue = defaultdict(list)
 
-        groups = {
-            "to_top_1_3": [store for store in data if 1 <= store <= 3],
-            "to_top_4_6": [store for store in data if 4 <= store <= 6],
-            "to_top_7_10": [store for store in data if 7 <= store <= 10],
-        }
-
-        for queue_name, stores in groups.items():
-            if not stores:
+        for store_id, users in data.items():
+            shard = self.id_to_shard.get(store_id)
+            if shard is None:
+                logging.warning(
+                    f"action: publish_final_purchases_missing_shard | client_id:{client_id} | store_id:{store_id}"
+                )
                 continue
-            rows = build_rows(stores)
-            header = ProcessChunkHeader(client_id=client_id, table_type=TableType.PURCHASES_PER_USER_STORE)
+            for user_id, count in users.items():
+                rows_by_queue[shard.queue_name].append(
+                    PurchasesPerUserStoreRow(
+                        store_id=store_id,
+                        store_name="",
+                        user_id=user_id,
+                        user_birthdate=placeholder_date,
+                        purchases_made=count,
+                    )
+                )
+
+        for queue_name, rows in rows_by_queue.items():
+            header = ProcessChunkHeader(
+                client_id=client_id, table_type=TableType.PURCHASES_PER_USER_STORE
+            )
             chunk = ProcessChunk(header, rows)
-            self.middleware_queue_sender[queue_name].send(chunk.serialize())
+            chunk_data = chunk.serialize()
+            logging.info(
+                f"action: publish_final_purchases_chunk | client_id:{client_id} | queue:{queue_name} "
+                f"| rows:{len(rows)} | bytes:{len(chunk_data)}"
+            )
+            self.middleware_queue_sender[queue_name].send(chunk_data)
             logging.info(
                 f"action: publish_final_purchases | client_id:{client_id} | queue:{queue_name} | rows:{len(rows)}"
             )
@@ -828,9 +855,7 @@ class Aggregator:
         if not chunk_sellings:
             return None
 
-        rows_1_3 = []
-        rows_4_6 = []
-        rows_7_8 = []
+        rows = []
 
         for key, total_qty in chunk_sellings.items():
             total_profit = chunk_profit[key]
@@ -845,14 +870,15 @@ class Aggregator:
                 created_at=created_at,
             )
 
-            if 1 <= item_id <= 3:
-                rows_1_3.append(new_row)
-            elif 4 <= item_id <= 6:
-                rows_4_6.append(new_row)
-            elif 7 <= item_id <= 8:
-                rows_7_8.append(new_row)
+            if self.id_to_shard and item_id not in self.id_to_shard:
+                logging.warning(
+                    f"action: apply_products_missing_shard | client_id:{chunk.header.client_id} | item_id:{item_id}"
+                )
+                continue
 
-        return rows_1_3, rows_4_6, rows_7_8
+            rows.append(new_row)
+
+        return rows
 
     def apply_purchases(self, chunk):
         YEARS = {2024, 2025}

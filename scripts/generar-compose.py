@@ -2,14 +2,65 @@
 import yaml
 import os
 import argparse
+import sys
+from pathlib import Path
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
 from yaml.representer import SafeRepresenter
+from workers.common.sharding import parse_shards_spec, ShardingConfigError, slugify_shard_id
+
+PRODUCT_ITEM_IDS = list(range(1, 9))
+PURCHASE_STORE_IDS = list(range(1, 11))
 
 class FlowList(list):
     pass
 
 def flow_list_representer(dumper, data):
     return dumper.represent_sequence("tag:yaml.org,2002:seq", data, flow_style=True)
+
+
+def _partition_ids(ids, shard_count):
+    if shard_count <= 0:
+        return []
+    if shard_count > len(ids):
+        raise ValueError(
+            f"No se pueden crear {shard_count} shards con solo {len(ids)} ids disponibles."
+        )
+
+    base = len(ids) // shard_count
+    remainder = len(ids) % shard_count
+
+    partitions = []
+    index = 0
+    for shard_index in range(shard_count):
+        size = base + (1 if shard_index < remainder else 0)
+        subset = ids[index : index + size]
+        index += size
+        if not subset:
+            raise ValueError(
+                f"Shard vacío generado al particionar ids {ids} en {shard_count} shards."
+            )
+        partitions.append(subset)
+    return partitions
+
+
+def build_shard_spec(ids, shard_count, prefix):
+    partitions = _partition_ids(ids, shard_count)
+    entries = []
+    for subset in partitions:
+        start = subset[0]
+        end = subset[-1]
+        if start == end:
+            shard_id = f"{prefix}_{start}"
+            ids_spec = f"{start}"
+        else:
+            shard_id = f"{prefix}_{start}_{end}"
+            ids_spec = f"{start}-{end}"
+        entries.append(f"{shard_id}:{ids_spec}")
+    return ";".join(entries)
 
 
 def read_config(path: str):
@@ -35,7 +86,10 @@ def read_config(path: str):
             if key.lower() in ("compose_name", "output_file", "data_path", "logging_level", "output_path"):
                 meta[key.lower()] = value
             else:
-                nodes[key.upper()] = int(value)
+                try:
+                    nodes[key.upper()] = int(value)
+                except ValueError:
+                    meta[key.lower()] = value
                 
     yaml.add_representer(FlowList, flow_list_representer)
     
@@ -129,6 +183,7 @@ def is_aggregator(nodo: str):
 def define_aggregator(meta: dict, compose: dict, nodo: str, worker_id: int):
     base_service_name = f"{nodo.lower()}_service"
     service_name = f"{base_service_name}-{worker_id}" if worker_id > 1 else base_service_name
+    agg_type = nodo.split("_")[1].upper()
     compose["services"][service_name] = {
         "build": {
             "context": ".",             # project root
@@ -139,7 +194,7 @@ def define_aggregator(meta: dict, compose: dict, nodo: str, worker_id: int):
         "environment": [
             "PYTHONUNBUFFERED=1",
             f"LOGGING_LEVEL={meta['logging_level']}",
-            f"AGGREGATOR_TYPE={nodo.split('_')[1].upper()}",
+            f"AGGREGATOR_TYPE={agg_type}",
             f"WORKER_ID={worker_id}",
         ],
         "networks": ["testing_net"],
@@ -148,58 +203,89 @@ def define_aggregator(meta: dict, compose: dict, nodo: str, worker_id: int):
             "rabbitmq": {"condition": "service_healthy"},
         }
     }
+
+    if agg_type == "PRODUCTS":
+        shard_spec = meta.get("max_shards")
+        if not shard_spec:
+            raise ValueError("MAX_SHARDS debe definirse en el archivo de configuración para AGGREGATOR_PRODUCTS.")
+        compose["services"][service_name]["environment"].append(f"MAX_SHARDS={shard_spec}")
+    elif agg_type == "PURCHASES":
+        shard_spec = meta.get("top3_shards")
+        if not shard_spec:
+            raise ValueError("TOP3_SHARDS debe definirse en el archivo de configuración para AGGREGATOR_PURCHASES.")
+        compose["services"][service_name]["environment"].append(f"TOP3_SHARDS={shard_spec}")
+
     return service_name
     
-def get_maximizer_range(nodo: str):
-    # MAXIMIZER_MAX_ABSOLUTE -> 0
-    # MAXIMIZER_MAX_1_3 -> 1
-    # MAXIMIZER_MAX_4_6 -> 4
-    # MAXIMIZER_MAX_7_8 -> 7
-    # MAXIMIZER_TOP3_ABSOLUTE -> 0
-    # MAXIMIZER_TOP3_1 -> 1
-    # MAXIMIZER_TOP3_4 -> 4
-    # MAXIMIZER_TOP3_7 -> 7
-    r = nodo.split("_")[2]
-    if r == "ABSOLUTE":
-        return 0
-    elif r == "1" or r == "1_3":
-        return 1
-    elif r == "2":
-        return 2
-    elif r == "3":
-        return 3
-    elif r == "4" or r == "4_6":
-        return 4
-    elif r == "7" or r == "7_8":
-        return 7
-    else:
-        # Try to extract just the first number for other patterns
-        import re
-        match = re.match(r'(\d+)', r)
-        if match:
-            return int(match.group(1))
-        return None
-
 def is_maximizer(nodo: str):
     return nodo.startswith("MAXIMIZER_")
 
-def define_maximizer(meta: dict, compose: dict, nodo: str, worker_id: int):
+def define_maximizer(meta: dict, compose: dict, nodo: str, worker_id: int, max_shards, top3_shards):
+    parts = nodo.split("_")
+    if len(parts) < 3:
+        raise ValueError(f"Nombre de maximizer inválido: {nodo}")
+
+    max_type = parts[1].upper()
+    role = parts[2].upper()
+
     base_service_name = f"{nodo.lower()}_service"
     service_name = f"{base_service_name}-{worker_id}" if worker_id > 1 else base_service_name
+    env = [
+        "PYTHONUNBUFFERED=1",
+        f"LOGGING_LEVEL={meta['logging_level']}",
+        f"MAXIMIZER_TYPE={max_type}",
+        f"WORKER_ID={worker_id}",
+    ]
+
+    if role == "PARTIAL":
+        if max_type == "MAX":
+            if not max_shards:
+                raise ValueError("MAX_SHARDS debe definirse para crear maximizers parciales de MAX.")
+            if worker_id > len(max_shards):
+                raise ValueError(
+                    f"No hay suficientes shards definidos para {nodo}. worker_id={worker_id}, shards={len(max_shards)}"
+                )
+            shard = max_shards[worker_id - 1]
+            shard_slug = slugify_shard_id(shard.shard_id)
+            service_name = f"maximizer_max_{shard_slug}_service"
+            env.append(f"MAX_SHARD_ID={shard.shard_id}")
+        elif max_type == "TOP3":
+            if not top3_shards:
+                raise ValueError("TOP3_SHARDS debe definirse para crear maximizers parciales de TOP3.")
+            if worker_id > len(top3_shards):
+                raise ValueError(
+                    f"No hay suficientes shards definidos para {nodo}. worker_id={worker_id}, shards={len(top3_shards)}"
+                )
+            shard = top3_shards[worker_id - 1]
+            shard_slug = slugify_shard_id(shard.shard_id)
+            service_name = f"maximizer_top3_{shard_slug}_service"
+            env.append(f"TOP3_SHARD_ID={shard.shard_id}")
+        else:
+            raise ValueError(f"Tipo de maximizer parcial inválido: {max_type}")
+    elif role == "ABSOLUTE":
+        if max_type == "MAX":
+            if not max_shards:
+                raise ValueError("MAX_PARTIAL_SHARDS requiere MAX_SHARDS configurado.")
+            shard_ids = ",".join(shard.shard_id for shard in max_shards)
+            env.append(f"MAX_PARTIAL_SHARDS={shard_ids}")
+        elif max_type == "TOP3":
+            if not top3_shards:
+                raise ValueError("TOP3_PARTIAL_SHARDS requiere TOP3_SHARDS configurado.")
+            shard_ids = ",".join(shard.shard_id for shard in top3_shards)
+            env.append(f"TOP3_PARTIAL_SHARDS={shard_ids}")
+        else:
+            raise ValueError(f"Tipo de maximizer absoluto inválido: {max_type}")
+    else:
+        raise ValueError(f"Rol de maximizer desconocido: {role}")
+
     compose["services"][service_name] = {
         "build": {
-            "context": ".",             # project root
+            "context": ".",
             "dockerfile": f"workers/maximizers/Dockerfile"
         },
         "entrypoint": FlowList(["python3", "main.py"]),
         "container_name": service_name,
-        "environment": [
-            "PYTHONUNBUFFERED=1",
-            f"LOGGING_LEVEL={meta['logging_level']}",
-            f"MAXIMIZER_TYPE={nodo.split('_')[1].upper()}",
-            f"MAXIMIZER_RANGE={get_maximizer_range(nodo)}",
-            f"WORKER_ID={worker_id}",
-        ],
+        "environment": env,
         "networks": ["testing_net"],
         "depends_on": {
             "server": {"condition": "service_started"},
@@ -282,6 +368,59 @@ def generate_compose(meta: dict, nodes: dict, services: dict = None):
         "name": meta.get("compose_name", "tp-distribuidos-grupo13"),
         "services": {}
     }
+
+    max_partials = nodes.get("MAXIMIZER_MAX_PARTIAL", 0)
+    top3_partials = nodes.get("MAXIMIZER_TOP3_PARTIAL", 0)
+
+    agg_products = nodes.get("AGGREGATOR_PRODUCTS", 0)
+    agg_purchases = nodes.get("AGGREGATOR_PURCHASES", 0)
+
+    if agg_products > 0 and max_partials == 0:
+        raise ValueError("AGGREGATOR_PRODUCTS requiere MAXIMIZER_MAX_PARTIAL > 0.")
+    if max_partials > 0 and agg_products == 0:
+        raise ValueError("MAXIMIZER_MAX_PARTIAL definido pero AGGREGATOR_PRODUCTS es 0.")
+
+    if agg_purchases > 0 and top3_partials == 0:
+        raise ValueError("AGGREGATOR_PURCHASES requiere MAXIMIZER_TOP3_PARTIAL > 0.")
+    if top3_partials > 0 and agg_purchases == 0:
+        raise ValueError("MAXIMIZER_TOP3_PARTIAL definido pero AGGREGATOR_PURCHASES es 0.")
+
+    max_shards_spec = meta.get("max_shards")
+    top3_shards_spec = meta.get("top3_shards")
+
+    if not max_shards_spec and max_partials:
+        try:
+            max_shards_spec = build_shard_spec(PRODUCT_ITEM_IDS, max_partials, "items")
+        except ValueError as exc:
+            raise ValueError(f"No se puede generar MAX_SHARDS automáticamente: {exc}") from exc
+        meta["max_shards"] = max_shards_spec
+
+    if not top3_shards_spec and top3_partials:
+        try:
+            top3_shards_spec = build_shard_spec(PURCHASE_STORE_IDS, top3_partials, "stores")
+        except ValueError as exc:
+            raise ValueError(f"No se puede generar TOP3_SHARDS automáticamente: {exc}") from exc
+        meta["top3_shards"] = top3_shards_spec
+
+    try:
+        max_shards = parse_shards_spec(max_shards_spec, worker_kind="MAX") if max_shards_spec else []
+    except ShardingConfigError as exc:
+        raise ValueError(f"MAX_SHARDS inválido: {exc}") from exc
+
+    try:
+        top3_shards = parse_shards_spec(top3_shards_spec, worker_kind="TOP3") if top3_shards_spec else []
+    except ShardingConfigError as exc:
+        raise ValueError(f"TOP3_SHARDS inválido: {exc}") from exc
+
+    if nodes.get("MAXIMIZER_MAX_PARTIAL", 0) not in (0, len(max_shards)):
+        raise ValueError(
+            f"MAXIMIZER_MAX_PARTIAL debe coincidir con la cantidad de shards definidos ({len(max_shards)})."
+        )
+    if nodes.get("MAXIMIZER_TOP3_PARTIAL", 0) not in (0, len(top3_shards)):
+        raise ValueError(
+            f"MAXIMIZER_TOP3_PARTIAL debe coincidir con la cantidad de shards definidos ({len(top3_shards)})."
+        )
+
     define_rabbitmq(compose)
     client_amount = 0
     
@@ -310,7 +449,7 @@ def generate_compose(meta: dict, nodes: dict, services: dict = None):
                 elif is_aggregator(nodo):
                     service_name = define_aggregator(meta, compose, nodo, worker_id)
                 elif is_maximizer(nodo):
-                    service_name = define_maximizer(meta, compose, nodo, worker_id)
+                    service_name = define_maximizer(meta, compose, nodo, worker_id, max_shards, top3_shards)
                 elif is_joiner(nodo):
                     service_name = define_joiner(meta, compose, nodo, worker_id)
                 else:
