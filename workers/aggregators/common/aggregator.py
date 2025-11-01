@@ -18,6 +18,7 @@ from utils.file_utils.table_type import TableType
 from middleware.middleware_interface import (
     MessageMiddlewareQueue,
     MessageMiddlewareExchange,
+    MessageMiddlewareMessageError,
     TIMEOUT,
 )
 from workers.common.sharding import (
@@ -67,6 +68,13 @@ class Aggregator:
             f"{self.aggregator_type}_{self.aggregator_id}_data",
             "fanout",
         )
+        try:
+            self.middleware_stats_exchange.purge()
+            self.middleware_data_exchange.purge()
+        except MessageMiddlewareMessageError as purge_error:
+            logging.warning(
+                f"action: purge_exchange_warning | type:{self.aggregator_type} | agg_id:{self.aggregator_id} | error:{purge_error}"
+            )
 
         self.shard_configs: list[ShardConfig] = []
         self.id_to_shard: dict[int, ShardConfig] = {}
