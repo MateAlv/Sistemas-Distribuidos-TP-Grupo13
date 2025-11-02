@@ -56,6 +56,6 @@ cp -r $DATA_REDUCED_PATH/menu_items $DATA_TEST_PATH/menu_items
 
 # Unzip kaggle results
 unzip -o ./data/kaggle_results.zip -d $DATA_PATH
-mv $DATA_PATH/kaggle_results/.kaggle_results $DATA_PATH/.kaggle-results
-mv $DATA_PATH/kaggle_results/.kaggle_reduced_results $DATA_PATH/.kaggle-results-reduced
+cp -r $DATA_PATH/kaggle_results/.kaggle-results $DATA_PATH/.kaggle-results
+cp -r $DATA_PATH/kaggle_results/.kaggle-results-reduced $DATA_PATH/.kaggle-results-reduced
 rm -rf $DATA_PATH/kaggle_results
