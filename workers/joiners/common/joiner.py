@@ -31,6 +31,8 @@ class Joiner:
         self.data_receiver = None
         self.data_join_receiver = None
         self.data_sender = None
+        self.data_receiver_timer = None
+        self.data_join_receiver_timer = None
 
         self.__running = True
         
@@ -50,7 +52,7 @@ class Joiner:
 
         while self.__running:
             # Escuchar datos de join (productos)
-            self.data_join_receiver.connection.call_later(TIMEOUT, stop)
+            self.data_join_receiver_timer = self.data_join_receiver.connection.call_later(TIMEOUT, stop)
             try:
                 self.data_join_receiver.start_consuming(callback)
             except (OSError, RuntimeError, MessageMiddlewareMessageError) as e:
@@ -87,7 +89,7 @@ class Joiner:
         while self.__running:
             # Escuchar datos del maximizer con timeout
             try:
-                self.data_receiver.connection.call_later(TIMEOUT, stop)
+                self.data_receiver_timer = self.data_receiver.connection.call_later(TIMEOUT, stop)
                 self.data_receiver.start_consuming(callback)
             except (OSError, RuntimeError, MessageMiddlewareMessageError) as e:
                 logging.error(f"Error en consumo: {e}")
@@ -332,6 +334,18 @@ class Joiner:
 
     def shutdown(self, signum=None, frame=None):
         logging.info(f"SIGTERM recibido: cerrando joiner {self.joiner_type}")
+
+        try:
+            if self.data_receiver_timer is not None:
+                self.stats_timer.cancel()
+        except Exception:
+            pass
+
+        try:
+            if self.data_join_receiver_timer is not None:
+                self.consume_timer.cancel()
+        except Exception:
+            pass
 
         # Detener consumos
         try:
