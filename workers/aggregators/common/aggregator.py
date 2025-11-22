@@ -35,8 +35,9 @@ from .aggregator_stats_messages import (
 
 
 class Aggregator:
-    def __init__(self, agg_type: str, agg_id: int = 1):
+    def __init__(self, agg_type: str, agg_id: int = 1, monitor=None):
         logging.getLogger("pika").setLevel(logging.CRITICAL)
+        self.monitor = monitor
 
         self._running = True
 
@@ -204,6 +205,8 @@ class Aggregator:
             self.middleware_queue_receiver.stop_consuming()
 
         while self._running:
+            if self.monitor:
+                self.monitor.pulse()
             try:
                 self.middleware_queue_receiver.connection.call_later(TIMEOUT, chunk_stop)
                 self.middleware_queue_receiver.start_consuming(chunk_callback)

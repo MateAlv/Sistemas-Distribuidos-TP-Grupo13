@@ -15,8 +15,9 @@ USERS_JOINER = "USERS"
 
 class Joiner:
     
-    def __init__(self, join_type: str):
+    def __init__(self, join_type: str, monitor=None):
         logging.getLogger('pika').setLevel(logging.CRITICAL)
+        self.monitor = monitor
 
         self.joiner_type = join_type
         self.data = {}
@@ -85,6 +86,8 @@ class Joiner:
             self.data_receiver.stop_consuming()
 
         while self.__running:
+            if self.monitor:
+                self.monitor.pulse()
             # Escuchar datos del maximizer con timeout
             try:
                 self.data_receiver.connection.call_later(TIMEOUT, stop)

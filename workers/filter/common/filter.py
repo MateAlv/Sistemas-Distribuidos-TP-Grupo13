@@ -11,8 +11,9 @@ from middleware.middleware_interface import MessageMiddlewareQueue, MessageMiddl
 from .filter_stats_messages import FilterStatsMessage, FilterStatsEndMessage
 
 class Filter:
-    def __init__(self, cfg: dict):
+    def __init__(self, cfg: dict, monitor=None):
         logging.getLogger('pika').setLevel(logging.CRITICAL)
+        self.monitor = monitor
         
         self.__running = True
         
@@ -64,6 +65,8 @@ class Filter:
                 self.middleware_end_exchange.stop_consuming()
 
         while self.__running:
+            if self.monitor:
+                self.monitor.pulse()
 
             try:
                 self.middleware_end_exchange.connection.call_later(TIMEOUT, stats_stop)

@@ -104,7 +104,11 @@ def main():
         f"action: config | result: success | max_type:{max_type} | role:{role} | shard_id:{shard_id} | partial_shards:{partial_shards} | log_level:{logging_level}"
     )
 
-    maximizer = Maximizer(max_type, role, shard_id, partial_shards)
+    from utils.monitor import Monitor
+    monitor = Monitor()
+    monitor.start()
+
+    maximizer = Maximizer(max_type, role, shard_id, partial_shards, monitor)
 
     signal.signal(signal.SIGTERM, maximizer.shutdown)
         

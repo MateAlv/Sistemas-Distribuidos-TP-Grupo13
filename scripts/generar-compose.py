@@ -124,9 +124,11 @@ def define_server(compose: dict, client_amount: int):
         "environment": [
             "PYTHONUNBUFFERED=1",
             f"CLI_CLIENTS={client_amount}",
+            "CONTAINER_NAME=server",
         ],
         "volumes": [
             "./server/config.ini:/config.ini:ro",
+            "/var/run/docker.sock:/var/run/docker.sock",
         ],
         "networks": ["testing_net"],
         "depends_on": {"rabbitmq": {"condition": "service_healthy"}}
@@ -165,9 +167,11 @@ def define_filter(meta: dict, compose: dict, nodo: str, worker_id: int):
             "PYTHONUNBUFFERED=1",
             f"LOGGING_LEVEL={meta['logging_level']}",
             f"WORKER_ID={worker_id}",
+            f"CONTAINER_NAME={service_name}",
         ],
         "volumes": [
             f".{config_path}:{config_path}:ro",
+            "/var/run/docker.sock:/var/run/docker.sock",
         ],
         "networks": ["testing_net"],
         "depends_on": {
@@ -196,6 +200,10 @@ def define_aggregator(meta: dict, compose: dict, nodo: str, worker_id: int):
             f"LOGGING_LEVEL={meta['logging_level']}",
             f"AGGREGATOR_TYPE={agg_type}",
             f"WORKER_ID={worker_id}",
+            f"CONTAINER_NAME={service_name}",
+        ],
+        "volumes": [
+            "/var/run/docker.sock:/var/run/docker.sock",
         ],
         "networks": ["testing_net"],
         "depends_on": {
@@ -235,6 +243,7 @@ def define_maximizer(meta: dict, compose: dict, nodo: str, worker_id: int, max_s
         f"LOGGING_LEVEL={meta['logging_level']}",
         f"MAXIMIZER_TYPE={max_type}",
         f"WORKER_ID={worker_id}",
+        f"CONTAINER_NAME={service_name}",
     ]
 
     if role == "PARTIAL":
@@ -286,6 +295,9 @@ def define_maximizer(meta: dict, compose: dict, nodo: str, worker_id: int, max_s
         "entrypoint": FlowList(["python3", "main.py"]),
         "container_name": service_name,
         "environment": env,
+        "volumes": [
+            "/var/run/docker.sock:/var/run/docker.sock",
+        ],
         "networks": ["testing_net"],
         "depends_on": {
             "server": {"condition": "service_started"},
@@ -323,6 +335,10 @@ def define_joiner(meta: dict, compose: dict, nodo: str, worker_id: int):
             f"LOGGING_LEVEL={meta['logging_level']}",
             f"JOINER_TYPE={get_joiner_type(nodo)}",
             f"WORKER_ID={worker_id}",
+            f"CONTAINER_NAME={service_name}",
+        ],
+        "volumes": [
+            "/var/run/docker.sock:/var/run/docker.sock",
         ],
         "networks": ["testing_net"],
         "depends_on": {

@@ -58,7 +58,11 @@ def main():
     
     logging.debug(f"action: config | result: success | agg_type:{agg_type} | agg_id:{agg_id} | log_level:{logging_level}")
     
-    aggregator = Aggregator(agg_type, agg_id)
+    from utils.monitor import Monitor
+    monitor = Monitor()
+    monitor.start()
+
+    aggregator = Aggregator(agg_type, agg_id, monitor)
 
     signal.signal(signal.SIGTERM, aggregator.shutdown)
     
