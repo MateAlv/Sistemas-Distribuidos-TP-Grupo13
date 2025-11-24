@@ -83,7 +83,7 @@ def read_config(path: str):
             key, value = key.strip(), value.strip()
             if key.startswith("#"):
                 continue
-            if key.lower() in ("compose_name", "output_file", "data_path", "logging_level", "output_path"):
+            if key.lower() in ("compose_name", "output_file", "data_path", "logging_level", "output_path", "chaos_enabled", "chaos_interval"):
                 meta[key.lower()] = value
             else:
                 try:
@@ -379,6 +379,28 @@ def define_client(meta: dict, compose: dict, nodo: str, index: int):
         }
     }
 
+def define_chaos_monkey(meta: dict, compose: dict):
+    compose["services"]["chaos_monkey"] = {
+        "build": {
+            "context": ".",
+            "dockerfile": "chaos_monkey/Dockerfile"
+        },
+        "container_name": "chaos_monkey",
+        "environment": [
+            "PYTHONUNBUFFERED=1",
+            f"CHAOS_ENABLED={meta.get('chaos_enabled', 'false')}",
+            f"CHAOS_INTERVAL={meta.get('chaos_interval', '30')}",
+            "CONTAINER_NAME=chaos_monkey",
+        ],
+        "volumes": [
+            "/var/run/docker.sock:/var/run/docker.sock",
+        ],
+        "networks": ["testing_net"],
+        "depends_on": {
+            "server": {"condition": "service_started"},
+        }
+    }
+
 def generate_compose(meta: dict, nodes: dict, services: dict = None):
     compose = {
         "name": meta.get("compose_name", "tp-distribuidos-grupo13"),
@@ -479,6 +501,10 @@ def generate_compose(meta: dict, nodes: dict, services: dict = None):
     if client_amount == 0:
         raise ValueError("Debe haber al menos un cliente.")
     define_server(compose, client_amount) 
+    
+    if meta.get("chaos_enabled", "false").lower() == "true":
+        define_chaos_monkey(meta, compose)
+        
     define_network(compose)
     return compose, client_amount
 
