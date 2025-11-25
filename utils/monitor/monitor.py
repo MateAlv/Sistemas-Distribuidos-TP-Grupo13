@@ -202,10 +202,6 @@ class Monitor:
             
             # 2. Check Workers Health (if I am leader)
             else:
-                # Debug: Print workers seen
-                if int(time.time()) % 5 == 0:
-                    logging.debug(f"Leader {self.node_id} tracking workers: {list(self.workers_last_seen.keys())}")
-
                 for node_id, last_seen in list(self.workers_last_seen.items()):
                     if time.time() - last_seen > HEARTBEAT_TIMEOUT:
                         logging.info(f"Worker {node_id} died. Reviving...")
