@@ -77,7 +77,11 @@ def main():
 
     logging.debug(f"Config cargada desde {config_file}: {cfg}")
 
-    filter = Filter(cfg)
+    from utils.monitor import Monitor
+    monitor = Monitor()
+    monitor.start()
+
+    filter = Filter(cfg, monitor)
     
     signal.signal(signal.SIGTERM, filter.shutdown)
 

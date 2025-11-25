@@ -42,14 +42,12 @@ def main():
     listen_backlog = config_params["listen_backlog"]
 
     initialize_log(logging_level)
-
-    # Log config parameters at the beginning of the program to verify the configuration
-    # of the component
-    logging.debug(f"action: config | result: success | port: {port} | "
-                  f"listen_backlog: {listen_backlog} | logging_level: {logging_level}")
-
     # Initialize server and start server loop
-    server = Server(port, listen_backlog, config_params["max_number_of_chunks_in_batch"])
+    from utils.monitor import Monitor
+    monitor = Monitor()
+    monitor.start()
+
+    server = Server(port, listen_backlog, config_params["max_number_of_chunks_in_batch"], monitor)
 
     signal.signal(signal.SIGTERM, server._begin_shutdown)
 

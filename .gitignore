@@ -8,6 +8,8 @@ data/.*
 __pycache__/
 logs.txt
 .idea/
+venv/
+requirements.txt
 
 docker-compose.yaml
 docker-compose-*.yaml
