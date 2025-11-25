@@ -1,0 +1,77 @@
+version: '3.8'
+
+services:
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmqctl", "status"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - test_net
+
+  node_1:
+    build:
+      context: ..
+      dockerfile: server/Dockerfile
+    container_name: node_1
+    entrypoint: ["python3", "tests/mock_node.py"]
+    environment:
+      - CONTAINER_NAME=node_1
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ../tests:/server/tests
+      - ../utils:/server/utils
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - test_net
+
+  node_2:
+    build:
+      context: ..
+      dockerfile: server/Dockerfile
+    container_name: node_2
+    entrypoint: ["python3", "tests/mock_node.py"]
+    environment:
+      - CONTAINER_NAME=node_2
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ../tests:/server/tests
+      - ../utils:/server/utils
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - test_net
+
+  node_3:
+    build:
+      context: ..
+      dockerfile: server/Dockerfile
+    container_name: node_3
+    entrypoint: ["python3", "tests/mock_node.py"]
+    environment:
+      - CONTAINER_NAME=node_3
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ../tests:/server/tests
+      - ../utils:/server/utils
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - test_net
+
+networks:
+  test_net:
+    driver: bridge

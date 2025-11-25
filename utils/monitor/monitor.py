@@ -22,6 +22,7 @@ class Monitor:
         
         # Threading events
         self.election_in_progress = False
+        self.election_start_time = 0
         
         # Setup threads
         self.sender_thread = threading.Thread(target=self._sender_loop, daemon=True)
@@ -117,11 +118,19 @@ class Monitor:
             
             if msg_type == MSG_HEARTBEAT:
                 if data.get('is_leader'):
+                    # logging.debug(f"Received Leader Heartbeat from {sender_id}")
                     self.last_leader_heartbeat = time.time()
                     self.leader_id = sender_id
+                    
+                    # Bully: If leader ID is lower than mine, challenge it
+                    if sender_id < self.node_id:
+                        logging.warning(f"Detected Leader {sender_id} with lower ID. Challenging...")
+                        self._start_election()
+                        
                     if self.election_in_progress and sender_id > self.node_id:
                         self.election_in_progress = False # Higher ID leader exists
                 elif self.is_leader:
+                    # logging.debug(f"Received Worker Heartbeat from {sender_id}")
                     self.workers_last_seen[sender_id] = time.time()
 
             elif msg_type == MSG_ELECTION:
@@ -132,18 +141,17 @@ class Monitor:
             elif msg_type == MSG_COORDINATOR:
                 self.leader_id = sender_id
                 self.election_in_progress = False
-                self.is_leader = (self.node_id == sender_id)
-                if self.is_leader:
-                    logging.info("I am the new LEADER!")
-                    # Re-bind to listen to workers
-                    # Note: In this simple implementation, we might need to restart listener or use a dynamic bind if possible.
-                    # For now, let's assume the checker loop handles the restart or we just bind everything initially?
-                    # Binding everything initially is noisy. 
-                    # Let's just restart the listener thread or have it check `self.is_leader` periodically?
-                    # Actually, `channel.queue_bind` is thread-safe-ish? No.
-                    # Simplification: The listener loop will break and restart if leadership changes? 
-                    # Or just bind to everything but ignore if not leader.
-                    pass
+                
+                # Bully: If current leader ID is lower than mine, I should challenge it.
+                if sender_id < self.node_id:
+                    logging.warning(f"Received COORDINATOR from lower ID {sender_id}. Challenging...")
+                    self._start_election()
+                else:
+                    self.is_leader = (self.node_id == sender_id)
+                    if self.is_leader:
+                        logging.info("I am the new LEADER!")
+                    else:
+                        logging.info(f"New Leader elected: {sender_id}")
 
             elif msg_type == MSG_DEATH:
                 target = data.get('target')
@@ -158,6 +166,21 @@ class Monitor:
         """Checks for timeouts (Leader death or Worker death)"""
         while self.running:
             time.sleep(1)
+            
+            if self.election_in_progress:
+                if time.time() - self.election_start_time > ELECTION_TIMEOUT:
+                     # Check if we heard from a higher leader (redundant but safe)
+                     if self.leader_id and self.leader_id > self.node_id and (time.time() - self.last_leader_heartbeat < HEARTBEAT_TIMEOUT):
+                         self.election_in_progress = False
+                         continue
+
+                     # Declare Victory
+                     self.is_leader = True
+                     self.leader_id = self.node_id
+                     self._broadcast(MSG_COORDINATOR)
+                     self.election_in_progress = False
+                     logging.info("I am the new LEADER!")
+                continue # Skip other checks during election
             
             # 1. Check Leader Health (if I am not leader)
             if not self.is_leader:
@@ -182,6 +205,7 @@ class Monitor:
         if self.election_in_progress:
             return
         self.election_in_progress = True
+        self.election_start_time = time.time()
         
         # Bully: Send ELECTION to all higher IDs
         # In this dynamic Docker env, we don't know all IDs easily. 
@@ -191,25 +215,10 @@ class Monitor:
         
         # Modified Bully for Broadcast:
         # 1. Broadcast ELECTION.
-        # 2. Wait T seconds.
+        # 2. Wait T seconds (handled in checker loop).
         # 3. If no higher ID sends COORDINATOR or ELECTION, declare self COORDINATOR.
         
         self._broadcast(MSG_ELECTION)
-        
-        # Wait for response (in a separate non-blocking way? or just sleep here?)
-        # Since this is a thread, we can sleep.
-        time.sleep(ELECTION_TIMEOUT)
-        
-        if self.election_in_progress: # Still thinking we can be leader
-             # Check if we heard from a higher leader
-             if self.leader_id and self.leader_id > self.node_id and (time.time() - self.last_leader_heartbeat < HEARTBEAT_TIMEOUT):
-                 return # Higher leader is alive
-             
-             # Declare Victory
-             self.is_leader = True
-             self.leader_id = self.node_id
-             self._broadcast(MSG_COORDINATOR)
-             self.election_in_progress = False
 
     def _broadcast(self, msg_type):
         try:

@@ -56,20 +56,33 @@ class TestMonitor(unittest.TestCase):
         self.assertEqual(body['type'], MSG_ELECTION)
         self.assertEqual(body['id'], 'test_node_1')
 
-    def test_handle_heartbeat_leader(self):
-        # Scenario: We receive a heartbeat from a leader
+    def test_handle_heartbeat_leader_higher_id(self):
+        # Scenario: We receive a heartbeat from a leader with higher ID -> Accept
         body = json.dumps({
             'type': MSG_HEARTBEAT,
-            'id': 'leader_node',
+            'id': 'test_node_2', # Higher than test_node_1
             'is_leader': True,
             'timestamp': time.time()
         })
         
         self.monitor._handle_message(body, None)
         
-        self.assertEqual(self.monitor.leader_id, 'leader_node')
-        # last_leader_heartbeat should be updated (close to now)
+        self.assertEqual(self.monitor.leader_id, 'test_node_2')
         self.assertAlmostEqual(self.monitor.last_leader_heartbeat, time.time(), delta=1.0)
+
+    def test_handle_heartbeat_leader_lower_id(self):
+        # Scenario: We receive a heartbeat from a leader with LOWER ID -> Challenge
+        with patch.object(self.monitor, '_start_election') as mock_start_election:
+            body = json.dumps({
+                'type': MSG_HEARTBEAT,
+                'id': 'test_node_0', # Lower than test_node_1
+                'is_leader': True,
+                'timestamp': time.time()
+            })
+            
+            self.monitor._handle_message(body, None)
+            
+            mock_start_election.assert_called_once()
 
     def test_handle_election_lower_id(self):
         # Scenario: Receive ELECTION from lower ID -> We should start election
@@ -97,19 +110,32 @@ class TestMonitor(unittest.TestCase):
             
             mock_start_election.assert_not_called()
 
-    def test_handle_coordinator(self):
-        # Scenario: Receive COORDINATOR message
+    def test_handle_coordinator_higher_id(self):
+        # Scenario: Receive COORDINATOR message from higher ID -> Accept
         body = json.dumps({
             'type': MSG_COORDINATOR,
-            'id': 'new_leader',
+            'id': 'test_node_2', # Higher
             'timestamp': time.time()
         })
         
         self.monitor._handle_message(body, None)
         
-        self.assertEqual(self.monitor.leader_id, 'new_leader')
+        self.assertEqual(self.monitor.leader_id, 'test_node_2')
         self.assertFalse(self.monitor.election_in_progress)
         self.assertFalse(self.monitor.is_leader)
+
+    def test_handle_coordinator_lower_id(self):
+        # Scenario: Receive COORDINATOR message from LOWER ID -> Challenge
+        with patch.object(self.monitor, '_start_election') as mock_start_election:
+            body = json.dumps({
+                'type': MSG_COORDINATOR,
+                'id': 'test_node_0', # Lower
+                'timestamp': time.time()
+            })
+            
+            self.monitor._handle_message(body, None)
+            
+            mock_start_election.assert_called_once()
 
     @patch('utils.monitor.monitor.os._exit')
     def test_handle_death_certificate(self, mock_exit):
