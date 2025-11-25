@@ -55,7 +55,7 @@ class ChaosManager:
 
     def kill_container(self, container_name):
         """Kills a specific container."""
-        logging.info(f"Chaos Monkey triggering: Killing {container_name}...")
+        logging.info(f"action: kill_container | target: {container_name} | status: starting")
         try:
             subprocess.run(
                 ["docker", "kill", container_name],
@@ -63,8 +63,8 @@ class ChaosManager:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL
             )
-            logging.info(f"Successfully killed {container_name}")
+            logging.info(f"action: kill_container | target: {container_name} | status: success")
             return container_name
         except subprocess.CalledProcessError as e:
-            logging.error(f"Failed to kill {container_name}: {e}")
+            logging.error(f"action: kill_container | target: {container_name} | status: failed | error: {e}")
             return None
