@@ -1,12 +1,17 @@
 #!/bin/bash
 
 DATA_PATH=./data
+DATASET_ZIP_PATH=$DATA_PATH/data-test
+RESULTS_ZIP_PATH=$DATA_PATH/results
 # Dataset completo
 KAGGLE_PATH=$DATA_PATH/.kaggle
+RESULTS_KAGGLE_PATH=$DATA_PATH/.results-kaggle
 # Dataset reducido
 KAGGLE_REDUCED_PATH=$DATA_PATH/.kaggle-reduced
+RESULTS_KAGGLE_REDUCED_PATH=$DATA_PATH/.results-kaggle-reduced
 # Dataset muy pequeño para pruebas rápidas
 DATA_REDUCED_PATH=$DATA_PATH/.data-reduced
+RESULTS_DATA_REDUCED_PATH=$DATA_PATH/.results-data-reduced
 # Dataset de pruebas internas de la librería
 DATA_TEST_PATH=$DATA_PATH/.data-test
 
@@ -46,7 +51,7 @@ cp -r $KAGGLE_PATH/2.menu_items/ $KAGGLE_REDUCED_PATH/2.menu_items/
 cp -r $KAGGLE_PATH/3.users/ $KAGGLE_REDUCED_PATH/3.users/
 
 # Unzip test data
-unzip -o $DATA_PATH/data-test.zip -d $DATA_PATH
+unzip -o $DATASET_ZIP_PATH.zip -d $DATA_PATH
 mv $DATA_PATH/.data-test $DATA_REDUCED_PATH
 
 # Create internal test dataset copying only stores and menu_items
@@ -55,7 +60,8 @@ cp -r $DATA_REDUCED_PATH/stores $DATA_TEST_PATH/stores
 cp -r $DATA_REDUCED_PATH/menu_items $DATA_TEST_PATH/menu_items
 
 # Unzip kaggle results
-unzip -o ./data/kaggle_results.zip -d $DATA_PATH
-cp -r $DATA_PATH/kaggle_results/.kaggle-results $DATA_PATH/.kaggle-results
-cp -r $DATA_PATH/kaggle_results/.kaggle-results-reduced $DATA_PATH/.kaggle-results-reduced
-rm -rf $DATA_PATH/kaggle_results
+unzip -o $RESULTS_ZIP_PATH.zip -d $DATA_PATH
+cp -r $RESULTS_ZIP_PATH/.results-kaggle $RESULTS_KAGGLE_PATH
+cp -r $RESULTS_ZIP_PATH/.results-kaggle-reduced $RESULTS_KAGGLE_REDUCED_PATH
+cp -r $RESULTS_ZIP_PATH/.results-data-reduced $RESULTS_DATA_REDUCED_PATH
+rm -rf $RESULTS_ZIP_PATH
