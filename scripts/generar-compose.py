@@ -504,6 +504,7 @@ def generate_compose(meta: dict, nodes: dict, services: dict = None):
     
     if meta.get("chaos_enabled", "false").lower() == "true":
         define_chaos_monkey(meta, compose)
+        services["chaos_monkey"] = 1
         
     define_network(compose)
     return compose, client_amount
