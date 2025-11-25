@@ -5,7 +5,11 @@ import os
 import json
 import subprocess
 import pika
-from utils.protocol import *
+from utils.protocol import (
+    MSG_HEARTBEAT, MSG_ELECTION, MSG_COORDINATOR, MSG_DEATH,
+    HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT, ELECTION_TIMEOUT,
+    CONTROL_EXCHANGE, HEARTBEAT_EXCHANGE
+)
 
 class Monitor:
     def __init__(self):
@@ -52,6 +56,7 @@ class Monitor:
                     connection = self._get_connection()
                     channel = connection.channel()
                     channel.exchange_declare(exchange=CONTROL_EXCHANGE, exchange_type='topic', durable=True)
+                    channel.exchange_declare(exchange=HEARTBEAT_EXCHANGE, exchange_type='topic', durable=True)
 
                 # Check for apoptosis (Main process hung)
                 if time.time() - self.last_pulse > HEARTBEAT_TIMEOUT:
@@ -68,7 +73,7 @@ class Monitor:
                 }
                 routing_key = f"heartbeat.{'leader' if self.is_leader else 'worker'}.{self.node_id}"
                 channel.basic_publish(
-                    exchange=CONTROL_EXCHANGE,
+                    exchange=HEARTBEAT_EXCHANGE,
                     routing_key=routing_key,
                     body=json.dumps(msg)
                 )
@@ -81,6 +86,7 @@ class Monitor:
     def _listener_loop(self):
         """Listens for heartbeats and elections"""
         while self.running:
+            connection = None
             try:
                 connection = self._get_connection()
                 channel = connection.channel()
@@ -92,14 +98,13 @@ class Monitor:
                 
                 # Bindings
                 # 1. Listen to Leader Heartbeats
-                channel.queue_bind(exchange=CONTROL_EXCHANGE, queue=queue_name, routing_key="heartbeat.leader.#")
+                channel.queue_bind(exchange=HEARTBEAT_EXCHANGE, queue=queue_name, routing_key='heartbeat.leader.#')
                 # 2. Listen to Elections
                 channel.queue_bind(exchange=CONTROL_EXCHANGE, queue=queue_name, routing_key="election.#")
+                # Bind worker heartbeats unconditionally
+                channel.queue_bind(exchange=HEARTBEAT_EXCHANGE, queue=queue_name, routing_key='heartbeat.worker.#')
                 # 3. Listen to Control (Death Certificates)
                 channel.queue_bind(exchange=CONTROL_EXCHANGE, queue=queue_name, routing_key="control.#")
-                # 4. If Leader, listen to Worker Heartbeats
-                if self.is_leader:
-                    channel.queue_bind(exchange=CONTROL_EXCHANGE, queue=queue_name, routing_key="heartbeat.worker.#")
 
                 def callback(ch, method, properties, body):
                     self._handle_message(body, ch)
@@ -109,6 +114,13 @@ class Monitor:
             except Exception as e:
                 logging.error(f"Listener loop error: {e}")
                 time.sleep(2)
+            finally:
+                if connection and not connection.is_closed:
+                    try:
+                        connection.close()
+                    except Exception as e:
+                        logging.error(f"Error closing listener connection: {e}")
+
 
     def _handle_message(self, body, channel):
         try:
@@ -190,16 +202,15 @@ class Monitor:
             
             # 2. Check Workers Health (if I am leader)
             else:
-                now = time.time()
-                dead_workers = []
-                for worker, last_seen in self.workers_last_seen.items():
-                    if now - last_seen > HEARTBEAT_TIMEOUT:
-                        dead_workers.append(worker)
-                
-                for worker in dead_workers:
-                    logging.info(f"Worker {worker} died. Reviving...")
-                    self._revive_node(worker)
-                    del self.workers_last_seen[worker]
+                # Debug: Print workers seen
+                if int(time.time()) % 5 == 0:
+                    logging.debug(f"Leader {self.node_id} tracking workers: {list(self.workers_last_seen.keys())}")
+
+                for node_id, last_seen in list(self.workers_last_seen.items()):
+                    if time.time() - last_seen > HEARTBEAT_TIMEOUT:
+                        logging.info(f"Worker {node_id} died. Reviving...")
+                        self._revive_node(node_id)
+                        del self.workers_last_seen[node_id]
 
     def _start_election(self):
         if self.election_in_progress:
