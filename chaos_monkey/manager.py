@@ -34,8 +34,6 @@ class ChaosManager:
                     is_excluded = True
                     break
             
-            # Also exclude clients as they are not part of the cluster logic we want to test primarily
-            # (though killing clients is a valid test, let's focus on workers/server for now)
             if "client" in container:
                 is_excluded = True
 
