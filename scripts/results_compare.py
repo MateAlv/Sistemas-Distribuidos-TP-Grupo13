@@ -9,8 +9,10 @@ FILES = [
     "results_query_4.csv",
 ]
 
-KAGGLE_REDUCED_DIR = "./data/.kaggle-results-reduced"
-KAGGLE_FULL_DIR = "./data/.kaggle-results"
+TEST_DIR = "./data/.results-data-reduced"
+KAGGLE_FULL_DIR = "./data/.results-kaggle"
+KAGGLE_REDUCED_DIR = "./data/.results-kaggle-reduced"
+
 RESULTS_DIR = "./.results"
 
 def load_rows(path):
@@ -52,10 +54,12 @@ def get_args():
         print("El número de cliente debe ser un entero")
         return None, None, None, verbose
             
-    base_dir = KAGGLE_REDUCED_DIR
+    base_dir = TEST_DIR
     if len(sys.argv) > 2:
         if sys.argv[2] == "--full":
             base_dir = KAGGLE_FULL_DIR
+        if sys.argv[2] == "--reduced":
+            base_dir = KAGGLE_REDUCED_DIR
         if sys.argv[2] == "--verbose":
             verbose = True
         if len(sys.argv) > 3:
@@ -63,6 +67,8 @@ def get_args():
                 verbose = True
             if sys.argv[3] == "--full":
                 base_dir = KAGGLE_FULL_DIR
+            if sys.argv[3] == "--reduced":
+                base_dir = KAGGLE_REDUCED_DIR
     
     if not os.path.isdir(base_dir):
         print(f"No existe el directorio {base_dir}")

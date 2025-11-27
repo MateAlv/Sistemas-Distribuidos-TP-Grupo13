@@ -54,7 +54,7 @@ up:
 test:
 	# Run the docker-compose setup
 	make clean-results
-	python3  $(COMPOSE_SCRIPT) --config=${CONFIG}
+	python3  $(COMPOSE_SCRIPT) --config=config/config-test.ini
 	docker compose -f ${DOCKER} up --build
 .PHONY: test
 

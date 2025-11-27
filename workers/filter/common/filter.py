@@ -33,6 +33,8 @@ class Filter:
                                                                  f"end_exchange_filter_{self.filter_type}", 
                                                                  [f"{self.id}"], 
                                                                  "fanout")
+        self.stats_timer = None
+        self.consume_timer = None
         
         if self.filter_type == "year":
             self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", "to_filter_1")
@@ -60,22 +62,27 @@ class Filter:
         def callback(msg): results.append(msg)
         def stats_callback(msg): stats_results.append(msg)
         def stop():
-                self.middleware_queue_receiver.stop_consuming()
+            if not self.middleware_queue_receiver.connection or not self.middleware_queue_receiver.connection.is_open:
+                return
+            self.middleware_queue_receiver.stop_consuming()
+
         def stats_stop():
-                self.middleware_end_exchange.stop_consuming()
+            if not self.middleware_end_exchange.connection or not self.middleware_end_exchange.connection.is_open:
+                return
+            self.middleware_end_exchange.stop_consuming()
 
         while self.__running:
             if self.monitor:
                 self.monitor.pulse()
 
             try:
-                self.middleware_end_exchange.connection.call_later(TIMEOUT, stats_stop)
+                self.stats_timer = self.middleware_end_exchange.connection.call_later(TIMEOUT, stats_stop)
                 self.middleware_end_exchange.start_consuming(stats_callback)
             except (OSError, RuntimeError, MessageMiddlewareMessageError) as e:
                 logging.error(f"Error en consumo: {e}")
 
             try:
-                self.middleware_queue_receiver.connection.call_later(TIMEOUT, stop)
+                self.consume_timer = self.middleware_queue_receiver.connection.call_later(TIMEOUT, stop)
                 self.middleware_queue_receiver.start_consuming(callback)
             except (OSError, RuntimeError, MessageMiddlewareMessageError) as e:
                  logging.error(f"Error en consumo: {e}")
@@ -304,6 +311,17 @@ class Filter:
 
     def shutdown(self, signum=None, frame=None):
         logging.info(f"SIGTERM recibido: cerrando filtro {self.filter_type} (ID: {self.id})")
+        try:
+            if self.stats_timer is not None:
+                self.stats_timer.cancel()
+        except Exception:
+            pass
+
+        try:
+            if self.consume_timer is not None:
+                self.consume_timer.cancel()
+        except Exception:
+            pass
 
         # Detener consumo de las colas
         try:

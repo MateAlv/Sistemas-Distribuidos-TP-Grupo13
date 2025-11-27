@@ -53,6 +53,10 @@ class Aggregator:
         self.chunks_to_receive = {}
         self.already_sent_stats = {}
 
+        self.chunk_timer = None
+        self.data_timer = None
+        self.stats_timer = None
+
         # Acumuladores globales
         self.global_accumulator = {}
 
@@ -115,6 +119,13 @@ class Aggregator:
         logging.info(
             f"SIGTERM recibido: cerrando aggregator {self.aggregator_type} (ID: {self.aggregator_id})"
         )
+
+        for timer in [self.chunk_timer, self.data_timer, self.stats_timer]:
+            try:
+                if timer is not None:
+                    timer.cancel()
+            except (OSError, RuntimeError, AttributeError):
+                pass
 
         self._running = False
 
@@ -199,7 +210,7 @@ class Aggregator:
             self.middleware_data_exchange.stop_consuming()
 
         def stats_stop():
-                self.middleware_stats_exchange.stop_consuming()
+            self.middleware_stats_exchange.stop_consuming()
 
         def chunk_stop():
             self.middleware_queue_receiver.stop_consuming()
@@ -208,7 +219,7 @@ class Aggregator:
             if self.monitor:
                 self.monitor.pulse()
             try:
-                self.middleware_queue_receiver.connection.call_later(TIMEOUT, chunk_stop)
+                self.chunk_timer = self.middleware_queue_receiver.connection.call_later(TIMEOUT, chunk_stop)
                 self.middleware_queue_receiver.start_consuming(chunk_callback)
             except Exception as e:
                 logging.error(
@@ -216,7 +227,7 @@ class Aggregator:
                 )
 
             try:
-                self.middleware_data_exchange.connection.call_later(TIMEOUT, data_stop)
+                self.data_timer = self.middleware_data_exchange.connection.call_later(TIMEOUT, data_stop)
                 self.middleware_data_exchange.start_consuming(data_callback)
             except Exception as e:
                 logging.error(
@@ -224,7 +235,7 @@ class Aggregator:
                 )
 
             try:
-                self.middleware_stats_exchange.connection.call_later(TIMEOUT, stats_stop)
+                self.stats_timer = self.middleware_stats_exchange.connection.call_later(TIMEOUT, stats_stop)
                 self.middleware_stats_exchange.start_consuming(stats_callback)
             except Exception as e:
                 logging.error(
