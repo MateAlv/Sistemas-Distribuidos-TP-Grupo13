@@ -58,8 +58,8 @@ def main():
     
     logging.debug(f"action: config | result: success | agg_type:{agg_type} | agg_id:{agg_id} | log_level:{logging_level}")
     
-    from utils.monitor import Monitor
-    monitor = Monitor()
+    from utils.heartbeat_sender import HeartbeatSender
+    monitor = HeartbeatSender()
     monitor.start()
 
     aggregator = Aggregator(agg_type, agg_id, monitor)

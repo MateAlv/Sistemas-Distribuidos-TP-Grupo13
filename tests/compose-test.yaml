@@ -15,55 +15,67 @@ services:
     networks:
       - test_net
 
-  node_1:
+  monitor_1:
     build:
       context: ..
-      dockerfile: server/Dockerfile
-    container_name: node_1
-    entrypoint: ["python3", "tests/mock_node.py"]
+      dockerfile: monitor/Dockerfile
+    container_name: monitor_1
     environment:
-      - CONTAINER_NAME=node_1
+      - CONTAINER_NAME=monitor_1
       - PYTHONUNBUFFERED=1
+      - LOGGING_LEVEL=DEBUG
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - ../tests:/server/tests
-      - ../utils:/server/utils
     depends_on:
       rabbitmq:
         condition: service_healthy
     networks:
       - test_net
 
-  node_2:
+  monitor_2:
     build:
       context: ..
-      dockerfile: server/Dockerfile
-    container_name: node_2
-    entrypoint: ["python3", "tests/mock_node.py"]
+      dockerfile: monitor/Dockerfile
+    container_name: monitor_2
     environment:
-      - CONTAINER_NAME=node_2
+      - CONTAINER_NAME=monitor_2
       - PYTHONUNBUFFERED=1
+      - LOGGING_LEVEL=DEBUG
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - ../tests:/server/tests
-      - ../utils:/server/utils
     depends_on:
       rabbitmq:
         condition: service_healthy
     networks:
       - test_net
 
-  node_3:
+  monitor_3:
+    build:
+      context: ..
+      dockerfile: monitor/Dockerfile
+    container_name: monitor_3
+    environment:
+      - CONTAINER_NAME=monitor_3
+      - PYTHONUNBUFFERED=1
+      - LOGGING_LEVEL=DEBUG
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - test_net
+
+  worker_1:
     build:
       context: ..
       dockerfile: server/Dockerfile
-    container_name: node_3
-    entrypoint: ["python3", "tests/mock_node.py"]
+    container_name: worker_1
+    entrypoint: ["python3", "tests/mock_worker.py"]
     environment:
-      - CONTAINER_NAME=node_3
+      - CONTAINER_NAME=worker_1
       - PYTHONUNBUFFERED=1
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
       - ../tests:/server/tests
       - ../utils:/server/utils
     depends_on:
