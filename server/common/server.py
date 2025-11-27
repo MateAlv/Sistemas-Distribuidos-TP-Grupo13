@@ -53,10 +53,11 @@ class Server:
         S -> C:  O
     """
 
-    def __init__(self, port: int, listen_backlog: int, max_number_of_chunks_in_batch: int) -> None:
+    def __init__(self, port: int, listen_backlog: int, max_number_of_chunks_in_batch: int, monitor=None) -> None:
         self.port = int(port)
         self.listen_backlog = int(listen_backlog)
         self.host = DEFAULT_BIND_IP
+        self.monitor = monitor
         
         self.max_number_of_chunks_in_batch = max_number_of_chunks_in_batch
         
@@ -93,9 +94,14 @@ class Server:
                      self.host, self.port, self.listen_backlog)
         
         try:
+            self._server_socket.settimeout(1.0)
             while self._running:
+                if self.monitor:
+                    self.monitor.pulse()
                 try:
                     client_sock, addr = self._server_socket.accept()
+                except socket.timeout:
+                    continue
                 except OSError as e:
                     if self._running:
                         logging.error("action: accept_fail | error: %r", e)

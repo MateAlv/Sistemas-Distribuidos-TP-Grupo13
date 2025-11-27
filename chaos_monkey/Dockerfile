@@ -7,18 +7,7 @@ RUN apt-get update && apt-get install -y curl && \
     rm docker.tgz && \
     apt-get remove -y curl && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /workers/
+COPY chaos_monkey /app/chaos_monkey
+WORKDIR /app/chaos_monkey
 
-# Copiar y instalar dependencias primero (para mejor caching)
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Copiar el código fuente después
-COPY workers/filter/ ./filter/
-COPY utils/ /workers/utils/
-COPY middleware/ /workers/middleware/
-
-ENV PYTHONUNBUFFERED=1
-ENV PYTHONPATH=/workers/
-
-WORKDIR /workers/filter
+ENTRYPOINT ["python3", "main.py"]
