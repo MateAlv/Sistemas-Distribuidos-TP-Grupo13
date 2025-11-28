@@ -5,7 +5,7 @@ from utils.eof_protocol.end_messages import MessageEnd
 from utils.file_utils.table_type import TableType
 from utils.processing.process_chunk import ProcessChunk
 from utils.processing.process_table import TableProcessRow, PurchasesPerUserStoreRow
-from common.joiner import Joiner
+from .joiner import Joiner
 
 
 class StoresTop3Joiner(Joiner):

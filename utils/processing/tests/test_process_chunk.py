@@ -12,6 +12,23 @@ def test_process_chunk_header_serialize_deserialize():
     assert deserialized.table_type == TableType.TRANSACTIONS
     assert deserialized.size == 456
 
+def test_multiple_process_chunk_header_serialize_deserialize():
+    header1 = ProcessChunkHeader(123, TableType.TRANSACTIONS, 456)
+    serialized1 = header1.serialize()
+    deserialized1 = ProcessChunkHeader.deserialize(serialized1)
+    assert deserialized1.client_id == 123
+    assert deserialized1.table_type == TableType.TRANSACTIONS
+    assert deserialized1.size == 456
+    first_uuid = deserialized1.message_id
+
+    header2 = ProcessChunkHeader(789, TableType.TRANSACTIONS, 101112)
+    serialized2 = header2.serialize()
+    deserialized2 = ProcessChunkHeader.deserialize(serialized2)
+    assert deserialized2.client_id == 789
+    assert deserialized2.table_type == TableType.TRANSACTIONS
+    assert deserialized2.size == 101112
+    assert first_uuid != deserialized2.message_id
+
 def test_process_chunk_serialize_deserialize():
     
     date = DateTime(datetime.date(2023, 5, 1), datetime.time(0, 0))
