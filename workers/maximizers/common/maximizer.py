@@ -160,8 +160,7 @@ class Maximizer:
                 logging.debug(f"action: stop_consuming_warning | type:{self.maximizer_type} | range:{self.maximizer_range} | error:{e}")
 
         while self.__running:
-            if self.monitor:
-                self.monitor.pulse()
+
             try:
                 if hasattr(self.data_receiver, "connection"):
                     self.data_receiver.connection.call_later(TIMEOUT, stop)
@@ -170,6 +169,7 @@ class Maximizer:
                 logging.error(f"action: error_during_consumption | type:{self.maximizer_type} | range:{self.maximizer_range} | error:{e}")
 
             while messages:
+
                 data = messages.popleft()
                 try:
                     if data.startswith(b"END;"):

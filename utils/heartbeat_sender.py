@@ -16,7 +16,6 @@ class HeartbeatSender:
         self.container_name = os.environ.get('CONTAINER_NAME', 'unknown')
         self.node_id = self.container_name
         self.running = True
-        self.last_pulse = time.time()
         
         self.sender_thread = threading.Thread(target=self._sender_loop, daemon=True)
         self.listener_thread = threading.Thread(target=self._listener_loop, daemon=True)
@@ -25,10 +24,6 @@ class HeartbeatSender:
         logging.info(f"Starting HeartbeatSender for {self.node_id}")
         self.sender_thread.start()
         self.listener_thread.start()
-
-    def pulse(self):
-        """Called by main process to prove it's alive"""
-        self.last_pulse = time.time()
 
     def _get_connection(self):
         return pika.BlockingConnection(pika.ConnectionParameters(host='rabbitmq', heartbeat=0))
@@ -43,12 +38,6 @@ class HeartbeatSender:
                     connection = self._get_connection()
                     channel = connection.channel()
                     channel.exchange_declare(exchange=HEARTBEAT_EXCHANGE, exchange_type='topic', durable=True)
-
-                # Check for apoptosis (Main process hung)
-                if time.time() - self.last_pulse > HEARTBEAT_TIMEOUT:
-                    logging.error("Main process hung! Committing apoptosis...")
-                    self._apoptosis()
-                    return
 
                 # Send Heartbeat
                 msg = {

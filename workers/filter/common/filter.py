@@ -65,8 +65,7 @@ class Filter:
                 self.middleware_end_exchange.stop_consuming()
 
         while self.__running:
-            if self.monitor:
-                self.monitor.pulse()
+
 
             try:
                 self.middleware_end_exchange.connection.call_later(TIMEOUT, stats_stop)
@@ -81,6 +80,7 @@ class Filter:
                  logging.error(f"Error en consumo: {e}")
 
             while stats_results:
+
                 stats_msg = stats_results.popleft()
                 try:
                     if stats_msg.startswith(b"STATS_END"):
@@ -123,6 +123,7 @@ class Filter:
                     logging.error(f"action: error_decoding_stats_message | error:{e}")
 
             while results:
+
                 msg = results.popleft()
                 try:
                     if msg.startswith(b"END;"):
