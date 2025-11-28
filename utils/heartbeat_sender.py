@@ -6,19 +6,26 @@ import json
 import signal
 import pika
 from utils.protocol import (
-    MSG_HEARTBEAT, MSG_DEATH,
+    MSG_HEARTBEAT, MSG_DEATH, MSG_FORCE_END, MSG_FORCE_END_CLIENT,
     HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT,
     CONTROL_EXCHANGE, HEARTBEAT_EXCHANGE
 )
 
 class HeartbeatSender:
-    def __init__(self):
+    def __init__(self, node_id=None):
         self.container_name = os.environ.get('CONTAINER_NAME', 'unknown')
-        self.node_id = self.container_name
+        self.node_id = node_id if node_id else self.container_name
         self.running = True
         
         self.sender_thread = threading.Thread(target=self._sender_loop, daemon=True)
         self.listener_thread = threading.Thread(target=self._listener_loop, daemon=True)
+        
+        self.on_force_end = None
+        self.on_force_end_client = None
+
+    def set_callbacks(self, on_force_end=None, on_force_end_client=None):
+        self.on_force_end = on_force_end
+        self.on_force_end_client = on_force_end_client
 
 
 
@@ -78,15 +85,32 @@ class HeartbeatSender:
                 
                 # Listen to Control (Death Certificates)
                 channel.queue_bind(exchange=CONTROL_EXCHANGE, queue=queue_name, routing_key="control.death")
+                # Listen to Force End
+                channel.queue_bind(exchange=CONTROL_EXCHANGE, queue=queue_name, routing_key="control.force_end")
+                channel.queue_bind(exchange=CONTROL_EXCHANGE, queue=queue_name, routing_key="control.force_end_client")
 
                 def callback(ch, method, properties, body):
                     try:
                         data = json.loads(body)
-                        if data.get('type') == MSG_DEATH:
+                        msg_type = data.get('type')
+                        
+                        if msg_type == MSG_DEATH:
                             target = data.get('target')
                             if target == self.node_id:
                                 logging.critical("Received DEATH CERTIFICATE. Terminating...")
                                 self._apoptosis()
+                                
+                        elif msg_type == MSG_FORCE_END:
+                            logging.warning("Received FORCE_END. Triggering callback...")
+                            if self.on_force_end:
+                                self.on_force_end()
+                                
+                        elif msg_type == MSG_FORCE_END_CLIENT:
+                            client_id = data.get('client_id')
+                            logging.warning(f"Received FORCE_END_CLIENT for {client_id}. Triggering callback...")
+                            if self.on_force_end_client:
+                                self.on_force_end_client(client_id)
+                                
                     except Exception as e:
                         logging.error(f"Error handling message: {e}")
 

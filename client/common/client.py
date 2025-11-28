@@ -5,6 +5,7 @@ from typing import Dict, Tuple
 
 from utils.communication.batch_reader import BatchReader
 from common.sender import Sender
+from utils.heartbeat_sender import HeartbeatSender
 
 
 # ============================
@@ -48,6 +49,10 @@ class Client:
 
         # Inicialización del sender
         self.sender = Sender(self.server_host, self.server_port, connect_timeout=CONNECT_TIMEOUT_S, io_timeout=IO_TIMEOUT_S)
+        
+        # Inicializar HeartbeatSender
+        self.heartbeat_sender = HeartbeatSender(f"client-{self.id}")
+        self.heartbeat_sender.start()
             
         logging.debug(
             "client_init | id=%s host=%s port=%s data_dir=%s output_dir=%s batch_size=%s",
@@ -220,6 +225,12 @@ class Client:
                 f.write(data.encode("utf-8")) # Asegurar UTF-8
     
     def close(self) -> None:
+        try:
+            if hasattr(self, 'heartbeat_sender'):
+                self.heartbeat_sender.stop()
+        except Exception as e:
+            logging.error("Error al detener heartbeat sender: %s", e)
+            
         try:
             self.sender.close()
         except Exception as e:

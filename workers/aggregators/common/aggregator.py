@@ -38,6 +38,8 @@ class Aggregator:
     def __init__(self, agg_type: str, agg_id: int = 1, monitor=None):
         logging.getLogger("pika").setLevel(logging.CRITICAL)
         self.monitor = monitor
+        if self.monitor:
+            self.monitor.set_callbacks(self.handle_force_end, self.handle_force_end_client)
 
         self._running = True
 
@@ -111,6 +113,48 @@ class Aggregator:
             raise ValueError(f"Tipo de agregador inválido: {self.aggregator_type}")
 
 
+    def handle_force_end(self):
+        logging.critical("Received FORCE_END. Resetting ALL state...")
+        self._reset_state()
+
+    def handle_force_end_client(self, client_id):
+        logging.critical(f"Received FORCE_END_CLIENT for {client_id}. Resetting client state...")
+        self._reset_client_state(client_id)
+
+    def _reset_state(self):
+        # Clear all distributed state
+        self.end_message_received.clear()
+        self.chunks_received_per_client.clear()
+        self.chunks_processed_per_client.clear()
+        self.accumulated_chunks_per_client.clear()
+        self.chunks_to_receive.clear()
+        self.already_sent_stats.clear()
+        self.global_accumulator.clear()
+        logging.info("All state reset successfully.")
+
+    def _reset_client_state(self, client_id):
+        # Clear state for specific client
+        if client_id in self.end_message_received:
+            del self.end_message_received[client_id]
+        if client_id in self.chunks_received_per_client:
+            del self.chunks_received_per_client[client_id]
+        if client_id in self.chunks_processed_per_client:
+            del self.chunks_processed_per_client[client_id]
+        if client_id in self.accumulated_chunks_per_client:
+            del self.accumulated_chunks_per_client[client_id]
+        if client_id in self.chunks_to_receive:
+            del self.chunks_to_receive[client_id]
+        
+        # Clear already_sent_stats for this client
+        keys_to_remove = [k for k in self.already_sent_stats.keys() if k[0] == client_id]
+        for k in keys_to_remove:
+            del self.already_sent_stats[k]
+            
+        # Clear global accumulator
+        if client_id in self.global_accumulator:
+            del self.global_accumulator[client_id]
+            
+        logging.info(f"State for client {client_id} reset successfully.")
     def shutdown(self, signum=None, frame=None):
         logging.info(
             f"SIGTERM recibido: cerrando aggregator {self.aggregator_type} (ID: {self.aggregator_id})"

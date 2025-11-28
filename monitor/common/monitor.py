@@ -7,6 +7,7 @@ import subprocess
 import pika
 from utils.protocol import (
     MSG_HEARTBEAT, MSG_ELECTION, MSG_COORDINATOR, MSG_DEATH,
+    MSG_FORCE_END, MSG_FORCE_END_CLIENT,
     HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT, ELECTION_TIMEOUT,
     CONTROL_EXCHANGE, HEARTBEAT_EXCHANGE
 )
@@ -199,7 +200,7 @@ class MonitorNode:
         self.election_start_time = time.time()
         self._broadcast(MSG_ELECTION)
 
-    def _broadcast(self, msg_type):
+    def _broadcast(self, msg_type, payload=None):
         try:
             connection = self._get_connection()
             channel = connection.channel()
@@ -209,7 +210,15 @@ class MonitorNode:
                 'id': self.node_id,
                 'timestamp': time.time()
             }
+            if payload:
+                msg.update(payload)
+                
             routing_key = "control.coordinator" if msg_type == MSG_COORDINATOR else "election.broadcast"
+            if msg_type == MSG_FORCE_END:
+                routing_key = "control.force_end"
+            elif msg_type == MSG_FORCE_END_CLIENT:
+                routing_key = "control.force_end_client"
+                
             channel.basic_publish(
                 exchange=CONTROL_EXCHANGE,
                 routing_key=routing_key,
@@ -220,6 +229,19 @@ class MonitorNode:
             logging.error(f"Broadcast error: {e}")
 
     def _revive_node(self, node_id):
+        # 0. Check for critical failures (Server or Client)
+        if node_id == 'server':
+            logging.critical("Server died! Broadcasting FORCE_END...")
+            self._broadcast(MSG_FORCE_END)
+        elif node_id.startswith('client-'):
+            try:
+                # Extract client ID (e.g., client-1 -> 1)
+                client_id = node_id.split('-')[1]
+                logging.critical(f"Client {client_id} died! Broadcasting FORCE_END_CLIENT...")
+                self._broadcast(MSG_FORCE_END_CLIENT, {'client_id': client_id})
+            except IndexError:
+                logging.error(f"Failed to extract client ID from {node_id}")
+
         # 1. Publish Death Certificate
         self._publish_death(node_id)
         # 2. Docker Restart

@@ -18,6 +18,8 @@ class Joiner:
     def __init__(self, join_type: str, monitor=None):
         logging.getLogger('pika').setLevel(logging.CRITICAL)
         self.monitor = monitor
+        if self.monitor:
+            self.monitor.set_callbacks(self.handle_force_end, self.handle_force_end_client)
 
         self.joiner_type = join_type
         self.data = {}
@@ -40,6 +42,46 @@ class Joiner:
         self.join_data_handler_thread = threading.Thread(target=self.handle_join_data, name="JoinDataHandler")
 
         self.define_queues()
+
+    def handle_force_end(self):
+        logging.critical("Received FORCE_END. Resetting ALL state...")
+        self._reset_state()
+
+    def handle_force_end_client(self, client_id):
+        logging.critical(f"Received FORCE_END_CLIENT for {client_id}. Resetting client state...")
+        self._reset_client_state(client_id)
+
+    def _reset_state(self):
+        with self.lock:
+            self.data.clear()
+            self.joiner_data.clear()
+            self.joiner_results.clear()
+            self.joiner_data_chunks.clear()
+            self.client_end_messages_received.clear()
+            self.completed_clients.clear()
+            self._pending_end_messages.clear()
+            self.ready_to_join.clear()
+        logging.info("All state reset successfully.")
+
+    def _reset_client_state(self, client_id):
+        with self.lock:
+            if client_id in self.data:
+                del self.data[client_id]
+            if client_id in self.joiner_data:
+                del self.joiner_data[client_id]
+            if client_id in self.joiner_results:
+                del self.joiner_results[client_id]
+            if client_id in self.joiner_data_chunks:
+                del self.joiner_data_chunks[client_id]
+            if client_id in self.client_end_messages_received:
+                self.client_end_messages_received.remove(client_id)
+            if client_id in self.completed_clients:
+                self.completed_clients.remove(client_id)
+            if client_id in self._pending_end_messages:
+                self._pending_end_messages.remove(client_id)
+            if client_id in self.ready_to_join:
+                del self.ready_to_join[client_id]
+        logging.info(f"State for client {client_id} reset successfully.")
 
     def handle_join_data(self):
         """Maneja datos de join (tabla de productos del server)"""

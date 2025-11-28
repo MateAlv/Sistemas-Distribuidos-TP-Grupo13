@@ -21,6 +21,8 @@ class Maximizer:
     def __init__(self, max_type: str, role: str, shard_id: Optional[str], partial_shards: list[str], monitor=None):
         logging.getLogger('pika').setLevel(logging.CRITICAL)
         self.monitor = monitor
+        if self.monitor:
+            self.monitor.set_callbacks(self.handle_force_end, self.handle_force_end_client)
 
         self.__running = True
 
@@ -87,6 +89,30 @@ class Maximizer:
         else:
             raise ValueError(f"Tipo de maximizer inválido: {self.maximizer_type}")
 
+    def handle_force_end(self):
+        logging.critical("Received FORCE_END. Resetting ALL state...")
+        self._reset_state()
+
+    def handle_force_end_client(self, client_id):
+        logging.critical(f"Received FORCE_END_CLIENT for {client_id}. Resetting client state...")
+        self._reset_client_state(client_id)
+
+    def _reset_state(self):
+        self.clients_end_processed.clear()
+        self.sellings_max.clear()
+        self.profit_max.clear()
+        self.partial_ranges_seen.clear()
+        self.partial_end_counts.clear()
+        self.top3_by_store.clear()
+        self.partial_top3_finished.clear()
+        logging.info("All state reset successfully.")
+
+    def _reset_client_state(self, client_id):
+        if client_id in self.clients_end_processed:
+            self.clients_end_processed.remove(client_id)
+        
+        self.delete_client_data(client_id)
+        logging.info(f"State for client {client_id} reset successfully.")
     def is_absolute_max(self):
         return self.maximizer_type == "MAX" and self.role == "absolute"
     

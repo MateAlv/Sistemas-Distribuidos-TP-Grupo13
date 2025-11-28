@@ -14,6 +14,8 @@ class Filter:
     def __init__(self, cfg: dict, monitor=None):
         logging.getLogger('pika').setLevel(logging.CRITICAL)
         self.monitor = monitor
+        if self.monitor:
+            self.monitor.set_callbacks(self.handle_force_end, self.handle_force_end_client)
         
         self.__running = True
         
@@ -47,6 +49,38 @@ class Filter:
             self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", "to_filter_3")
         else:
             raise ValueError(f"Tipo de filtro inválido: {self.filter_type}")
+
+    def handle_force_end(self):
+        logging.critical("Received FORCE_END. Resetting ALL state...")
+        self._reset_state()
+
+    def handle_force_end_client(self, client_id):
+        logging.critical(f"Received FORCE_END_CLIENT for {client_id}. Resetting client state...")
+        self._reset_client_state(client_id)
+
+    def _reset_state(self):
+        self.end_message_received.clear()
+        self.number_of_chunks_received_per_client.clear()
+        self.number_of_chunks_not_sent_per_client.clear()
+        self.number_of_chunks_to_receive.clear()
+        self.already_sent_stats.clear()
+        logging.info("All state reset successfully.")
+
+    def _reset_client_state(self, client_id):
+        if client_id in self.end_message_received:
+            del self.end_message_received[client_id]
+        if client_id in self.number_of_chunks_received_per_client:
+            del self.number_of_chunks_received_per_client[client_id]
+        if client_id in self.number_of_chunks_not_sent_per_client:
+            del self.number_of_chunks_not_sent_per_client[client_id]
+        if client_id in self.number_of_chunks_to_receive:
+            del self.number_of_chunks_to_receive[client_id]
+        
+        keys_to_remove = [k for k in self.already_sent_stats.keys() if k[0] == client_id]
+        for k in keys_to_remove:
+            del self.already_sent_stats[k]
+            
+        logging.info(f"State for client {client_id} reset successfully.")
         
         logging.info(f"Filtro inicializado. Tipo: {self.filter_type}, ID: {self.id}"
                      f" | Receiver Queue: {self.middleware_queue_receiver.queue_name}"

@@ -5,10 +5,12 @@ ELECTION_EXCHANGE = 'election_exchange'
 CONTROL_EXCHANGE = 'control_exchange'
 
 # Message Types
-MSG_HEARTBEAT = 'HEARTBEAT'
-MSG_ELECTION = 'ELECTION'
-MSG_COORDINATOR = 'COORDINATOR'
-MSG_DEATH = 'DEATH_CERTIFICATE'
+MSG_HEARTBEAT = 'heartbeat'
+MSG_ELECTION = 'election'
+MSG_COORDINATOR = 'coordinator'
+MSG_DEATH = 'death'
+MSG_FORCE_END = 'force_end'
+MSG_FORCE_END_CLIENT = 'force_end_client'
 
 # Routing Keys
 # Heartbeats are routed by node ID: heartbeat.<node_id>
