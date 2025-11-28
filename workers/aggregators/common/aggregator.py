@@ -2,6 +2,8 @@ import datetime
 import logging
 from collections import defaultdict, deque
 from types import SimpleNamespace
+import sys
+import os
 
 from utils.processing.process_table import (
     TransactionItemsProcessRow,
@@ -364,6 +366,7 @@ class Aggregator:
             self._send_end_message(client_id, table_type)
 
     def _handle_data_chunk(self, raw_msg: bytes):
+        self._check_crash_point("CRASH_BEFORE_PROCESS")
         chunk = ProcessBatchReader.from_bytes(raw_msg)
         client_id = chunk.client_id()
         table_type = chunk.table_type()
@@ -412,6 +415,8 @@ class Aggregator:
                 1,
             )
             self._increment_accumulated_chunks(client_id, table_type, self.aggregator_id)
+
+            self._check_crash_point("CRASH_AFTER_PROCESS_BEFORE_COMMIT")
 
             if payload:
                 try:
@@ -599,6 +604,11 @@ class Aggregator:
     def _ensure_global_entry(self, client_id):
         if client_id not in self.global_accumulator:
             self.global_accumulator[client_id] = {}
+
+    def _check_crash_point(self, point_name):
+        if os.environ.get("CRASH_POINT") == point_name:
+            logging.critical(f"Simulating crash at {point_name}")
+            sys.exit(1)
 
     def _accumulator_key(self):
         if self.aggregator_type == "PRODUCTS":

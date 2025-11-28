@@ -12,6 +12,8 @@ from typing import Optional
 import datetime
 import heapq
 import re
+import sys
+import os
 
 from workers.common.sharding import queue_name_for, slugify_shard_id
 
@@ -230,6 +232,7 @@ class Maximizer:
         self.process_client_end(client_id, table_type)
 
     def _handle_data_chunk(self, data: bytes):
+        self._check_crash_point("CRASH_BEFORE_PROCESS")
         chunk = ProcessBatchReader.from_bytes(data)
         client_id = chunk.client_id()
         table_type = chunk.table_type()
@@ -259,6 +262,8 @@ class Maximizer:
 
         logging.info(f"action: maximize | type:{self.maximizer_type} | range:{self.maximizer_range} | client_id:{client_id} | file_type:{table_type} | rows_in:{len(chunk.rows)}")
         self.apply(client_id, chunk)
+
+        self._check_crash_point("CRASH_AFTER_PROCESS_BEFORE_COMMIT")
 
         if self.maximizer_type == "MAX" and self.is_absolute_max():
             ranges_seen = self.partial_ranges_seen[client_id]
@@ -682,3 +687,8 @@ class Maximizer:
             logging.info(f"action: publish_absolute_max_results | result: success | client_id:{client_id} | months_selling:{len(monthly_max_selling)} | months_profit:{len(monthly_max_profit)} | total_rows:{len(accumulated_results)}")
         else:
             logging.warning(f"action: no_absolute_max_results | client_id:{client_id}")
+
+    def _check_crash_point(self, point_name):
+        if os.environ.get("CRASH_POINT") == point_name:
+            logging.critical(f"Simulating crash at {point_name}")
+            sys.exit(1)
