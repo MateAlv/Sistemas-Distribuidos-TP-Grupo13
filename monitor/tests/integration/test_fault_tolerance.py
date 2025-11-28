@@ -11,7 +11,7 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S',
 )
 
-COMPOSE_FILE = "tests/compose-test.yaml"
+COMPOSE_FILE = "monitor/tests/integration/compose.yaml"
 
 def run_command(cmd, check=True):
     logging.info(f"Running: {' '.join(cmd)}")
@@ -50,7 +50,6 @@ def main():
             raise Exception("monitor_3 failed to become leader")
             
         # 3. Verify monitor_1 and monitor_2 recognize leader
-        # They should log "New Leader elected: monitor_3"
         if not wait_for_log("monitor_1", "New Leader elected: monitor_3", timeout=30):
              raise Exception("monitor_1 did not recognize monitor_3 as leader")
 
@@ -102,14 +101,39 @@ def main():
         if not revived:
             raise Exception("monitor_3 was not revived by any monitor")
 
+        # Wait for cluster to stabilize
+        logging.info("Waiting for cluster to stabilize...")
+        time.sleep(15)
+
+        # 9. Simultaneous Failure: Kill Leader (monitor_2) AND Worker (worker_1)
+        logging.info("Killing Leader monitor_2 AND Worker worker_1...")
+        run_command(["docker", "kill", "monitor_2", "worker_1"])
+
+        # 10. Verify monitor_3 becomes Leader (since it was revived and has highest ID)
+        logging.info("Waiting for monitor_3 to become new Leader...")
+        if not wait_for_log("monitor_3", "I am the new LEADER!", timeout=60):
+             raise Exception("monitor_3 failed to become new leader")
+
+        # 11. Verify monitor_3 restarts worker_1
+        logging.info("Waiting for monitor_3 to revive worker_1...")
+        if not wait_for_log("monitor_3", "Node worker_1 died. Reviving...", timeout=60):
+             raise Exception("monitor_3 did not revive worker_1")
+
+        # 12. Verify monitor_3 restarts monitor_2
+        logging.info("Waiting for monitor_3 to revive monitor_2...")
+        if not wait_for_log("monitor_3", "Node monitor_2 died. Reviving...", timeout=60):
+             raise Exception("monitor_3 did not revive monitor_2")
+
         logging.info("TEST PASSED!")
 
     except Exception as e:
         logging.error(f"TEST FAILED: {e}")
-        logging.info("Dumping monitor_3 logs:")
-        print(get_logs("monitor_3"))
+        logging.info("Dumping monitor_1 logs:")
+        print(get_logs("monitor_1"))
         logging.info("Dumping monitor_2 logs:")
         print(get_logs("monitor_2"))
+        logging.info("Dumping monitor_3 logs:")
+        print(get_logs("monitor_3"))
         sys.exit(1)
     finally:
         logging.info("Cleaning up...")

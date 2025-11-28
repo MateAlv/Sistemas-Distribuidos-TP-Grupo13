@@ -135,7 +135,10 @@ class MonitorNode:
             elif msg_type == MSG_ELECTION:
                 # Only Monitors participate
                 if sender_id < self.node_id:
+                    logging.info(f"Received ELECTION from {sender_id}. Sending my own election message.")
                     self._start_election()
+                else:
+                    logging.info(f"Received ELECTION from {sender_id}. Yielding (higher ID).")
 
             elif msg_type == MSG_COORDINATOR:
                 self.leader_id = sender_id
@@ -148,6 +151,7 @@ class MonitorNode:
                         logging.info("I am the new LEADER!")
                     else:
                         logging.info(f"New Leader elected: {sender_id}")
+                        logging.info(f"Accepting {sender_id} as Coordinator.")
 
         except Exception as e:
             logging.error(f"Error handling message: {e}")
@@ -161,6 +165,7 @@ class MonitorNode:
             if self.election_in_progress:
                 if time.time() - self.election_start_time > ELECTION_TIMEOUT:
                     # Declare Victory
+                    logging.info("Election timeout reached. No higher ID detected. Declaring victory.")
                     self.is_leader = True
                     self.leader_id = self.node_id
                     self._broadcast(MSG_COORDINATOR)
@@ -189,6 +194,7 @@ class MonitorNode:
 
     def _start_election(self):
         if self.election_in_progress: return
+        logging.info("Starting election process...")
         self.election_in_progress = True
         self.election_start_time = time.time()
         self._broadcast(MSG_ELECTION)

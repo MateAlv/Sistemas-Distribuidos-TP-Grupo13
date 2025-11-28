@@ -8,7 +8,7 @@ services:
       - "5672:5672"
       - "15672:15672"
     healthcheck:
-      test: ["CMD", "rabbitmqctl", "status"]
+      test: [ "CMD", "rabbitmqctl", "status" ]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -17,7 +17,7 @@ services:
 
   monitor_1:
     build:
-      context: ..
+      context: ../../..
       dockerfile: monitor/Dockerfile
     container_name: monitor_1
     environment:
@@ -34,7 +34,7 @@ services:
 
   monitor_2:
     build:
-      context: ..
+      context: ../../..
       dockerfile: monitor/Dockerfile
     container_name: monitor_2
     environment:
@@ -51,7 +51,7 @@ services:
 
   monitor_3:
     build:
-      context: ..
+      context: ../../..
       dockerfile: monitor/Dockerfile
     container_name: monitor_3
     environment:
@@ -68,16 +68,16 @@ services:
 
   worker_1:
     build:
-      context: ..
+      context: ../../..
       dockerfile: server/Dockerfile
     container_name: worker_1
-    entrypoint: ["python3", "tests/mock_worker.py"]
+    entrypoint: [ "python3", "tests/mock_worker.py" ]
     environment:
       - CONTAINER_NAME=worker_1
       - PYTHONUNBUFFERED=1
     volumes:
-      - ../tests:/server/tests
-      - ../utils:/server/utils
+      - ../../../monitor/tests/integration:/server/tests
+      - ../../../utils:/server/utils
     depends_on:
       rabbitmq:
         condition: service_healthy
