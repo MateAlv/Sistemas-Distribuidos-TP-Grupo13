@@ -46,8 +46,6 @@ class TestFaultToleranceAggregator(unittest.TestCase):
         # Setup Aggregator
         agg = Aggregator("PRODUCTS", 1)
         
-        # Mock persistence service (to be implemented)
-        # Mock persistence service (already patched class, but we need to configure the instance)
         agg.persistence = self.MockPersistence.return_value
         agg.persistence.recover_working_state.return_value = None
         agg.persistence.recover_last_processing_chunk.return_value = None
