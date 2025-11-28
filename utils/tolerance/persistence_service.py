@@ -164,7 +164,7 @@ class PersistenceService:
             logging.exception("Failed to read state commit file `%s`.", STATE_COMMIT_FILE)
             raise
 
-    def __init__(self, directory: str):
+    def __init__(self, directory: str = "./"):
         # path directories
         ensure_directory_exists(directory)
 
