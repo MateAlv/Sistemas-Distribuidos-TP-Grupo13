@@ -1,5 +1,6 @@
 import logging
 
+from utils.tolerance.working_state import WorkingState
 from .filter_stats_messages import FilterStatsMessage
 
 def _ensure_dict_entry(dictionary, client_id, table_type, default=0):
@@ -8,8 +9,9 @@ def _ensure_dict_entry(dictionary, client_id, table_type, default=0):
     if table_type not in dictionary[client_id]:
         dictionary[client_id][table_type] = default
 
-class FilterWorkingState:
+class FilterWorkingState(WorkingState):
     def __init__(self):
+        super().__init__()
         # métricas por cliente
         self.number_of_chunks_received_per_client = {}
         self.number_of_chunks_not_sent_per_client = {}
@@ -57,7 +59,7 @@ class FilterWorkingState:
         """Verifica si se puede enviar el mensaje de fin para un cliente y tipo de tabla"""
         if client_id not in self.end_message_received:
             self.end_message_received[client_id] = {}
-        logging.debug(f"Count: {self.number_of_chunks_received_per_client[client_id][table_type]} | cli_id:{client_id}")
+        logging.debug(f"Count: {self.number_of_chunks_received_per_client[client_id][table_type]}/{total_expected} | cli_id:{client_id}")
         return total_expected == self.number_of_chunks_received_per_client[client_id][table_type] and filter_id == 1
 
     def increase_received_chunks(self, client_id, table_type, count):
