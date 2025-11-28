@@ -6,7 +6,7 @@ from utils.file_utils.table_type import ResultTableType
 from utils.processing.process_table import TableProcessRow
 from utils.results.result_chunk import ResultChunkHeader, ResultChunk
 from utils.results.result_table import Query3ResultRow
-from common.joiner import Joiner
+from .joiner import Joiner
 
 
 class StoresTpvJoiner(Joiner):

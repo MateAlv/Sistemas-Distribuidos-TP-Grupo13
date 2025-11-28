@@ -12,10 +12,19 @@ from typing import Optional
 import datetime
 import heapq
 import re
+import sys
+import os
+import uuid
+import pickle
+from utils.tolerance.persistence_service import PersistenceService
 
 from workers.common.sharding import queue_name_for, slugify_shard_id
 
 TIMEOUT = 3
+
+
+def default_top3_value():
+    return defaultdict(list)
 
 class Maximizer:
     def __init__(self, max_type: str, role: str, shard_id: Optional[str], partial_shards: list[str], monitor=None):
@@ -42,6 +51,9 @@ class Maximizer:
         if self.role == "absolute" and self.maximizer_type in {"MAX", "TOP3"} and not self.partial_shards:
             raise ValueError("Los maximizers absolutos requieren la lista de shards parciales configurados.")
 
+        self.persistence = PersistenceService(f"/data/persistence/maximizer_{self.maximizer_type}_{self.maximizer_range}")
+        self.processed_ids = set()
+
         self.clients_end_processed = set()
         
         if self.maximizer_type == "MAX":
@@ -67,7 +79,7 @@ class Maximizer:
                     
         elif self.maximizer_type == "TOP3":
             # Para TOP3 clientes por store (Query 4)
-            self.top3_by_store = defaultdict(lambda: defaultdict(list))  # client_id -> store_id -> heap[(count, user_id)]
+            self.top3_by_store = defaultdict(default_top3_value)  # client_id -> store_id -> heap[(count, user_id)]
             
             if self.is_absolute_top3():
                 # TOP3 absoluto - recibe de TOP3 parciales
@@ -86,6 +98,8 @@ class Maximizer:
                 self.data_receiver = MessageMiddlewareQueue("rabbitmq", queue_name)
         else:
             raise ValueError(f"Tipo de maximizer inválido: {self.maximizer_type}")
+
+        self._recover_state()
 
     def is_absolute_max(self):
         return self.maximizer_type == "MAX" and self.role == "absolute"
@@ -109,6 +123,7 @@ class Maximizer:
                 self.partial_top3_finished.pop(client_id, None)
         
         logging.info(f"action: delete_client_data | type:{self.maximizer_type} | range:{self.maximizer_range} | client_id:{client_id}")
+        self._save_state(uuid.uuid4())
     
     def process_client_end(self, client_id: int, table_type: TableType):
         """Procesa el final de un cliente y envía resultados"""
@@ -158,6 +173,15 @@ class Maximizer:
                 self.data_receiver.stop_consuming()
             except Exception as e:
                 logging.debug(f"action: stop_consuming_warning | type:{self.maximizer_type} | range:{self.maximizer_range} | error:{e}")
+
+        # Recover last processing chunk if exists
+        last_chunk = self.persistence.recover_last_processing_chunk()
+        if last_chunk:
+            logging.info("Recovering last processing chunk...")
+            try:
+                self._handle_data_chunk(last_chunk.serialize())
+            except Exception as e:
+                logging.error(f"Error recovering last chunk: {e}")
 
         while self.__running:
 
@@ -230,10 +254,17 @@ class Maximizer:
         self.process_client_end(client_id, table_type)
 
     def _handle_data_chunk(self, data: bytes):
+        self._check_crash_point("CRASH_BEFORE_PROCESS")
         chunk = ProcessBatchReader.from_bytes(data)
         client_id = chunk.client_id()
         table_type = chunk.table_type()
         expected_table = self._expected_table_type()
+
+        if chunk.message_id() in self.processed_ids:
+            logging.info(f"action: duplicate_chunk_ignored | message_id:{chunk.message_id()}")
+            return
+
+        self.persistence.commit_processing_chunk(chunk)
 
         if not self._is_valid_table_type(table_type, for_end=False):
             logging.debug(f"action: ignoring_chunk_wrong_table | expected:{expected_table} | received:{table_type} | client_id:{client_id}")
@@ -260,6 +291,8 @@ class Maximizer:
         logging.info(f"action: maximize | type:{self.maximizer_type} | range:{self.maximizer_range} | client_id:{client_id} | file_type:{table_type} | rows_in:{len(chunk.rows)}")
         self.apply(client_id, chunk)
 
+        self._check_crash_point("CRASH_AFTER_PROCESS_BEFORE_COMMIT")
+
         if self.maximizer_type == "MAX" and self.is_absolute_max():
             ranges_seen = self.partial_ranges_seen[client_id]
             for row in chunk.rows:
@@ -282,11 +315,16 @@ class Maximizer:
                 logging.info(f"action: absolute_max_ready | client_id:{client_id} | all_partial_data_received")
                 self.process_client_end(client_id, table_type)
 
+        self.processed_ids.add(chunk.message_id())
+        self._save_state(chunk.message_id())
+
     def _send_end_message(self, client_id: int, table_type: TableType, target: str):
         try:
             logging.info(f"action: sending_end_message_to_{target} | client_id:{client_id}")
             end_msg = MessageEnd(client_id, table_type, 1)
             self.data_sender.send(end_msg.encode())
+            # Commit send ack? No message_id for end message here, but we could commit state if needed.
+            # But end message is usually triggered by processing, so state save after processing covers it.
             logging.info(f"action: sent_end_message_to_{target} | client_id:{client_id} | format:END;{client_id};{table_type.value};1")
         except Exception as e:
             logging.error(f"action: error_sending_end_to_{target} | client_id:{client_id} | error:{e}")
@@ -522,6 +560,9 @@ class Maximizer:
             
             chunk_data = chunk.serialize()
             self.data_sender.send(chunk_data)
+            # We don't have an incoming message ID to ack here easily unless we pass it down.
+            # But publish_partial_max_results is called from process_client_end which is called from handle_end_message or handle_data_chunk.
+            # If called from handle_data_chunk, we save state after return.
             
             logging.info(f"action: publish_partial_max_results | shard:{self.shard_id} | client_id:{client_id} | rows_sent:{len(accumulated_results)} | selling_entries:{len(client_sellings)} | profit_entries:{len(client_profit)} | bytes_sent:{len(chunk_data)} | queue:{self.data_sender.queue_name}")
         else:
@@ -682,3 +723,51 @@ class Maximizer:
             logging.info(f"action: publish_absolute_max_results | result: success | client_id:{client_id} | months_selling:{len(monthly_max_selling)} | months_profit:{len(monthly_max_profit)} | total_rows:{len(accumulated_results)}")
         else:
             logging.warning(f"action: no_absolute_max_results | client_id:{client_id}")
+
+    def _check_crash_point(self, point_name):
+        if os.environ.get("CRASH_POINT") == point_name:
+            logging.critical(f"Simulating crash at {point_name}")
+            sys.exit(1)
+
+    def _recover_state(self):
+        state_data = self.persistence.recover_working_state()
+        if state_data:
+            try:
+                state = pickle.loads(state_data)
+                self.clients_end_processed = state.get("clients_end_processed", set())
+                self.processed_ids = state.get("processed_ids", set())
+                
+                if self.maximizer_type == "MAX":
+                    self.sellings_max = state.get("sellings_max", defaultdict(dict))
+                    self.profit_max = state.get("profit_max", defaultdict(dict))
+                    if self.is_absolute_max():
+                        self.partial_ranges_seen = state.get("partial_ranges_seen", defaultdict(set))
+                        self.partial_end_counts = state.get("partial_end_counts", defaultdict(int))
+                elif self.maximizer_type == "TOP3":
+                    self.top3_by_store = state.get("top3_by_store", defaultdict(default_top3_value))
+                    if self.is_absolute_top3():
+                        self.partial_top3_finished = state.get("partial_top3_finished", defaultdict(int))
+                
+                logging.info(f"State recovered for maximizer {self.maximizer_type}_{self.maximizer_range}")
+            except Exception as e:
+                logging.error(f"Error recovering state: {e}")
+
+    def _save_state(self, last_processed_id):
+        state = {
+            "clients_end_processed": self.clients_end_processed,
+            "processed_ids": self.processed_ids,
+        }
+        
+        if self.maximizer_type == "MAX":
+            state["sellings_max"] = self.sellings_max
+            state["profit_max"] = self.profit_max
+            if self.is_absolute_max():
+                state["partial_ranges_seen"] = self.partial_ranges_seen
+                state["partial_end_counts"] = self.partial_end_counts
+        elif self.maximizer_type == "TOP3":
+            state["top3_by_store"] = self.top3_by_store
+            if self.is_absolute_top3():
+                state["partial_top3_finished"] = self.partial_top3_finished
+        
+        state_data = pickle.dumps(state)
+        self.persistence.commit_working_state(state_data, last_processed_id)
