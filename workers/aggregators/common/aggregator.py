@@ -34,6 +34,9 @@ from .aggregator_stats_messages import (
     AggregatorStatsEndMessage,
     AggregatorDataMessage,
 )
+import pickle
+import uuid
+from utils.tolerance.persistence_service import PersistenceService
 
 
 class Aggregator:
@@ -84,7 +87,12 @@ class Aggregator:
             )
 
         self.shard_configs: list[ShardConfig] = []
+        self.shard_configs: list[ShardConfig] = []
         self.id_to_shard: dict[int, ShardConfig] = {}
+
+        self.persistence = PersistenceService(f"/data/persistence/aggregator_{self.aggregator_type}_{self.aggregator_id}")
+        self.processed_ids = set()
+        self._recover_state()
 
         if self.aggregator_type == "PRODUCTS":
             self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", "to_agg_1+2")
@@ -217,6 +225,18 @@ class Aggregator:
         def chunk_stop():
             self.middleware_queue_receiver.stop_consuming()
 
+        # Recover last processing chunk if exists
+        last_chunk = self.persistence.recover_last_processing_chunk()
+        if last_chunk:
+            logging.info("Recovering last processing chunk...")
+            try:
+                # We pass the serialized chunk to _handle_data_chunk
+                # But _handle_data_chunk expects bytes that ProcessBatchReader can parse.
+                # ProcessChunk.serialize() returns exactly that.
+                self._handle_data_chunk(last_chunk.serialize())
+            except Exception as e:
+                logging.error(f"Error recovering last chunk: {e}")
+
         while self._running:
             try:
                 self.chunk_timer = self.middleware_queue_receiver.connection.call_later(TIMEOUT, chunk_stop)
@@ -285,8 +305,15 @@ class Aggregator:
             f"| client_id:{data.client_id} | table_type:{data.table_type}"
         )
 
+        if data.message_id in self.processed_ids:
+            logging.info(f"action: duplicate_data_message_ignored | message_id:{data.message_id}")
+            return
+
         self._apply_remote_aggregation(data)
         self._increment_accumulated_chunks(data.client_id, data.table_type, data.aggregator_id)
+
+        self.processed_ids.add(data.message_id)
+        self._save_state(data.message_id)
 
         if self._can_send_end_message(data.client_id, data.table_type):
             self._send_end_message(data.client_id, data.table_type)
@@ -313,6 +340,10 @@ class Aggregator:
             f"| chunks_received:{stats.chunks_received} | chunks_processed:{stats.chunks_processed}"
         )
 
+        if stats.message_id in self.processed_ids:
+            logging.info(f"action: duplicate_stats_message_ignored | message_id:{stats.message_id}")
+            return
+
         self._set_aggregator_value(
             self.chunks_received_per_client,
             stats.client_id,
@@ -332,6 +363,9 @@ class Aggregator:
 
         self.end_message_received[stats.client_id][stats.table_type] = True
         self.chunks_to_receive[stats.client_id][stats.table_type] = stats.total_expected
+
+        self.processed_ids.add(stats.message_id)
+        self._save_state(stats.message_id)
 
         # Enviar mis propios stats si ya procesé algo
         self._maybe_send_stats(stats.client_id, stats.table_type)
@@ -360,6 +394,8 @@ class Aggregator:
         self.end_message_received[client_id][table_type] = True
         self.chunks_to_receive[client_id][table_type] = total_expected
 
+        self._save_state(uuid.uuid4())
+
         self._maybe_send_stats(client_id, table_type)
 
         if self._can_send_end_message(client_id, table_type):
@@ -370,6 +406,12 @@ class Aggregator:
         chunk = ProcessBatchReader.from_bytes(raw_msg)
         client_id = chunk.client_id()
         table_type = chunk.table_type()
+
+        if chunk.message_id() in self.processed_ids:
+            logging.info(f"action: duplicate_chunk_ignored | message_id:{chunk.message_id()}")
+            return
+
+        self.persistence.commit_processing_chunk(chunk)
 
         logging.info(
             f"action: aggregate | type:{self.aggregator_type} | cli_id:{client_id} "
@@ -432,13 +474,48 @@ class Aggregator:
                         f"| client_id:{client_id} | table_type:{table_type} | payload_size:{len(payload)}"
                     )
                     self.middleware_data_exchange.send(data_msg.encode())
+                    self.persistence.commit_send_ack(client_id, chunk.message_id())
                 except Exception as e:
                     logging.error(f"action: error_sending_data_message | error:{e}")
+
+        self.processed_ids.add(chunk.message_id())
+        self._save_state(chunk.message_id())
 
         self._maybe_send_stats(client_id, table_type)
 
         if self._can_send_end_message(client_id, table_type):
             self._send_end_message(client_id, table_type)
+
+    def _recover_state(self):
+        state_data = self.persistence.recover_working_state()
+        if state_data:
+            try:
+                state = pickle.loads(state_data)
+                self.end_message_received = state.get("end_message_received", {})
+                self.chunks_received_per_client = state.get("chunks_received_per_client", {})
+                self.chunks_processed_per_client = state.get("chunks_processed_per_client", {})
+                self.accumulated_chunks_per_client = state.get("accumulated_chunks_per_client", {})
+                self.chunks_to_receive = state.get("chunks_to_receive", {})
+                self.already_sent_stats = state.get("already_sent_stats", {})
+                self.global_accumulator = state.get("global_accumulator", {})
+                self.processed_ids = state.get("processed_ids", set())
+                logging.info(f"State recovered for aggregator {self.aggregator_type}_{self.aggregator_id}")
+            except Exception as e:
+                logging.error(f"Error recovering state: {e}")
+
+    def _save_state(self, last_processed_id):
+        state = {
+            "end_message_received": self.end_message_received,
+            "chunks_received_per_client": self.chunks_received_per_client,
+            "chunks_processed_per_client": self.chunks_processed_per_client,
+            "accumulated_chunks_per_client": self.accumulated_chunks_per_client,
+            "chunks_to_receive": self.chunks_to_receive,
+            "already_sent_stats": self.already_sent_stats,
+            "global_accumulator": self.global_accumulator,
+            "processed_ids": self.processed_ids,
+        }
+        state_data = pickle.dumps(state)
+        self.persistence.commit_working_state(state_data, last_processed_id)
 
 
     def _ensure_dict_entry(self, dictionary, client_id, table_type, default=0):

@@ -29,10 +29,14 @@ class TestFaultToleranceAggregator(unittest.TestCase):
         self.middleware_exchange_patcher = patch('workers.aggregators.common.aggregator.MessageMiddlewareExchange')
         self.MockExchange = self.middleware_exchange_patcher.start()
 
+        self.persistence_patcher = patch('workers.aggregators.common.aggregator.PersistenceService')
+        self.MockPersistence = self.persistence_patcher.start()
+
     def tearDown(self):
         self.env_patcher.stop()
         self.middleware_queue_patcher.stop()
         self.middleware_exchange_patcher.stop()
+        self.persistence_patcher.stop()
 
     def test_crash_before_process(self):
         """
@@ -43,10 +47,13 @@ class TestFaultToleranceAggregator(unittest.TestCase):
         agg = Aggregator("PRODUCTS", 1)
         
         # Mock persistence service (to be implemented)
-        agg.persistence = MagicMock()
-        agg.persistence.recover_working_state.return_value = {} # Empty state
+        # Mock persistence service (already patched class, but we need to configure the instance)
+        agg.persistence = self.MockPersistence.return_value
+        agg.persistence.recover_working_state.return_value = None
         agg.persistence.recover_last_processing_chunk.return_value = None
-        agg.persistence.process_has_been_counted.return_value = False
+        
+        # processed_ids is empty by default
+        agg.processed_ids = set()
         
         # Simulate crash
         with patch.dict(os.environ, {"CRASH_POINT": "CRASH_BEFORE_PROCESS"}):
@@ -73,8 +80,8 @@ class TestFaultToleranceAggregator(unittest.TestCase):
         Should re-process.
         """
         agg = Aggregator("PRODUCTS", 1)
-        agg.persistence = MagicMock()
-        agg.persistence.process_has_been_counted.return_value = False
+        agg.persistence = self.MockPersistence.return_value
+        agg.processed_ids = set()
 
         with patch.dict(os.environ, {"CRASH_POINT": "CRASH_AFTER_PROCESS_BEFORE_COMMIT"}):
             with self.assertRaises(SystemExit):
@@ -102,9 +109,10 @@ class TestFaultToleranceAggregator(unittest.TestCase):
         Test that if a message was already processed (committed), it is skipped.
         """
         agg = Aggregator("PRODUCTS", 1)
-        agg.persistence = MagicMock()
+        agg.persistence = self.MockPersistence.return_value
+        
         # Simulate that the message was already counted
-        agg.persistence.process_has_been_counted.return_value = True
+        agg.processed_ids = {b"1234"}
         
         dummy_msg = b"dummy_chunk"
         with patch('workers.aggregators.common.aggregator.ProcessBatchReader.from_bytes') as mock_reader:
