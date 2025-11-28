@@ -40,6 +40,9 @@ class ProcessChunk:
         self.header = header
         self.header.size = sum(len(r.serialize()) for r in rows)
 
+    def message_id(self) -> uuid.UUID:
+        return self.header.message_id
+
     def client_id(self) -> int:
         return self.header.client_id
 
