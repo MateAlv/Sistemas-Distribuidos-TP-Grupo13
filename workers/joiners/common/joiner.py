@@ -5,6 +5,8 @@ from utils.eof_protocol.end_messages import MessageEnd
 from middleware.middleware_interface import MessageMiddlewareMessageError
 import logging
 import threading
+import sys
+import os
 
 TIMEOUT = 3
 
@@ -137,40 +139,9 @@ class Joiner:
                                 logging.debug(f"action: duplicate_end_message_ignored | type:{self.joiner_type} | client_id:{client_id}")
 
                     else:
-                        chunk = ProcessBatchReader.from_bytes(data)
-                        logging.info(f"action: receive_data | type:{self.joiner_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()} | rows_in:{len(chunk.rows)}")
-                                        
-                        with self.lock:
-                            self.save_data(chunk)
-                            # Check if we're ready to join for this specific client
-                            client_id = chunk.client_id()
-                            if self.is_ready_to_join_for_client(client_id):
-                                logging.info(f"action: ready_to_join | type:{self.joiner_type} | client_id:{client_id}")
-                                try:
-                                    logging.debug(f"action: starting_apply_for_client_from_data | type:{self.joiner_type} | client_id:{client_id}")
-                                    # Aplica el join
-                                    self.apply_for_client(client_id)
-                                    logging.debug(f"action: completed_apply_for_client_from_data | type:{self.joiner_type} | client_id:{client_id}")
-                                    
-                                    logging.debug(f"action: starting_publish_results_from_data | type:{self.joiner_type} | client_id:{client_id}")
-                                    # Publica los resultados al to_merge_data
-                                    self.publish_results(client_id)
-                                    logging.debug(f"action: completed_publish_results_from_data | type:{self.joiner_type} | client_id:{client_id}")
-                                    
-                                    logging.debug(f"action: starting_clean_client_data_from_data | type:{self.joiner_type} | client_id:{client_id}")
-                                    # Limpiar datos del cliente después de procesar
-                                    self.clean_client_data(client_id)
-                                    logging.debug(f"action: completed_clean_client_data_from_data | type:{self.joiner_type} | client_id:{client_id}")
-                                    
-                                    # Mark this client as processed
-                                    self.completed_clients.append(client_id)
-                                    self._pending_end_messages.append(client_id)
-                                    logging.debug(f"action: processing_complete_from_data | type:{self.joiner_type} | client_id:{client_id}")
-                                except Exception as inner_e:
-                                    logging.error(f"action: error_in_join_processing_from_data | type:{self.joiner_type} | client_id:{client_id} | error:{inner_e} | error_type:{type(inner_e).__name__}")
-                                    raise inner_e
-                            else:
-                                logging.debug(f"action: waiting_join_data | type:{self.joiner_type} | cli_id:{client_id} | file_type:{chunk.table_type()}")
+                        self._handle_data_chunk(data)
+                    
+                    # Enviar END messages para clientes recién completados
                     
                     # Enviar END messages para clientes recién completados
                     if hasattr(self, '_pending_end_messages'):
@@ -191,6 +162,50 @@ class Joiner:
                     logging.error(f"action: unexpected_error | type:{self.joiner_type} | error:{e} | error_type:{type(e).__name__} | error_traceback:", exc_info=True)
  
                 results.remove(data)
+
+    def _handle_data_chunk(self, data: bytes):
+        self._check_crash_point("CRASH_BEFORE_PROCESS")
+        chunk = ProcessBatchReader.from_bytes(data)
+        logging.info(f"action: receive_data | type:{self.joiner_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()} | rows_in:{len(chunk.rows)}")
+                        
+        with self.lock:
+            self.save_data(chunk)
+            # Check if we're ready to join for this specific client
+            client_id = chunk.client_id()
+            if self.is_ready_to_join_for_client(client_id):
+                logging.info(f"action: ready_to_join | type:{self.joiner_type} | client_id:{client_id}")
+                try:
+                    logging.debug(f"action: starting_apply_for_client_from_data | type:{self.joiner_type} | client_id:{client_id}")
+                    # Aplica el join
+                    self.apply_for_client(client_id)
+                    logging.debug(f"action: completed_apply_for_client_from_data | type:{self.joiner_type} | client_id:{client_id}")
+                    
+                    self._check_crash_point("CRASH_AFTER_PROCESS_BEFORE_COMMIT")
+
+                    logging.debug(f"action: starting_publish_results_from_data | type:{self.joiner_type} | client_id:{client_id}")
+                    # Publica los resultados al to_merge_data
+                    self.publish_results(client_id)
+                    logging.debug(f"action: completed_publish_results_from_data | type:{self.joiner_type} | client_id:{client_id}")
+                    
+                    logging.debug(f"action: starting_clean_client_data_from_data | type:{self.joiner_type} | client_id:{client_id}")
+                    # Limpiar datos del cliente después de procesar
+                    self.clean_client_data(client_id)
+                    logging.debug(f"action: completed_clean_client_data_from_data | type:{self.joiner_type} | client_id:{client_id}")
+                    
+                    # Mark this client as processed
+                    self.completed_clients.append(client_id)
+                    self._pending_end_messages.append(client_id)
+                    logging.debug(f"action: processing_complete_from_data | type:{self.joiner_type} | client_id:{client_id}")
+                except Exception as inner_e:
+                    logging.error(f"action: error_in_join_processing_from_data | type:{self.joiner_type} | client_id:{client_id} | error:{inner_e} | error_type:{type(inner_e).__name__}")
+                    raise inner_e
+            else:
+                logging.debug(f"action: waiting_join_data | type:{self.joiner_type} | cli_id:{client_id} | file_type:{chunk.table_type()}")
+
+    def _check_crash_point(self, point_name):
+        if os.environ.get("CRASH_POINT") == point_name:
+            logging.critical(f"Simulating crash at {point_name}")
+            sys.exit(1)
 
     def save_data(self, chunk) -> bool:
         """
