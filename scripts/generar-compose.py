@@ -128,7 +128,6 @@ def define_server(compose: dict, client_amount: int):
         ],
         "volumes": [
             "./server/config.ini:/config.ini:ro",
-            "/var/run/docker.sock:/var/run/docker.sock",
         ],
         "networks": ["testing_net"],
         "depends_on": {"rabbitmq": {"condition": "service_healthy"}}
@@ -171,7 +170,6 @@ def define_filter(meta: dict, compose: dict, nodo: str, worker_id: int):
         ],
         "volumes": [
             f".{config_path}:{config_path}:ro",
-            "/var/run/docker.sock:/var/run/docker.sock",
         ],
         "networks": ["testing_net"],
         "depends_on": {
@@ -202,9 +200,7 @@ def define_aggregator(meta: dict, compose: dict, nodo: str, worker_id: int):
             f"WORKER_ID={worker_id}",
             f"CONTAINER_NAME={service_name}",
         ],
-        "volumes": [
-            "/var/run/docker.sock:/var/run/docker.sock",
-        ],
+        "volumes": [],
         "networks": ["testing_net"],
         "depends_on": {
             "server": {"condition": "service_started"},
@@ -295,9 +291,7 @@ def define_maximizer(meta: dict, compose: dict, nodo: str, worker_id: int, max_s
         "entrypoint": FlowList(["python3", "main.py"]),
         "container_name": service_name,
         "environment": env,
-        "volumes": [
-            "/var/run/docker.sock:/var/run/docker.sock",
-        ],
+        "volumes": [],
         "networks": ["testing_net"],
         "depends_on": {
             "server": {"condition": "service_started"},
@@ -337,9 +331,7 @@ def define_joiner(meta: dict, compose: dict, nodo: str, worker_id: int):
             f"WORKER_ID={worker_id}",
             f"CONTAINER_NAME={service_name}",
         ],
-        "volumes": [
-            "/var/run/docker.sock:/var/run/docker.sock",
-        ],
+        "volumes": [],
         "networks": ["testing_net"],
         "depends_on": {
             "server": {"condition": "service_started"},
@@ -378,6 +370,29 @@ def define_client(meta: dict, compose: dict, nodo: str, index: int):
             "server": {"condition": "service_started"},
         }
     }
+
+def define_monitor(meta: dict, compose: dict, count: int):
+    for i in range(1, count + 1):
+        service_name = f"monitor_{i}"
+        compose["services"][service_name] = {
+            "build": {
+                "context": ".",
+                "dockerfile": "monitor/Dockerfile"
+            },
+            "container_name": service_name,
+            "environment": [
+                "PYTHONUNBUFFERED=1",
+                f"CONTAINER_NAME={service_name}",
+                f"LOGGING_LEVEL={meta['logging_level']}",
+            ],
+            "volumes": [
+                "/var/run/docker.sock:/var/run/docker.sock",
+            ],
+            "networks": ["testing_net"],
+            "depends_on": {
+                "rabbitmq": {"condition": "service_healthy"},
+            }
+        }
 
 def define_chaos_monkey(meta: dict, compose: dict):
     compose["services"]["chaos_monkey"] = {
@@ -502,6 +517,10 @@ def generate_compose(meta: dict, nodes: dict, services: dict = None):
         raise ValueError("Debe haber al menos un cliente.")
     define_server(compose, client_amount) 
     
+    monitor_count = nodes.get("MONITORS", 3) # Default to 3 monitors
+    define_monitor(meta, compose, monitor_count)
+    services["monitor"] = monitor_count
+
     if meta.get("chaos_enabled", "false").lower() == "true":
         define_chaos_monkey(meta, compose)
         services["chaos_monkey"] = 1

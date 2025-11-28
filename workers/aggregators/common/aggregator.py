@@ -216,8 +216,6 @@ class Aggregator:
             self.middleware_queue_receiver.stop_consuming()
 
         while self._running:
-            if self.monitor:
-                self.monitor.pulse()
             try:
                 self.chunk_timer = self.middleware_queue_receiver.connection.call_later(TIMEOUT, chunk_stop)
                 self.middleware_queue_receiver.start_consuming(chunk_callback)
@@ -243,14 +241,17 @@ class Aggregator:
                 )
 
             while data_results:
+    
                 raw_data = data_results.popleft()
                 self._process_data_message(raw_data)
 
             while stats_results:
+    
                 raw_stats = stats_results.popleft()
                 self._process_stats_message(raw_stats)
 
             while data_chunks:
+    
                 msg = data_chunks.popleft()
                 try:
                     if msg.startswith(b"END;"):

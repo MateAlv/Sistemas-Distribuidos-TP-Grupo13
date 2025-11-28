@@ -60,8 +60,8 @@ def main():
 
     logging.debug(f"action: config | result: success | joiner_type:{joiner_type} | log_level:{logging_level}")
 
-    from utils.monitor import Monitor
-    monitor = Monitor()
+    from utils.heartbeat_sender import HeartbeatSender
+    monitor = HeartbeatSender()
     monitor.start()
 
     if joiner_type == ITEMS_JOINER:

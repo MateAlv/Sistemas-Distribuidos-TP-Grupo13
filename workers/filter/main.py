@@ -77,8 +77,8 @@ def main():
 
     logging.debug(f"Config cargada desde {config_file}: {cfg}")
 
-    from utils.monitor import Monitor
-    monitor = Monitor()
+    from utils.heartbeat_sender import HeartbeatSender
+    monitor = HeartbeatSender()
     monitor.start()
 
     filter = Filter(cfg, monitor)

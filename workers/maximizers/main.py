@@ -104,8 +104,8 @@ def main():
         f"action: config | result: success | max_type:{max_type} | role:{role} | shard_id:{shard_id} | partial_shards:{partial_shards} | log_level:{logging_level}"
     )
 
-    from utils.monitor import Monitor
-    monitor = Monitor()
+    from utils.heartbeat_sender import HeartbeatSender
+    monitor = HeartbeatSender()
     monitor.start()
 
     maximizer = Maximizer(max_type, role, shard_id, partial_shards, monitor)

@@ -96,8 +96,7 @@ class Server:
         try:
             self._server_socket.settimeout(1.0)
             while self._running:
-                if self.monitor:
-                    self.monitor.pulse()
+                # Heartbeat pulse removed; relying on thread liveness
                 try:
                     client_sock, addr = self._server_socket.accept()
                 except socket.timeout:
