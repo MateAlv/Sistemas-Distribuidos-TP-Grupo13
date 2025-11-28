@@ -17,6 +17,7 @@ import os
 import uuid
 import pickle
 from utils.tolerance.persistence_service import PersistenceService
+from .maximizer_working_state import MaximizerWorkingState
 
 from workers.common.sharding import queue_name_for, slugify_shard_id
 
@@ -52,22 +53,15 @@ class Maximizer:
             raise ValueError("Los maximizers absolutos requieren la lista de shards parciales configurados.")
 
         self.persistence = PersistenceService(f"/data/persistence/maximizer_{self.maximizer_type}_{self.maximizer_range}")
-        self.processed_ids = set()
-
-        self.clients_end_processed = set()
+        self.working_state = MaximizerWorkingState()
         
         if self.maximizer_type == "MAX":
-            self.sellings_max = defaultdict(dict)   # client_id -> {(item_id, month): quantity}
-            self.profit_max = defaultdict(dict)     # client_id -> {(item_id, month): subtotal}
-
             if self.is_absolute_max():
                 # Máximo absoluto - recibe de maximizers parciales
                 self.data_sender = MessageMiddlewareQueue("rabbitmq", "to_transaction_items_to_join")
                 self.data_receiver = MessageMiddlewareQueue("rabbitmq", "to_absolute_max")
                 self.middleware_exchange_sender = MessageMiddlewareExchange("rabbitmq", "end_exchange_maximizer_PRODUCTS", [""], exchange_type="fanout")
                 self.middleware_exchange_receiver = None 
-                self.partial_ranges_seen = defaultdict(set)  # client_id -> {range_id}
-                self.partial_end_counts = defaultdict(int)   # client_id -> cantidad de END recibidos
             else:
                 # Maximizers parciales - envían al absolute max
                 self.data_sender = MessageMiddlewareQueue("rabbitmq", "to_absolute_max")
@@ -79,7 +73,6 @@ class Maximizer:
                     
         elif self.maximizer_type == "TOP3":
             # Para TOP3 clientes por store (Query 4)
-            self.top3_by_store = defaultdict(default_top3_value)  # client_id -> store_id -> heap[(count, user_id)]
             
             if self.is_absolute_top3():
                 # TOP3 absoluto - recibe de TOP3 parciales
@@ -87,7 +80,6 @@ class Maximizer:
                 self.data_receiver = MessageMiddlewareQueue("rabbitmq", "to_top3_absolute")
                 self.middleware_exchange_sender = MessageMiddlewareExchange("rabbitmq", "end_exchange_maximizer_TOP3", [""], exchange_type="fanout")
                 self.middleware_exchange_receiver = None  # No necesita escuchar END de nadie
-                self.partial_top3_finished = defaultdict(int)  # client_id -> cantidad de END recibidos
             else:
                 # TOP3 parciales - envían al absoluto
                 self.data_sender = MessageMiddlewareQueue("rabbitmq", "to_top3_absolute")
@@ -109,25 +101,14 @@ class Maximizer:
     
     def delete_client_data(self, client_id: int):
         """Elimina la información almacenada de un cliente"""
-        if self.maximizer_type == "MAX":
-            if client_id in self.sellings_max:
-                del self.sellings_max[client_id]
-            if client_id in self.profit_max:
-                del self.profit_max[client_id]
-            if self.is_absolute_max():
-                self.partial_ranges_seen.pop(client_id, None)
-                self.partial_end_counts.pop(client_id, None)
-        elif self.maximizer_type == "TOP3":
-            self.top3_by_store.pop(client_id, None)
-            if self.is_absolute_top3():
-                self.partial_top3_finished.pop(client_id, None)
+        self.working_state.delete_client_data(client_id, self.maximizer_type, self.role == "absolute")
         
         logging.info(f"action: delete_client_data | type:{self.maximizer_type} | range:{self.maximizer_range} | client_id:{client_id}")
         self._save_state(uuid.uuid4())
     
     def process_client_end(self, client_id: int, table_type: TableType):
         """Procesa el final de un cliente y envía resultados"""
-        if client_id in self.clients_end_processed:
+        if self.working_state.is_client_end_processed(client_id):
             logging.debug(f"action: end_already_processed | type:{self.maximizer_type} | range:{self.maximizer_range} | client_id:{client_id}")
             return
 
@@ -136,7 +117,7 @@ class Maximizer:
             logging.debug(f"action: ignoring_end_wrong_table | expected:{expected_table} | received:{table_type} | client_id:{client_id}")
             return
 
-        self.clients_end_processed.add(client_id)
+        self.working_state.mark_client_end_processed(client_id)
         logging.info(f"action: end_received_processing_final | type:{self.maximizer_type} | range:{self.maximizer_range} | client_id:{client_id}")
 
         if self.maximizer_type == "MAX":
@@ -220,12 +201,11 @@ class Maximizer:
             return
 
         if self.maximizer_type == "MAX" and self.is_absolute_max():
-            if client_id in self.clients_end_processed:
+            if self.working_state.is_client_end_processed(client_id):
                 logging.debug(f"action: ignoring_end_already_processed | client_id:{client_id}")
                 return
 
-            self.partial_end_counts[client_id] += 1
-            current = self.partial_end_counts[client_id]
+            current = self.working_state.increment_partial_end_count(client_id)
             logging.info(f"action: end_received_from_partial | type:{self.maximizer_type} | client_id:{client_id} | received:{current}/{self.expected_partial_maximizers}")
 
             if current >= self.expected_partial_maximizers:
@@ -236,12 +216,11 @@ class Maximizer:
             return
 
         if self.maximizer_type == "TOP3" and self.is_absolute_top3():
-            if client_id in self.clients_end_processed:
+            if self.working_state.is_client_end_processed(client_id):
                 logging.debug(f"action: ignoring_end_already_processed | client_id:{client_id}")
                 return
 
-            self.partial_top3_finished[client_id] += 1
-            current = self.partial_top3_finished[client_id]
+            current = self.working_state.increment_partial_top3_finished(client_id)
             logging.info(f"action: end_received_from_partial | type:{self.maximizer_type} | client_id:{client_id} | received:{current}/{self.expected_partial_top3}")
 
             if current >= self.expected_partial_top3:
@@ -260,7 +239,7 @@ class Maximizer:
         table_type = chunk.table_type()
         expected_table = self._expected_table_type()
 
-        if chunk.message_id() in self.processed_ids:
+        if self.working_state.is_processed(chunk.message_id()):
             logging.info(f"action: duplicate_chunk_ignored | message_id:{chunk.message_id()}")
             return
 
@@ -271,14 +250,17 @@ class Maximizer:
             return
 
         # Si llega un nuevo chunk para un cliente ya procesado, reabrir su ciclo
-        if self.maximizer_type == "MAX":
-            if client_id in self.clients_end_processed and client_id not in self.sellings_max:
-                self.clients_end_processed.discard(client_id)
-        elif self.maximizer_type == "TOP3":
-            if client_id in self.clients_end_processed and client_id not in self.top3_by_store:
-                self.clients_end_processed.discard(client_id)
+        if self.working_state.is_client_end_processed(client_id):
+            # Check if we really need to reopen or if it's just late data
+            # For now, following original logic but using working_state
+            if self.maximizer_type == "MAX":
+                if client_id not in self.working_state.sellings_max:
+                    self.working_state.unmark_client_end_processed(client_id)
+            elif self.maximizer_type == "TOP3":
+                if client_id not in self.working_state.top3_by_store:
+                    self.working_state.unmark_client_end_processed(client_id)
 
-        if client_id in self.clients_end_processed:
+        if self.working_state.is_client_end_processed(client_id):
             logging.debug(f"action: ignoring_data_after_end_processed | type:{self.maximizer_type} | range:{self.maximizer_range} | client_id:{client_id}")
             return
 
@@ -294,11 +276,11 @@ class Maximizer:
         self._check_crash_point("CRASH_AFTER_PROCESS_BEFORE_COMMIT")
 
         if self.maximizer_type == "MAX" and self.is_absolute_max():
-            ranges_seen = self.partial_ranges_seen[client_id]
+            ranges_seen = self.working_state.get_partial_ranges_seen(client_id)
             for row in chunk.rows:
                 shard_slug = self._extract_shard_from_row(row)
                 if shard_slug:
-                    ranges_seen.add(shard_slug)
+                    self.working_state.add_partial_range_seen(client_id, shard_slug)
 
             received_labels = sorted(self.partial_shards_lookup.get(slug, slug) for slug in ranges_seen)
             logging.info(
@@ -315,7 +297,7 @@ class Maximizer:
                 logging.info(f"action: absolute_max_ready | client_id:{client_id} | all_partial_data_received")
                 self.process_client_end(client_id, table_type)
 
-        self.processed_ids.add(chunk.message_id())
+        self.working_state.mark_processed(chunk.message_id())
         self._save_state(chunk.message_id())
 
     def _send_end_message(self, client_id: int, table_type: TableType, target: str):
@@ -400,21 +382,11 @@ class Maximizer:
         self.__running = False
 
         # Liberar estructuras
-        for attr in [
-            "sellings_max",
-            "profit_max",
-            "partial_ranges_seen",
-            "partial_end_counts",
-            "top3_by_store",
-            "partial_top3_finished",
-            "clients_end_processed"
-        ]:
-            try:
-                obj = getattr(self, attr, None)
-                if isinstance(obj, (dict, list, set)) and hasattr(obj, "clear"):
-                    obj.clear()
-            except (OSError, RuntimeError, AttributeError):
-                pass
+        # Liberar estructuras
+        try:
+            self.working_state = MaximizerWorkingState()
+        except (OSError, RuntimeError, AttributeError):
+            pass
 
         logging.info(f"Maximizer {self.maximizer_type} rango {self.maximizer_range} apagado correctamente.")
 
@@ -423,8 +395,8 @@ class Maximizer:
         Actualiza los máximos relativos o absolutos.
         """
         updated_count = 0
-        client_sellings = self.sellings_max[client_id]
-        client_profit = self.profit_max[client_id]
+        client_sellings = self.working_state.get_sellings_max(client_id)
+        client_profit = self.working_state.get_profit_max(client_id)
 
         for row in rows:
             if hasattr(row, 'item_id') and hasattr(row, 'created_at'):
@@ -463,7 +435,7 @@ class Maximizer:
         """
         Actualiza los top 3 clientes por store basado en el número de compras.
         """
-        client_top3 = self.top3_by_store[client_id]
+        client_top3 = self.working_state.get_top3_by_store(client_id)
 
         for row in rows:
             if isinstance(row, PurchasesPerUserStoreRow):
@@ -496,8 +468,8 @@ class Maximizer:
         """
         if self.maximizer_type == "MAX":
             self.update_max(client_id, chunk.rows)
-            client_sellings = self.sellings_max[client_id]
-            client_profit = self.profit_max[client_id]
+            client_sellings = self.working_state.get_sellings_max(client_id)
+            client_profit = self.working_state.get_profit_max(client_id)
 
             if self.is_absolute_max():
                 # Formatear los diccionarios de máximos para logging legible
@@ -522,8 +494,8 @@ class Maximizer:
         Los maximizers parciales envían sus máximos locales al absolute max.
         """
         accumulated_results = []
-        client_sellings = self.sellings_max.get(client_id, {})
-        client_profit = self.profit_max.get(client_id, {})
+        client_sellings = self.working_state.get_sellings_max(client_id)
+        client_profit = self.working_state.get_profit_max(client_id)
         
         # Enviar máximos de ventas
         for (item_id, month_year), quantity in client_sellings.items():
@@ -575,7 +547,7 @@ class Maximizer:
         """
         accumulated_results = []
         marker_date = datetime.date(2024, 1, 1)  # Fecha marca
-        client_top3 = self.top3_by_store.get(client_id, {})
+        client_top3 = self.working_state.get_top3_by_store(client_id)
         
         for store_id, top3_heap in client_top3.items():
             # Convertir heap a lista ordenada (mayor a menor)
@@ -613,7 +585,7 @@ class Maximizer:
         Publica los resultados finales del TOP3 absoluto.
         Los maximizers parciales ya enviaron su TOP3 calculado, solo necesitamos reenviarlos.
         """
-        client_top3 = self.top3_by_store.get(client_id, {})
+        client_top3 = self.working_state.get_top3_by_store(client_id)
         logging.info(f"action: forwarding_top3_results | client_id:{client_id} | stores_processed:{len(client_top3)} | stores_list:{list(client_top3.keys())}")
         
         # Log detailed state before processing
@@ -656,8 +628,8 @@ class Maximizer:
         Publica los resultados de máximos absolutos por mes.
         Solo los máximos de cada mes para Q2.
         """
-        client_sellings = self.sellings_max.get(client_id, {})
-        client_profit = self.profit_max.get(client_id, {})
+        client_sellings = self.working_state.get_sellings_max(client_id)
+        client_profit = self.working_state.get_profit_max(client_id)
         logging.info(f"action: calculating_absolute_max | client_id:{client_id} | selling_entries:{len(client_sellings)} | profit_entries:{len(client_profit)}")
         
         if not client_sellings and not client_profit:
@@ -733,41 +705,10 @@ class Maximizer:
         state_data = self.persistence.recover_working_state()
         if state_data:
             try:
-                state = pickle.loads(state_data)
-                self.clients_end_processed = state.get("clients_end_processed", set())
-                self.processed_ids = state.get("processed_ids", set())
-                
-                if self.maximizer_type == "MAX":
-                    self.sellings_max = state.get("sellings_max", defaultdict(dict))
-                    self.profit_max = state.get("profit_max", defaultdict(dict))
-                    if self.is_absolute_max():
-                        self.partial_ranges_seen = state.get("partial_ranges_seen", defaultdict(set))
-                        self.partial_end_counts = state.get("partial_end_counts", defaultdict(int))
-                elif self.maximizer_type == "TOP3":
-                    self.top3_by_store = state.get("top3_by_store", defaultdict(default_top3_value))
-                    if self.is_absolute_top3():
-                        self.partial_top3_finished = state.get("partial_top3_finished", defaultdict(int))
-                
+                self.working_state = MaximizerWorkingState.from_bytes(state_data)
                 logging.info(f"State recovered for maximizer {self.maximizer_type}_{self.maximizer_range}")
             except Exception as e:
                 logging.error(f"Error recovering state: {e}")
 
     def _save_state(self, last_processed_id):
-        state = {
-            "clients_end_processed": self.clients_end_processed,
-            "processed_ids": self.processed_ids,
-        }
-        
-        if self.maximizer_type == "MAX":
-            state["sellings_max"] = self.sellings_max
-            state["profit_max"] = self.profit_max
-            if self.is_absolute_max():
-                state["partial_ranges_seen"] = self.partial_ranges_seen
-                state["partial_end_counts"] = self.partial_end_counts
-        elif self.maximizer_type == "TOP3":
-            state["top3_by_store"] = self.top3_by_store
-            if self.is_absolute_top3():
-                state["partial_top3_finished"] = self.partial_top3_finished
-        
-        state_data = pickle.dumps(state)
-        self.persistence.commit_working_state(state_data, last_processed_id)
+        self.persistence.commit_working_state(self.working_state.to_bytes(), last_processed_id)

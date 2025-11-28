@@ -167,6 +167,11 @@ class Filter:
         client_id = chunk.client_id()
         table_type = chunk.table_type()
 
+        # Idempotency check
+        if chunk.message_id() in self.working_state.processed_ids:
+            logging.info(f"action: duplicate_chunk_ignored | message_id:{chunk.message_id()}")
+            return
+
         # Se commitea el chunk a procesar
         self.persistence_service.commit_processing_chunk(chunk)
         # Se procesa el chunk
@@ -178,6 +183,7 @@ class Filter:
             self.working_state.increase_not_sent_chunks(client_id, table_type, 1)
 
         # Se commitea el working state
+        self.working_state.processed_ids.add(chunk.message_id())
         self.persistence_service.commit_working_state(self.working_state.to_bytes(), chunk.message_id())
 
         if self.working_state.end_is_received(client_id, table_type):

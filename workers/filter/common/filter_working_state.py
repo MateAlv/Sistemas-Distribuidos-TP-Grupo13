@@ -20,6 +20,8 @@ class FilterWorkingState(WorkingState):
         self.end_message_received = {}
         # estadísticas ya enviadas por cliente y tipo de tabla
         self.already_sent_stats = {}
+        # processed message ids
+        self.processed_ids = set()
 
     def get_total_chunks_received(self, client_id, table_type):
         """Obtiene el número total de chunks recibidos para un cliente y tipo de tabla"""
@@ -131,7 +133,9 @@ class FilterWorkingState(WorkingState):
             "number_of_chunks_not_sent_per_client",
             "number_of_chunks_to_receive",
             "end_message_received",
-            "already_sent_stats"
+            "end_message_received",
+            "already_sent_stats",
+            "processed_ids"
         ]:
             try:
                 obj = getattr(self, attr, None)
