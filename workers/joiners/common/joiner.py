@@ -18,7 +18,7 @@ STORES_TPV_JOINER = "STORES_TPV"
 STORES_TOP3_JOINER = "STORES_TOP3"
 USERS_JOINER = "USERS"
 
-from workers.joiners.common.joiner_working_state import JoinerMainWorkingState, JoinerJoinWorkingState
+from .joiner_working_state import JoinerMainWorkingState, JoinerJoinWorkingState
 
 class Joiner:
     
