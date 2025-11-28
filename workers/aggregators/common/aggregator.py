@@ -39,6 +39,12 @@ import uuid
 from utils.tolerance.persistence_service import PersistenceService
 
 
+def default_product_value():
+    return {"quantity": 0, "subtotal": 0.0}
+
+def default_purchase_value():
+    return defaultdict(int)
+
 class Aggregator:
     def __init__(self, agg_type: str, agg_id: int = 1, monitor=None):
         logging.getLogger("pika").setLevel(logging.CRITICAL)
@@ -700,7 +706,7 @@ class Aggregator:
         self._ensure_global_entry(client_id)
         data = self.global_accumulator[client_id].setdefault(
             "products",
-            defaultdict(lambda: {"quantity": 0, "subtotal": 0.0}),
+            defaultdict(default_product_value),
         )
 
         for row in rows:
@@ -719,7 +725,7 @@ class Aggregator:
     def accumulate_purchases(self, client_id, aggregated_chunk: ProcessChunk):
         self._ensure_global_entry(client_id)
         data = self.global_accumulator[client_id].setdefault(
-            "purchases", defaultdict(lambda: defaultdict(int))
+            "purchases", defaultdict(default_purchase_value)
         )
 
         for row in aggregated_chunk.rows:

@@ -1,7 +1,5 @@
 # Fault Tolerance & Persistence Design
 
-## WorkingState
-**TODO: Implement in each component**
 
 ### State to Persist
 - Dictionaries: `[Client_id]` / `[Client_id][Table_type]`

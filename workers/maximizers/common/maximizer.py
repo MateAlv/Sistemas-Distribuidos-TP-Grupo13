@@ -22,6 +22,10 @@ from workers.common.sharding import queue_name_for, slugify_shard_id
 
 TIMEOUT = 3
 
+
+def default_top3_value():
+    return defaultdict(list)
+
 class Maximizer:
     def __init__(self, max_type: str, role: str, shard_id: Optional[str], partial_shards: list[str], monitor=None):
         logging.getLogger('pika').setLevel(logging.CRITICAL)
@@ -75,7 +79,7 @@ class Maximizer:
                     
         elif self.maximizer_type == "TOP3":
             # Para TOP3 clientes por store (Query 4)
-            self.top3_by_store = defaultdict(lambda: defaultdict(list))  # client_id -> store_id -> heap[(count, user_id)]
+            self.top3_by_store = defaultdict(default_top3_value)  # client_id -> store_id -> heap[(count, user_id)]
             
             if self.is_absolute_top3():
                 # TOP3 absoluto - recibe de TOP3 parciales
@@ -740,7 +744,7 @@ class Maximizer:
                         self.partial_ranges_seen = state.get("partial_ranges_seen", defaultdict(set))
                         self.partial_end_counts = state.get("partial_end_counts", defaultdict(int))
                 elif self.maximizer_type == "TOP3":
-                    self.top3_by_store = state.get("top3_by_store", defaultdict(lambda: defaultdict(list)))
+                    self.top3_by_store = state.get("top3_by_store", defaultdict(default_top3_value))
                     if self.is_absolute_top3():
                         self.partial_top3_finished = state.get("partial_top3_finished", defaultdict(int))
                 
