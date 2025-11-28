@@ -35,8 +35,9 @@ from .aggregator_stats_messages import (
 
 
 class Aggregator:
-    def __init__(self, agg_type: str, agg_id: int = 1):
+    def __init__(self, agg_type: str, agg_id: int = 1, monitor=None):
         logging.getLogger("pika").setLevel(logging.CRITICAL)
+        self.monitor = monitor
 
         self._running = True
 
@@ -240,14 +241,17 @@ class Aggregator:
                 )
 
             while data_results:
+    
                 raw_data = data_results.popleft()
                 self._process_data_message(raw_data)
 
             while stats_results:
+    
                 raw_stats = stats_results.popleft()
                 self._process_stats_message(raw_stats)
 
             while data_chunks:
+    
                 msg = data_chunks.popleft()
                 try:
                     if msg.startswith(b"END;"):

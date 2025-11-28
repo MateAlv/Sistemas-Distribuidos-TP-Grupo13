@@ -11,8 +11,9 @@ from middleware.middleware_interface import MessageMiddlewareQueue, MessageMiddl
 from .filter_stats_messages import FilterStatsMessage, FilterStatsEndMessage
 
 class Filter:
-    def __init__(self, cfg: dict):
+    def __init__(self, cfg: dict, monitor=None):
         logging.getLogger('pika').setLevel(logging.CRITICAL)
+        self.monitor = monitor
         
         self.__running = True
         
@@ -72,6 +73,7 @@ class Filter:
 
         while self.__running:
 
+
             try:
                 self.stats_timer = self.middleware_end_exchange.connection.call_later(TIMEOUT, stats_stop)
                 self.middleware_end_exchange.start_consuming(stats_callback)
@@ -85,6 +87,7 @@ class Filter:
                  logging.error(f"Error en consumo: {e}")
 
             while stats_results:
+
                 stats_msg = stats_results.popleft()
                 try:
                     if stats_msg.startswith(b"STATS_END"):
@@ -127,6 +130,7 @@ class Filter:
                     logging.error(f"action: error_decoding_stats_message | error:{e}")
 
             while results:
+
                 msg = results.popleft()
                 try:
                     if msg.startswith(b"END;"):

@@ -15,8 +15,9 @@ USERS_JOINER = "USERS"
 
 class Joiner:
     
-    def __init__(self, join_type: str):
+    def __init__(self, join_type: str, monitor=None):
         logging.getLogger('pika').setLevel(logging.CRITICAL)
+        self.monitor = monitor
 
         self.joiner_type = join_type
         self.data = {}
@@ -87,6 +88,7 @@ class Joiner:
             self.data_receiver.stop_consuming()
 
         while self.__running:
+
             # Escuchar datos del maximizer con timeout
             try:
                 self.data_receiver_timer = self.data_receiver.connection.call_later(TIMEOUT, stop)
@@ -96,6 +98,7 @@ class Joiner:
 
             # Procesar datos del maximizer
             for data in results:
+
                 try:
                     if data.startswith(b"END;"):
                         end_message = MessageEnd.decode(data)
@@ -284,6 +287,7 @@ class Joiner:
         logging.debug(f"action: processing_chunks | type:{self.joiner_type} | client_id:{client_id} | chunks_count:{len(self.joiner_data_chunks[client_id])}")
         
         for chunk_idx, chunk in enumerate(self.joiner_data_chunks[client_id]):
+
             logging.debug(f"action: processing_chunk | type:{self.joiner_type} | client_id:{client_id} | chunk_idx:{chunk_idx} | rows_count:{len(chunk.rows)}")
             
             for row_idx, row in enumerate(chunk.rows):

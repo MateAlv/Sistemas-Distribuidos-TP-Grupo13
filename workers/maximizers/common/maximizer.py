@@ -18,8 +18,9 @@ from workers.common.sharding import queue_name_for, slugify_shard_id
 TIMEOUT = 3
 
 class Maximizer:
-    def __init__(self, max_type: str, role: str, shard_id: Optional[str], partial_shards: list[str]):
+    def __init__(self, max_type: str, role: str, shard_id: Optional[str], partial_shards: list[str], monitor=None):
         logging.getLogger('pika').setLevel(logging.CRITICAL)
+        self.monitor = monitor
 
         self.__running = True
 
@@ -159,6 +160,7 @@ class Maximizer:
                 logging.debug(f"action: stop_consuming_warning | type:{self.maximizer_type} | range:{self.maximizer_range} | error:{e}")
 
         while self.__running:
+
             try:
                 if hasattr(self.data_receiver, "connection"):
                     self.data_receiver.connection.call_later(TIMEOUT, stop)
@@ -167,6 +169,7 @@ class Maximizer:
                 logging.error(f"action: error_during_consumption | type:{self.maximizer_type} | range:{self.maximizer_range} | error:{e}")
 
             while messages:
+
                 data = messages.popleft()
                 try:
                     if data.startswith(b"END;"):
