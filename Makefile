@@ -71,7 +71,7 @@ rebuild:
 
 logs:
 	> logs.txt
-	docker compose -f ${DOCKER} logs -f > logs.txt 
+	docker compose -f ${DOCKER} logs -f -d > logs.txt 
 .PHONY: docker-compose-logs
 
 clean-results:
