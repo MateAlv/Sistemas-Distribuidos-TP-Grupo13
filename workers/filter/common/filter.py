@@ -9,6 +9,7 @@ from utils.file_utils.table_type import TableType, ResultTableType
 from middleware.middleware_interface import MessageMiddlewareQueue, MessageMiddlewareExchange, TIMEOUT, \
     MessageMiddlewareMessageError
 from .filter_stats_messages import FilterStatsMessage, FilterStatsEndMessage
+from .filter_working_state import FilterWorkingState
 
 class Filter:
     def __init__(self, cfg: dict, monitor=None):
@@ -21,11 +22,7 @@ class Filter:
         self.cfg = cfg
         self.filter_type = cfg["filter_type"]
 
-        self.end_message_received = {}
-        self.number_of_chunks_received_per_client = {}
-        self.number_of_chunks_not_sent_per_client = {}
-        self.number_of_chunks_to_receive = {}
-        self.already_sent_stats = {}
+        self.working_state = FilterWorkingState()
 
         self.middleware_queue_sender = {}
 
@@ -95,36 +92,30 @@ class Filter:
                         if stats_end.filter_id == self.id:
                             continue
                         logging.debug(f"action: stats_end_received | type:{self.filter_type} | filter_id:{stats_end.filter_id} | cli_id:{stats_end.client_id} | table_type:{stats_end.table_type}")
-                        self.delete_client_stats_data(stats_end)
+                        self.working_state.delete_client_stats_data(stats_end)
                     else:
                         stats = FilterStatsMessage.decode(stats_msg)
                         if stats.filter_id == self.id:
                             continue
                         logging.debug(f"action: stats_received | type:{self.filter_type} | filter_id:{stats.filter_id} | cli_id:{stats.client_id} | file_type:{stats.table_type} | chunks_received:{stats.chunks_received} | chunks_not_sent:{stats.chunks_not_sent}")
 
-                        self._ensure_dict_entry(self.number_of_chunks_received_per_client, stats.client_id, stats.table_type)
-                        self._ensure_dict_entry(self.number_of_chunks_not_sent_per_client, stats.client_id, stats.table_type)
-                        total_received = self.number_of_chunks_received_per_client[stats.client_id][stats.table_type]
-                        total_not_sent = self.number_of_chunks_not_sent_per_client[stats.client_id][stats.table_type]
+                        total_received = self.working_state.get_total_chunks_received(stats.client_id, stats.table_type)
+                        total_not_sent = self.working_state.get_total_not_sent_chunks(stats.client_id, stats.table_type)
 
-                        if (stats.client_id, stats.table_type) not in self.already_sent_stats:
-                            self.already_sent_stats[(stats.client_id, stats.table_type)] = True
+                        # Si no se han enviado las estadísticas, se envían al resto de filtros
+                        if not self.working_state.stats_are_already_sent(stats.client_id, stats.table_type):
                             stats_msg = FilterStatsMessage(self.id, stats.client_id, stats.table_type, stats.total_expected, total_received, total_not_sent)
                             self.middleware_end_exchange.send(stats_msg.encode())
+                            # Se registra que ya se enviaron las estadísticas
+                            self.working_state.stats_sent(stats.client_id, stats.table_type)
 
-                        if stats.client_id not in self.end_message_received:
-                            self.end_message_received[stats.client_id] = {}
-                        self.end_message_received[stats.client_id][stats.table_type] = True
+                        self.working_state.end_received(stats.client_id, stats.table_type)
 
-                        if stats.client_id not in self.number_of_chunks_to_receive:
-                            self.number_of_chunks_to_receive[stats.client_id] = {}
-                        self.number_of_chunks_to_receive[stats.client_id][stats.table_type] = stats.total_expected
+                        self.working_state.update_stats_received(stats.client_id, stats.table_type, stats)
 
-                        self.number_of_chunks_received_per_client[stats.client_id][stats.table_type] += stats.chunks_received
-                        self.number_of_chunks_not_sent_per_client[stats.client_id][stats.table_type] += stats.chunks_not_sent
-
-                        if self._can_send_end_message(stats.total_expected, stats.client_id, stats.table_type):
-                            self._send_end_message(stats.client_id, stats.table_type, stats.total_expected, self.number_of_chunks_not_sent_per_client[stats.client_id][stats.table_type])
+                        if self.working_state.can_send_end_message(stats.client_id, stats.table_type, stats.total_expected, self.id):
+                            chunks_not_sent = self.working_state.get_total_not_sent_chunks(stats.client_id, stats.table_type)
+                            self._send_end_message(stats.client_id, stats.table_type, stats.total_expected, chunks_not_sent)
 
                 except Exception as e:
                     logging.error(f"action: error_decoding_stats_message | error:{e}")
@@ -137,35 +128,30 @@ class Filter:
                         end_message = MessageEnd.decode(msg)
                         client_id = end_message.client_id()
                         table_type = end_message.table_type()
-                        if client_id not in self.end_message_received:
-                            self.end_message_received[client_id] = {}
-                        self.end_message_received[client_id][table_type] = True
                         total_expected = end_message.total_chunks()
-                        self._ensure_dict_entry(self.number_of_chunks_received_per_client, client_id, table_type)
+                        total_received = self.working_state.get_total_chunks_received(client_id, table_type)
+                        total_not_sent = self.working_state.get_total_not_sent_chunks(client_id, table_type)
 
-                        logging.info("action: end_message_received | type:%s | cli_id:%s | file_type:%s | chunks_received:%d | chunks_not_sent:%d | chunks_expected:%d",
-                                    self.filter_type, client_id, table_type, 
-                                    self.number_of_chunks_received_per_client[client_id][table_type],
-                                    self.number_of_chunks_not_sent_per_client.get(client_id, {}).get(table_type, 0),
-                                    total_expected)
-                        
-                        self._ensure_dict_entry(self.number_of_chunks_not_sent_per_client, client_id, table_type)
-                        if client_id not in self.number_of_chunks_to_receive:
-                            self.number_of_chunks_to_receive[client_id] = {}
-                        self.number_of_chunks_to_receive[client_id][table_type] = total_expected
+                        self.working_state.end_received(client_id, table_type)
+                        logging.info(
+                            "action: end_message_received | type:%s | cli_id:%s | file_type:%s | chunks_received:%d | chunks_not_sent:%d | chunks_expected:%d",
+                            self.filter_type, client_id, table_type,
+                            total_received,
+                            total_not_sent,
+                            total_expected)
 
-                        stats_msg = FilterStatsMessage(self.id, client_id, table_type, total_expected,
-                                    self.number_of_chunks_received_per_client[client_id][table_type],
-                                    self.number_of_chunks_not_sent_per_client[client_id][table_type])
+                        self.working_state.set_total_chunks_expected(client_id, table_type, total_expected)
+
+                        stats_msg = FilterStatsMessage(self.id, client_id, table_type, total_expected, total_received, total_not_sent)
                         
-                        logging.info(f"action: sending_stats_message | type:{self.filter_type} | cli_id:{client_id} | file_type:{table_type.name} | chunks_received:{self.number_of_chunks_received_per_client[client_id][table_type]} | chunks_not_sent:{self.number_of_chunks_not_sent_per_client[client_id][table_type]} | chunks_expected:{total_expected}")
+                        logging.info(f"action: sending_stats_message | type:{self.filter_type} | cli_id:{client_id} | file_type:{table_type.name} | chunks_received:{total_received} | chunks_not_sent:{total_not_sent} | chunks_expected:{total_expected}")
                         logging.info(f"action: sending_stats_message | msg:{stats_msg.encode()}")
                         self.middleware_end_exchange.send(stats_msg.encode())
 
-                        if self._can_send_end_message(total_expected, client_id, table_type):
-                            self._send_end_message(client_id, table_type, total_expected, self.number_of_chunks_not_sent_per_client[client_id][table_type])
+                        if self.working_state.can_send_end_message(client_id, table_type,total_expected, self.id):
+                            self._send_end_message(client_id, table_type, total_expected, total_not_sent)
                         else:
-                            logging.debug(f"action: not_sending_end_message_yet | type:{self.filter_type} | cli_id:{client_id} | file_type:{table_type.name} | chunks_received:{self.number_of_chunks_received_per_client[client_id][table_type]} | chunks_not_sent:{self.number_of_chunks_not_sent_per_client[client_id][table_type]} | chunks_expected:{total_expected}")
+                            logging.debug(f"action: not_sending_end_message_yet | type:{self.filter_type} | cli_id:{client_id} | file_type:{table_type.name} | chunks_received:{total_received} | chunks_not_sent:{total_not_sent} | chunks_expected:{total_expected}")
                     else:
                         chunk = ProcessBatchReader.from_bytes(msg)
                         client_id = chunk.client_id()
@@ -190,73 +176,27 @@ class Filter:
                                     queue.send(ResultChunk(ResultChunkHeader(client_id, ResultTableType.QUERY_1), converted_rows).serialize())
                         else:
                             logging.info(f"action: no_rows_to_send | type:{self.filter_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()}")
-                            self._ensure_dict_entry(self.number_of_chunks_not_sent_per_client, client_id, table_type)
-                            self.number_of_chunks_not_sent_per_client[client_id][table_type] += 1
+                            self.working_state.increase_not_sent_chunks(client_id, table_type, 1)
                         
-                        self._ensure_dict_entry(self.number_of_chunks_received_per_client, client_id, table_type)
-                        self.number_of_chunks_received_per_client[client_id][table_type] += 1
-                        if client_id not in self.end_message_received:
-                            self.end_message_received[client_id] = {}
+                        self.working_state.increase_received_chunks(client_id, table_type, 1)
 
-                        if self.end_message_received[client_id].get(table_type, False):
-                            total_expected = self.number_of_chunks_to_receive[client_id][table_type]
-                            self._ensure_dict_entry(self.number_of_chunks_received_per_client, client_id, table_type)
-                            self._ensure_dict_entry(self.number_of_chunks_not_sent_per_client, client_id, table_type)
-                            total_received = self.number_of_chunks_received_per_client[client_id][table_type]
-                            total_not_sent = self.number_of_chunks_not_sent_per_client[client_id][table_type]
+                        if self.working_state.end_is_received(client_id, table_type):
+                            total_expected = self.working_state.get_total_chunks_to_receive(client_id, table_type)
+                            total_received = self.working_state.get_total_chunks_received(client_id, table_type)
+                            total_not_sent = self.working_state.get_total_not_sent_chunks(client_id, table_type)
 
-                            if (client_id, table_type) not in self.already_sent_stats:
-                                self.already_sent_stats[(client_id, table_type)] = True
+                            if not self.working_state.stats_are_already_sent(client_id, table_type):
                                 stats_msg = FilterStatsMessage(self.id, client_id, table_type, total_expected, total_received, total_not_sent)
                                 self.middleware_end_exchange.send(stats_msg.encode())
+                                self.working_state.stats_sent(client_id, table_type)
                             else:
                                 stats_msg = FilterStatsMessage(self.id, client_id, table_type, total_expected, 1, 0 if filtered_rows else 1)
-                            if self._can_send_end_message(total_expected, client_id, table_type):
+                            if self.working_state.can_send_end_message(client_id, table_type,total_expected, self.id):
                                 self._send_end_message(client_id, table_type, total_expected, total_not_sent)
                     
                 except Exception as e:
                     logging.error(f"action: error_decoding_message | error:{e}")
-                
 
-    def delete_client_stats_data(self, stats_end):
-        """Limpia datos del cliente después de procesar"""
-        logging.info(f"action: deleting_client_stats_data | cli_id:{stats_end.client_id}")
-        try:
-            if stats_end.client_id in self.end_message_received:
-                if stats_end.table_type in self.end_message_received[stats_end.client_id]:
-                    del self.end_message_received[stats_end.client_id][stats_end.table_type]
-                if not self.end_message_received[stats_end.client_id]:
-                    del self.end_message_received[stats_end.client_id]
-
-            if stats_end.client_id in self.number_of_chunks_to_receive:
-                if stats_end.table_type in self.number_of_chunks_to_receive[stats_end.client_id]:
-                    del self.number_of_chunks_to_receive[stats_end.client_id][stats_end.table_type]
-                if not self.number_of_chunks_to_receive[stats_end.client_id]:
-                    del self.number_of_chunks_to_receive[stats_end.client_id]
-
-            if stats_end.client_id in self.number_of_chunks_received_per_client:
-                if stats_end.table_type in self.number_of_chunks_received_per_client[stats_end.client_id]:
-                    del self.number_of_chunks_received_per_client[stats_end.client_id][stats_end.table_type]
-                if not self.number_of_chunks_received_per_client[stats_end.client_id]:
-                    del self.number_of_chunks_received_per_client[stats_end.client_id]
-
-            if stats_end.client_id in self.number_of_chunks_to_receive:
-                if stats_end.table_type in self.number_of_chunks_to_receive[stats_end.client_id]:
-                    del self.number_of_chunks_to_receive[stats_end.client_id][stats_end.table_type]
-                if not self.number_of_chunks_to_receive[stats_end.client_id]:
-                    del self.number_of_chunks_to_receive[stats_end.client_id]
-
-            if (stats_end.client_id, stats_end.table_type) in self.already_sent_stats:
-                del self.already_sent_stats[(stats_end.client_id, stats_end.table_type)]
-
-            logging.info(f"action: client_stats_data_deleted | cli_id:{stats_end.client_id}")
-        except KeyError:
-            pass  
-
-
-    def _can_send_end_message(self, total_expected, client_id, table_type):
-        logging.debug(f"Count: {self.number_of_chunks_received_per_client[client_id][table_type]} | cli_id:{client_id}")
-        return total_expected == self.number_of_chunks_received_per_client[client_id][table_type] and self.id == 1
 
     def _send_end_message(self, client_id, table_type, total_expected, total_not_sent):
         logging.info(f"action: sending_end_message | type:{self.filter_type} | cli_id:{client_id} | file_type:{table_type.name} | total_chunks:{total_expected-total_not_sent}")
@@ -269,7 +209,7 @@ class Filter:
             queue.send(msg_to_send.encode())
         end_msg = FilterStatsEndMessage(self.id, client_id, table_type)
         self.middleware_end_exchange.send(end_msg.encode())
-        self.delete_client_stats_data(end_msg)
+        self.working_state.delete_client_stats_data(end_msg)
 
     def _end_message_to_send(self, client_id, table_type, total_expected, total_not_sent):
         if self.filter_type != "amount":
@@ -293,12 +233,6 @@ class Filter:
 
         logging.error(f"Filtro desconocido: {self.filter_type}")
         return False
-    
-    def _ensure_dict_entry(self, dictionary, client_id, table_type, default=0):
-        if client_id not in dictionary:
-            dictionary[client_id] = {}
-        if table_type not in dictionary[client_id]:
-            dictionary[client_id][table_type] = default
 
     def _should_skip_queue(self, table_type: TableType, queue_name: str, client_id: int) -> bool:
         if table_type == TableType.TRANSACTION_ITEMS and queue_name in ["to_filter_2", "to_agg_4"]:
@@ -362,18 +296,6 @@ class Filter:
         self.__running = False
 
         # Limpiar estructuras
-        for attr in [
-            "end_message_received",
-            "number_of_chunks_received_per_client",
-            "number_of_chunks_not_sent_per_client",
-            "number_of_chunks_to_receive",
-            "already_sent_stats"
-        ]:
-            try:
-                obj = getattr(self, attr, None)
-                if isinstance(obj, (dict, list, set)) and hasattr(obj, "clear"):
-                    obj.clear()
-            except (OSError, RuntimeError, AttributeError):
-                pass
+        self.working_state.destroy()
 
         logging.info(f"Filtro {self.filter_type} cerrado correctamente.")
