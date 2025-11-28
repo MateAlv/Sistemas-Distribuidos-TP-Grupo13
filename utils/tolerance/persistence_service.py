@@ -164,6 +164,15 @@ class PersistenceService:
             logging.exception("Failed to read state commit file `%s`.", STATE_COMMIT_FILE)
             raise
 
+    def _clean_processing_commit(self):
+        """"Cleans the processing data commit file when the processing chunk has been sent."""
+        try:
+            atomic_file_upsert(self.processing_data_commit_path, b"")
+        except Exception:
+            logging.exception("Failed to clean processing data commit file `%s`.", PROCESSING_DATA_COMMIT_FILE)
+            raise
+
+
     def __init__(self, directory: str = "./"):
         # path directories
         ensure_directory_exists(directory)
@@ -176,7 +185,7 @@ class PersistenceService:
         self.working_state = self._recover_working_state_commit()
         pass
 
-    def recover_from_shutdown(self):
+    def recover_last_processing_chunk(self):
         """Recovers the last processing chunk commit from the commit file, if it was not sent yet."""
         processing_chunk = self._recover_processing_chunk_commit()
 
@@ -184,18 +193,18 @@ class PersistenceService:
             logging.debug("No processing chunk to recover.")
             return None
 
-        if processing_chunk.client_id not in self.messages_sent_by_user:
+        if processing_chunk.client_id() not in self.messages_sent_by_user:
             logging.debug("The last processing chunk was not sent. Reprocessing.")
             return processing_chunk
 
-        if processing_chunk.message_id in self.messages_sent_by_user[processing_chunk.client_id]:
+        if self.send_has_been_acknowledged(processing_chunk.client_id(), processing_chunk.message_id()):
             logging.debug("The last processing chunk was already sent. No need to reprocess.")
-            self.clean_processing_commit()
+            self._clean_processing_commit()
             return None
 
         return processing_chunk
 
-    def recover_working_state_data(self) -> bytes | None:
+    def recover_working_state(self) -> bytes | None:
         """Recovers the working state data from the state commit file."""
         return self.working_state.state_data if self.working_state else None
 
@@ -238,14 +247,6 @@ class PersistenceService:
         if client_id not in self.messages_sent_by_user:
             return False
         return message_id in self.messages_sent_by_user[client_id]
-
-    def clean_processing_commit(self):
-        """"Cleans the processing data commit file when the processing chunk has been sent."""
-        try:
-            atomic_file_upsert(self.processing_data_commit_path, b"")
-        except Exception:
-            logging.exception("Failed to clean processing data commit file `%s`.", PROCESSING_DATA_COMMIT_FILE)
-            raise
 
     def remove_client_data(self, client_id: int):
         """Removes all send acks for a given client_id."""

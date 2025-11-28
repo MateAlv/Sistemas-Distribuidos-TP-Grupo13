@@ -10,8 +10,8 @@ from utils.tolerance.persistence_service import PersistenceService
 def test_empty_persistence_service():
     directory_path = "/tmp"
     service = PersistenceService(directory_path)
-    assert service.recover_from_shutdown() is None
-    assert service.recover_working_state_data() is None
+    assert service.recover_last_processing_chunk() is None
+    assert service.recover_working_state() is None
 
 def test_processing_steps():
     directory_path = "/tmp"
@@ -33,7 +33,7 @@ def test_processing_steps():
     # Se commitea el chunk procesado
     service.commit_processing_chunk(chunk_deserialized)
     # Se recupera el chunk luego de un shutdown
-    recovered_chunk = service.recover_from_shutdown()
+    recovered_chunk = service.recover_last_processing_chunk()
     # Se verifica que los datos sean correctos
     assert recovered_chunk is not None
     assert len(recovered_chunk.rows) == 1
@@ -44,12 +44,6 @@ def test_processing_steps():
     assert recovered_chunk.rows[0].created_at.date == datetime.date(2023, 5, 1)
     assert recovered_chunk.rows[0].created_at.time == datetime.time(0, 0)
     assert str(recovered_chunk.rows[0].year_half_created_at) == "2023-H1"
-
-    # Se limpia el commit de procesamiento
-    service.clean_processing_commit()
-    # Se verifica que no haya datos para recuperar
-    service = PersistenceService(directory_path)
-    assert service.recover_from_shutdown() is None
 
     # Llega otro chunk de otra tabla
     date2 = DateTime(datetime.date(2022, 3, 21), datetime.time(20, 20))
@@ -69,7 +63,7 @@ def test_processing_steps():
     service.commit_processing_chunk(chunk2_deserialized)
     # Se recupera el chunk luego de un shutdown
     service = PersistenceService(directory_path)
-    recovered_chunk2 = service.recover_from_shutdown()
+    recovered_chunk2 = service.recover_last_processing_chunk()
     # Se verifica que los datos sean correctos
     assert recovered_chunk2 is not None
     assert len(recovered_chunk2.rows) == 1
@@ -99,9 +93,9 @@ def test_working_state_data():
     service.commit_working_state(data, chunk.message_id())
     # Se cae el servicio y se recupera
     service = PersistenceService(directory_path)
-    service.recover_from_shutdown()
+    service.recover_last_processing_chunk()
     # Se verifica que los datos sean correctos
-    recovered_data = service.recover_working_state_data()
+    recovered_data = service.recover_working_state()
     print ("UUID recovered: ", service.working_state.last_processed_id)
     assert recovered_data == data
     assert service.process_has_been_counted(chunk.message_id())
@@ -114,9 +108,9 @@ def test_working_state_data():
 
     # Se cae el servicio y se recupera
     service = PersistenceService(directory_path)
-    service.recover_from_shutdown()
+    service.recover_last_processing_chunk()
     # Se verifica que los datos sean correctos
-    recovered_data = service.recover_working_state_data()
+    recovered_data = service.recover_working_state()
     assert recovered_data == data
     assert service.process_has_been_counted(new_uuid)
     assert not service.process_has_been_counted(uuid.uuid4())
@@ -142,7 +136,7 @@ def test_single_send_commit():
 
     # Se cae el servicio y se recupera
     service = PersistenceService(directory_path)
-    service.recover_from_shutdown()
+    service.recover_last_processing_chunk()
 
     assert service.send_has_been_acknowledged(client_id, message_id)
     service.clean_persisted_data()
@@ -180,7 +174,7 @@ def test_multiple_send_commits():
 
     # Se cae el servicio y se recupera
     service = PersistenceService(directory_path)
-    service.recover_from_shutdown()
+    service.recover_last_processing_chunk()
 
     assert service.send_has_been_acknowledged(client_id1, message_id1)
     assert service.send_has_been_acknowledged(client_id2, message_id2)
@@ -218,7 +212,7 @@ def test_multiple_send_commits_same_client():
 
     # Se cae el servicio y se recupera
     service = PersistenceService(directory_path)
-    service.recover_from_shutdown()
+    service.recover_last_processing_chunk()
 
     assert service.send_has_been_acknowledged(client_id, message_id1)
     assert service.send_has_been_acknowledged(client_id, message_id2)
@@ -246,7 +240,7 @@ def test_remove_client_data_on_finish():
 
     # Se cae el servicio y se recupera
     service = PersistenceService(directory_path)
-    service.recover_from_shutdown()
+    service.recover_last_processing_chunk()
 
     assert not service.send_has_been_acknowledged(client_id, message_id)
     service.clean_persisted_data()
@@ -257,8 +251,8 @@ def test_clean_persisted_data_without_data():
     service.clean_persisted_data()
     # Se verifica que no haya datos para recuperar
     service = PersistenceService(directory_path)
-    assert service.recover_from_shutdown() is None
-    assert service.recover_working_state_data() is None
+    assert service.recover_last_processing_chunk() is None
+    assert service.recover_working_state() is None
     service.clean_persisted_data()
 
 def test_complete_steps():
@@ -289,24 +283,14 @@ def test_complete_steps():
 
     # Se apaga y recupera el servicio
     service = PersistenceService(directory_path)
-    recovered_chunk = service.recover_from_shutdown()
-    recovered_data = service.recover_working_state_data()
+    recovered_chunk = service.recover_last_processing_chunk()
+    recovered_data = service.recover_working_state()
 
     # Se verifica que los datos sean correctos
-    assert recovered_chunk is not None
-    assert len(recovered_chunk.rows) == 1
-    assert recovered_chunk.rows[0].store_id == 1
-    assert recovered_chunk.rows[0].transaction_id == "tx1"
-    assert recovered_chunk.rows[0].user_id == 4
-    assert recovered_chunk.rows[0].final_amount == 100
-    assert recovered_chunk.rows[0].created_at.date == datetime.date(2023, 5, 1)
-    assert recovered_chunk.rows[0].created_at.time == datetime.time(0, 0)
-    assert str(recovered_chunk.rows[0].year_half_created_at) == "2023-H1"
-
+    assert recovered_chunk is None
     assert recovered_data == data
     assert service.send_has_been_acknowledged(chunk.client_id(), chunk.message_id())
-
-    assert service.process_has_been_counted(recovered_chunk.message_id())
+    assert service.process_has_been_counted(chunk.message_id())
     
     service.clean_persisted_data()
 
@@ -335,5 +319,5 @@ def test_cleaning():
 
     # Se verifica que no haya datos para recuperar
     service = PersistenceService(directory_path)
-    assert service.recover_from_shutdown() is None
-    assert service.recover_working_state_data() is None
+    assert service.recover_last_processing_chunk() is None
+    assert service.recover_working_state() is None
