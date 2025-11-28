@@ -170,6 +170,7 @@ def define_filter(meta: dict, compose: dict, nodo: str, worker_id: int):
         ],
         "volumes": [
             f".{config_path}:{config_path}:ro",
+            "./data/persistence:/data/persistence",
         ],
         "networks": ["testing_net"],
         "depends_on": {
@@ -200,7 +201,9 @@ def define_aggregator(meta: dict, compose: dict, nodo: str, worker_id: int):
             f"WORKER_ID={worker_id}",
             f"CONTAINER_NAME={service_name}",
         ],
-        "volumes": [],
+        "volumes": [
+            "./data/persistence:/data/persistence",
+        ],
         "networks": ["testing_net"],
         "depends_on": {
             "server": {"condition": "service_started"},
@@ -291,7 +294,9 @@ def define_maximizer(meta: dict, compose: dict, nodo: str, worker_id: int, max_s
         "entrypoint": FlowList(["python3", "main.py"]),
         "container_name": service_name,
         "environment": env,
-        "volumes": [],
+        "volumes": [
+            "./data/persistence:/data/persistence",
+        ],
         "networks": ["testing_net"],
         "depends_on": {
             "server": {"condition": "service_started"},
@@ -331,7 +336,9 @@ def define_joiner(meta: dict, compose: dict, nodo: str, worker_id: int):
             f"WORKER_ID={worker_id}",
             f"CONTAINER_NAME={service_name}",
         ],
-        "volumes": [],
+        "volumes": [
+            "./data/persistence:/data/persistence",
+        ],
         "networks": ["testing_net"],
         "depends_on": {
             "server": {"condition": "service_started"},
