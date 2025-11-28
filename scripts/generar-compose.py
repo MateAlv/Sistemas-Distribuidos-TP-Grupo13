@@ -83,7 +83,7 @@ def read_config(path: str):
             key, value = key.strip(), value.strip()
             if key.startswith("#"):
                 continue
-            if key.lower() in ("compose_name", "output_file", "data_path", "logging_level", "output_path"):
+            if key.lower() in ("compose_name", "output_file", "data_path", "logging_level", "output_path", "chaos_enabled", "chaos_interval"):
                 meta[key.lower()] = value
             else:
                 try:
@@ -124,6 +124,7 @@ def define_server(compose: dict, client_amount: int):
         "environment": [
             "PYTHONUNBUFFERED=1",
             f"CLI_CLIENTS={client_amount}",
+            "CONTAINER_NAME=server",
         ],
         "volumes": [
             "./server/config.ini:/config.ini:ro",
@@ -165,6 +166,7 @@ def define_filter(meta: dict, compose: dict, nodo: str, worker_id: int):
             "PYTHONUNBUFFERED=1",
             f"LOGGING_LEVEL={meta['logging_level']}",
             f"WORKER_ID={worker_id}",
+            f"CONTAINER_NAME={service_name}",
         ],
         "volumes": [
             f".{config_path}:{config_path}:ro",
@@ -196,7 +198,9 @@ def define_aggregator(meta: dict, compose: dict, nodo: str, worker_id: int):
             f"LOGGING_LEVEL={meta['logging_level']}",
             f"AGGREGATOR_TYPE={agg_type}",
             f"WORKER_ID={worker_id}",
+            f"CONTAINER_NAME={service_name}",
         ],
+        "volumes": [],
         "networks": ["testing_net"],
         "depends_on": {
             "server": {"condition": "service_started"},
@@ -235,6 +239,7 @@ def define_maximizer(meta: dict, compose: dict, nodo: str, worker_id: int, max_s
         f"LOGGING_LEVEL={meta['logging_level']}",
         f"MAXIMIZER_TYPE={max_type}",
         f"WORKER_ID={worker_id}",
+        f"CONTAINER_NAME={service_name}",
     ]
 
     if role == "PARTIAL":
@@ -286,6 +291,7 @@ def define_maximizer(meta: dict, compose: dict, nodo: str, worker_id: int, max_s
         "entrypoint": FlowList(["python3", "main.py"]),
         "container_name": service_name,
         "environment": env,
+        "volumes": [],
         "networks": ["testing_net"],
         "depends_on": {
             "server": {"condition": "service_started"},
@@ -323,7 +329,9 @@ def define_joiner(meta: dict, compose: dict, nodo: str, worker_id: int):
             f"LOGGING_LEVEL={meta['logging_level']}",
             f"JOINER_TYPE={get_joiner_type(nodo)}",
             f"WORKER_ID={worker_id}",
+            f"CONTAINER_NAME={service_name}",
         ],
+        "volumes": [],
         "networks": ["testing_net"],
         "depends_on": {
             "server": {"condition": "service_started"},
@@ -356,6 +364,51 @@ def define_client(meta: dict, compose: dict, nodo: str, index: int):
             f".{meta['data_path']}:/data:ro",
             f"{output_path.rstrip('/')}/client-{index}:/output",
             "./client/config.ini:/config.ini:ro",
+        ],
+        "networks": ["testing_net"],
+        "depends_on": {
+            "server": {"condition": "service_started"},
+        }
+    }
+
+def define_monitor(meta: dict, compose: dict, count: int):
+    for i in range(1, count + 1):
+        service_name = f"monitor_{i}"
+        compose["services"][service_name] = {
+            "build": {
+                "context": ".",
+                "dockerfile": "monitor/Dockerfile"
+            },
+            "container_name": service_name,
+            "environment": [
+                "PYTHONUNBUFFERED=1",
+                f"CONTAINER_NAME={service_name}",
+                f"LOGGING_LEVEL={meta['logging_level']}",
+            ],
+            "volumes": [
+                "/var/run/docker.sock:/var/run/docker.sock",
+            ],
+            "networks": ["testing_net"],
+            "depends_on": {
+                "rabbitmq": {"condition": "service_healthy"},
+            }
+        }
+
+def define_chaos_monkey(meta: dict, compose: dict):
+    compose["services"]["chaos_monkey"] = {
+        "build": {
+            "context": ".",
+            "dockerfile": "chaos_monkey/Dockerfile"
+        },
+        "container_name": "chaos_monkey",
+        "environment": [
+            "PYTHONUNBUFFERED=1",
+            f"CHAOS_ENABLED={meta.get('chaos_enabled', 'false')}",
+            f"CHAOS_INTERVAL={meta.get('chaos_interval', '30')}",
+            "CONTAINER_NAME=chaos_monkey",
+        ],
+        "volumes": [
+            "/var/run/docker.sock:/var/run/docker.sock",
         ],
         "networks": ["testing_net"],
         "depends_on": {
@@ -463,6 +516,15 @@ def generate_compose(meta: dict, nodes: dict, services: dict = None):
     if client_amount == 0:
         raise ValueError("Debe haber al menos un cliente.")
     define_server(compose, client_amount) 
+    
+    monitor_count = nodes.get("MONITORS", 3) # Default to 3 monitors
+    define_monitor(meta, compose, monitor_count)
+    services["monitor"] = monitor_count
+
+    if meta.get("chaos_enabled", "false").lower() == "true":
+        define_chaos_monkey(meta, compose)
+        services["chaos_monkey"] = 1
+        
     define_network(compose)
     return compose, client_amount
 

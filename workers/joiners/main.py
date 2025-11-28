@@ -60,18 +60,22 @@ def main():
 
     logging.debug(f"action: config | result: success | joiner_type:{joiner_type} | log_level:{logging_level}")
 
+    from utils.heartbeat_sender import HeartbeatSender
+    monitor = HeartbeatSender()
+    monitor.start()
+
     if joiner_type == ITEMS_JOINER:
         logging.info("Iniciando Joiner de Items...")
-        joiner = MenuItemsJoiner(joiner_type)
+        joiner = MenuItemsJoiner(joiner_type, monitor)
     elif joiner_type == STORES_TPV_JOINER:
         logging.info("Iniciando Joiner de Stores TPV...")
-        joiner = StoresTpvJoiner(joiner_type)
+        joiner = StoresTpvJoiner(joiner_type, monitor)
     elif joiner_type == STORES_TOP3_JOINER:
         logging.info("Iniciando Joiner de Stores Top3...")
-        joiner = StoresTop3Joiner(joiner_type)
+        joiner = StoresTop3Joiner(joiner_type, monitor)
     elif joiner_type == USERS_JOINER:
         logging.info("Iniciando Joiner de Users...")
-        joiner = UsersJoiner(joiner_type)
+        joiner = UsersJoiner(joiner_type, monitor)
 
     signal.signal(signal.SIGTERM, joiner.shutdown)
         

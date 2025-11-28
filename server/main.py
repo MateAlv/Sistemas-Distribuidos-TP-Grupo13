@@ -34,27 +34,6 @@ def initialize_config():
 
     return config_params
 
-
-def main():
-    config_params = initialize_config()
-    logging_level = config_params["logging_level"]
-    port = config_params["port"]
-    listen_backlog = config_params["listen_backlog"]
-
-    initialize_log(logging_level)
-
-    # Log config parameters at the beginning of the program to verify the configuration
-    # of the component
-    logging.debug(f"action: config | result: success | port: {port} | "
-                  f"listen_backlog: {listen_backlog} | logging_level: {logging_level}")
-
-    # Initialize server and start server loop
-    server = Server(port, listen_backlog, config_params["max_number_of_chunks_in_batch"])
-
-    signal.signal(signal.SIGTERM, server._begin_shutdown)
-
-    server.run()
-
 def initialize_log(logging_level):
     """
     Python custom logging initialization
@@ -68,6 +47,24 @@ def initialize_log(logging_level):
         datefmt='%Y-%m-%d %H:%M:%S',
     )
 
+def main():
+    config_params = initialize_config()
+    logging_level = config_params["logging_level"]
+    port = config_params["port"]
+    listen_backlog = config_params["listen_backlog"]
+
+    initialize_log(logging_level)
+    
+    # Initialize HeartbeatSender
+    from utils.heartbeat_sender import HeartbeatSender
+    monitor = HeartbeatSender()
+    monitor.start()
+
+    server = Server(port, listen_backlog, config_params["max_number_of_chunks_in_batch"], monitor)
+
+    signal.signal(signal.SIGTERM, server._begin_shutdown)
+
+    server.run()
 
 if __name__ == "__main__":
     main()

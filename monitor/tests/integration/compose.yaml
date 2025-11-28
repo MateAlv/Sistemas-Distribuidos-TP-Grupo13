@@ -1,0 +1,89 @@
+version: '3.8'
+
+services:
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: [ "CMD", "rabbitmqctl", "status" ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - test_net
+
+  monitor_1:
+    build:
+      context: ../../..
+      dockerfile: monitor/Dockerfile
+    container_name: monitor_1
+    environment:
+      - CONTAINER_NAME=monitor_1
+      - PYTHONUNBUFFERED=1
+      - LOGGING_LEVEL=DEBUG
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - test_net
+
+  monitor_2:
+    build:
+      context: ../../..
+      dockerfile: monitor/Dockerfile
+    container_name: monitor_2
+    environment:
+      - CONTAINER_NAME=monitor_2
+      - PYTHONUNBUFFERED=1
+      - LOGGING_LEVEL=DEBUG
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - test_net
+
+  monitor_3:
+    build:
+      context: ../../..
+      dockerfile: monitor/Dockerfile
+    container_name: monitor_3
+    environment:
+      - CONTAINER_NAME=monitor_3
+      - PYTHONUNBUFFERED=1
+      - LOGGING_LEVEL=DEBUG
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - test_net
+
+  worker_1:
+    build:
+      context: ../../..
+      dockerfile: server/Dockerfile
+    container_name: worker_1
+    entrypoint: [ "python3", "tests/mock_worker.py" ]
+    environment:
+      - CONTAINER_NAME=worker_1
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ../../../monitor/tests/integration:/server/tests
+      - ../../../utils:/server/utils
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - test_net
+
+networks:
+  test_net:
+    driver: bridge
