@@ -58,6 +58,17 @@ test:
 	docker compose -f ${DOCKER} up --build
 .PHONY: test
 
+test-small:
+	# Clean up previous run
+	-docker compose -f ${DOCKER} down -v --remove-orphans
+	-docker run --rm -v $(PWD)/data/persistence:/persistence -v $(PWD)/.results:/results alpine sh -c 'rm -rf /persistence/* /results/*'
+	# Generate small dataset
+	python3 scripts/create_small_dataset.py
+	# Run the docker-compose setup
+	python3 $(COMPOSE_SCRIPT) --config=config/config-small.ini
+	docker compose -f ${DOCKER} up --build
+.PHONY: test-small
+
 down:
 	docker compose -f ${DOCKER} stop -t 1
 	docker compose -f ${DOCKER} down
