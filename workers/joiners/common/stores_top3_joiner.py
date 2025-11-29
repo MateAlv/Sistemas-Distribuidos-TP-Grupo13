@@ -21,7 +21,7 @@ class StoresTop3Joiner(Joiner):
     def save_data_join_fields(self, row, client_id):
         # Guarda mapping store_id -> store_name
         if hasattr(row, 'store_id') and hasattr(row, 'store_name'):
-            self.joiner_data[client_id][row.store_id] = row.store_name
+            self.working_state_join.add_join_data(client_id, row.store_id, row.store_name)
             logging.debug(f"action: save_store_data | store_id:{row.store_id} | store_name:{row.store_name}")
 
     def save_data_join(self, chunk) -> bool:
@@ -31,19 +31,15 @@ class StoresTop3Joiner(Joiner):
         client_id = chunk.client_id()
         rows = chunk.rows
 
-        # Inicializar diccionario para este cliente si no existe
-        if client_id not in self.joiner_data:
-            self.joiner_data[client_id] = {}
-
         # Guardar mapping store_id → store_name
         for row in rows:
             if hasattr(row, 'store_id') and hasattr(row, 'store_name'):
-                self.joiner_data[client_id][row.store_id] = row.store_name
+                self.working_state_join.add_join_data(client_id, row.store_id, row.store_name)
                 logging.debug(f"action: save_stores_join_data | type:{self.joiner_type} | store_id:{row.store_id} | store_name:{row.store_name}")
             else:
                 logging.warning(f"action: invalid_stores_join_row | type:{self.joiner_type} | row_type:{type(row)} | missing_fields | has_store_id:{hasattr(row, 'store_id')} | has_store_name:{hasattr(row, 'store_name')}")
 
-        logging.info(f"action: saved_stores_join_data | type:{self.joiner_type} | client_id:{client_id} | stores_loaded:{len(self.joiner_data[client_id])}")
+        logging.info(f"action: saved_stores_join_data | type:{self.joiner_type} | client_id:{client_id} | stores_loaded:{self.working_state_join.get_join_data_count(client_id)}")
         return True
 
     def join_result(self, row: TableProcessRow, client_id):
@@ -55,11 +51,11 @@ class StoresTop3Joiner(Joiner):
                 store_id = row.store_id
                 logging.debug(f"action: looking_up_store | type:{self.joiner_type} | client_id:{client_id} | store_id:{store_id}")
 
-                if client_id not in self.joiner_data:
-                    logging.error(f"action: missing_joiner_data_for_client | type:{self.joiner_type} | client_id:{client_id} | available_clients:{list(self.joiner_data.keys())}")
+                store_name = self.working_state_join.get_join_data(client_id, store_id)
+                if store_name is None:
+                    logging.error(f"action: missing_joiner_data_for_client | type:{self.joiner_type} | client_id:{client_id} | store_id:{store_id}")
                     store_name = f"NO_JOINER_DATA_{store_id}"
                 else:
-                    store_name = self.joiner_data[client_id].get(store_id, f"UNKNOWN_STORE_{store_id}")
                     logging.debug(f"action: store_lookup_result | type:{self.joiner_type} | client_id:{client_id} | store_id:{store_id} | store_name:{store_name}")
 
                 # Crear nueva fila con store_name llenado
@@ -93,7 +89,7 @@ class StoresTop3Joiner(Joiner):
         # Envía PurchasesPerUserStoreRow con store_name llenado al UsersJoiner
         logging.debug(f"action: starting_publish_results | type:{self.joiner_type} | client_id:{client_id}")
 
-        joiner_results = self.joiner_results.get(client_id, [])
+        joiner_results = self.working_state_main.get_results(client_id)
         logging.debug(f"action: got_joiner_results | type:{self.joiner_type} | client_id:{client_id} | results_count:{len(joiner_results)}")
 
         if joiner_results:

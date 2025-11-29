@@ -15,12 +15,16 @@ class MenuItemsJoiner(Joiner):
         self.data_sender = MessageMiddlewareQueue("rabbitmq", "to_merge_data")
 
     def save_data_join_fields(self, row, client_id):
-        self.joiner_data[client_id][row.item_id] = row.name
+        self.working_state_join.add_join_data(client_id, row.item_id, row.name)
 
     def join_result(self, row: TableProcessRow, client_id):
+        item_name = self.working_state_join.get_join_data(client_id, row.item_id)
+        if item_name is None:
+            item_name = "UNKNOWN"
+            
         result = {
             "item_id": row.item_id,
-            "item_name": self.joiner_data[client_id].get(row.item_id, "UNKNOWN"),
+            "item_name": item_name,
             "quantity": row.quantity,
             "subtotal": row.subtotal,
             "month_year": row.month_year_created_at,
@@ -38,7 +42,8 @@ class MenuItemsJoiner(Joiner):
     def publish_results(self, client_id):
         sellings_results = []
         profit_results = []
-        joiner_results = self.joiner_results.get(client_id, [])
+        joiner_results = self.working_state_main.get_results(client_id)
+        
         for row in joiner_results:
             # INCLUIR CLIENT_ID EN LOS RESULTADOS
             row["client_id"] = client_id

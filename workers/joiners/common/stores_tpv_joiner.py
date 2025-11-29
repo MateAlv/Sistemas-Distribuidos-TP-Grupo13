@@ -16,7 +16,7 @@ class StoresTpvJoiner(Joiner):
         self.data_join_receiver = MessageMiddlewareQueue("rabbitmq", "stores_for_tpv_joiner")
 
     def save_data_join_fields(self, row, client_id):
-        self.joiner_data[client_id][row.store_id] = row.store_name
+        self.working_state_join.add_join_data(client_id, row.store_id, row.store_name)
 
     def save_data_join(self, chunk) -> bool:
         """
@@ -25,42 +25,42 @@ class StoresTpvJoiner(Joiner):
         client_id = chunk.client_id()
         rows = chunk.rows
 
-        # Inicializar diccionario para este cliente si no existe
-        if client_id not in self.joiner_data:
-            self.joiner_data[client_id] = {}
-
         # Guardar mapping store_id → store_name
         for row in rows:
             if hasattr(row, 'store_id') and hasattr(row, 'store_name'):
-                self.joiner_data[client_id][row.store_id] = row.store_name
-                logging.debug(f"action: save_stores_join_data | type:{self.joiner_type} | store_id:{row.store_id} | name:{row.store_name}")
+                self.working_state_join.add_join_data(client_id, row.store_id, row.store_name)
+                logging.debug(f"action: save_stores_join_data | type:{self.joiner_type} | store_id:{row.store_id} | store_name:{row.store_name}")
             else:
                 logging.warning(f"action: invalid_stores_join_row | type:{self.joiner_type} | row_type:{type(row)} | missing_fields | has_store_id:{hasattr(row, 'store_id')} | has_store_name:{hasattr(row, 'store_name')}")
 
-        logging.info(f"action: saved_stores_join_data | type:{self.joiner_type} | client_id:{client_id} | stores_loaded:{len(self.joiner_data[client_id])}")
+        logging.info(f"action: saved_stores_join_data | type:{self.joiner_type} | client_id:{client_id} | stores_loaded:{self.working_state_join.get_join_data_count(client_id)}")
         return True
 
     def join_result(self, row: TableProcessRow, client_id):
+        store_name = self.working_state_join.get_join_data(client_id, row.store_id)
+        if store_name is None:
+            store_name = "UNKNOWN"
+            
         # Soporte para TPVProcessRow
         if hasattr(row, 'tpv') and hasattr(row, 'year_half'):
             # TPVProcessRow
             result = {
                 "store_id": row.store_id,
-                "store_name": self.joiner_data[client_id].get(row.store_id, "UNKNOWN"),
+                "store_name": store_name,
                 "tpv": row.tpv,
                 "year_half": row.year_half,
             }
         else:
             result = {
                 "store_id": row.store_id,
-                "store_name": self.joiner_data[client_id].get(row.store_id, "UNKNOWN"),
+                "store_name": store_name,
                 "tpv": row.final_amount,
                 "year_half": row.year_half_created_at,
             }
         return result
 
     def publish_results(self, client_id):
-        joiner_results = self.joiner_results.get(client_id, [])
+        joiner_results = self.working_state_main.get_results(client_id)
         query3_results = []
         for row in joiner_results:
             store_id = row["store_id"]
