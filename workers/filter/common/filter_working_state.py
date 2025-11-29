@@ -61,8 +61,10 @@ class FilterWorkingState(WorkingState):
         """Verifica si se puede enviar el mensaje de fin para un cliente y tipo de tabla"""
         if client_id not in self.end_message_received:
             self.end_message_received[client_id] = {}
-        logging.debug(f"Count: {self.number_of_chunks_received_per_client[client_id][table_type]}/{total_expected} | cli_id:{client_id}")
-        return total_expected == self.number_of_chunks_received_per_client[client_id][table_type] and filter_id == 1
+        
+        total_processed = self.get_total_chunks_received(client_id, table_type) + self.get_total_not_sent_chunks(client_id, table_type)
+        logging.debug(f"Count: {total_processed}/{total_expected} (received:{self.number_of_chunks_received_per_client[client_id][table_type]}, not_sent:{self.get_total_not_sent_chunks(client_id, table_type)}) | cli_id:{client_id}")
+        return total_expected == total_processed and filter_id == 1
 
     def increase_received_chunks(self, client_id, table_type, count):
         """Incrementa el número de chunks recibidos para un cliente y tipo de tabla"""

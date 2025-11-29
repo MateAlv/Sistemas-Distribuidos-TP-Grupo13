@@ -221,12 +221,16 @@ class Filter:
 
         self.working_state.set_total_chunks_expected(client_id, table_type, total_expected)
 
-        stats_msg = FilterStatsMessage(self.id, client_id, table_type, total_expected, total_received, total_not_sent)
+        # Only send stats if not already sent
+        if not self.working_state.stats_are_already_sent(client_id, table_type):
+            stats_msg = FilterStatsMessage(self.id, client_id, table_type, total_expected, total_received, total_not_sent)
 
-        logging.info(
-            f"action: sending_stats_message | type:{self.filter_type} | cli_id:{client_id} | file_type:{table_type.name} | chunks_received:{total_received} | chunks_not_sent:{total_not_sent} | chunks_expected:{total_expected}")
-        logging.info(f"action: sending_stats_message | msg:{stats_msg.encode()}")
-        self.middleware_end_exchange.send(stats_msg.encode())
+            logging.info(
+                f"action: sending_stats_message | type:{self.filter_type} | cli_id:{client_id} | file_type:{table_type.name} | chunks_received:{total_received} | chunks_not_sent:{total_not_sent} | chunks_expected:{total_expected}")
+            logging.info(f"action: sending_stats_message | msg:{stats_msg.encode()}")
+            self.middleware_end_exchange.send(stats_msg.encode())
+            # Mark stats as sent to prevent duplicate messages
+            self.working_state.stats_sent(client_id, table_type)
 
         if self.working_state.can_send_end_message(client_id, table_type, total_expected, self.id):
             self._send_end_message(client_id, table_type, total_expected, total_not_sent)
