@@ -133,7 +133,10 @@ class JoinerJoinWorkingState(WorkingState):
             self.joiner_data[client_id] = {}
         self.joiner_data[client_id][item_id] = item_name
 
-    def get_join_data(self, client_id):
+    def get_join_data(self, client_id, item_id):
+        return self.joiner_data.get(client_id, {}).get(item_id)
+    
+    def get_all_join_data(self, client_id):
         return self.joiner_data.get(client_id, {})
 
     def get_join_data_count(self, client_id):

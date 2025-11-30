@@ -72,9 +72,9 @@ class Filter:
             # Se actualiza el working state según si el chunk fue enviado o no
             if self.persistence_service.process_has_been_counted(last_processing_chunk):
                 if chunk_was_sent:
-                    self.working_state.increase_received_chunks(client_id, table_type, 1)
+                    self.working_state.increase_received_chunks(client_id, table_type, self.id, 1)
                 else:
-                    self.working_state.increase_not_sent_chunks(client_id, table_type, 1)
+                    self.working_state.increase_not_sent_chunks(client_id, table_type, self.id, 1)
             # Se commitea el working state
             self.persistence_service.commit_working_state(self.working_state.to_bytes(), message_id)
 
@@ -128,15 +128,16 @@ class Filter:
                             continue
                         logging.debug(f"action: stats_received | type:{self.filter_type} | filter_id:{stats.filter_id} | cli_id:{stats.client_id} | file_type:{stats.table_type} | chunks_received:{stats.chunks_received} | chunks_not_sent:{stats.chunks_not_sent}")
 
-                        total_received = self.working_state.get_total_chunks_received(stats.client_id, stats.table_type)
-                        total_not_sent = self.working_state.get_total_not_sent_chunks(stats.client_id, stats.table_type)
+                        # Get OWN stats to send (not the sum of all filters)
+                        own_received = self.working_state.get_own_chunks_received(stats.client_id, stats.table_type, self.id)
+                        own_not_sent = self.working_state.get_own_chunks_not_sent(stats.client_id, stats.table_type, self.id)
 
-                        # Si no se han enviado las estadísticas, se envían al resto de filtros
-                        if not self.working_state.stats_are_already_sent(stats.client_id, stats.table_type):
-                            stats_msg = FilterStatsMessage(self.id, stats.client_id, stats.table_type, stats.total_expected, total_received, total_not_sent)
+                        # Si no se han enviado las estadísticas o si los valores cambiaron, enviarlas
+                        if self.working_state.should_send_stats(stats.client_id, stats.table_type, own_received, own_not_sent):
+                            stats_msg = FilterStatsMessage(self.id, stats.client_id, stats.table_type, stats.total_expected, own_received, own_not_sent)
                             self.middleware_end_exchange.send(stats_msg.encode())
-                            # Se registra que ya se enviaron las estadísticas
-                            self.working_state.stats_sent(stats.client_id, stats.table_type)
+                            # Se registra que ya se enviaron las estadísticas con estos valores
+                            self.working_state.mark_stats_sent(stats.client_id, stats.table_type, own_received, own_not_sent)
 
                         self.working_state.end_received(stats.client_id, stats.table_type)
 
@@ -178,9 +179,9 @@ class Filter:
         chunk_was_sent = self.process_chunk(chunk)
 
         if chunk_was_sent:
-            self.working_state.increase_received_chunks(client_id, table_type, 1)
+            self.working_state.increase_received_chunks(client_id, table_type, self.id, 1)
         else:
-            self.working_state.increase_not_sent_chunks(client_id, table_type, 1)
+            self.working_state.increase_not_sent_chunks(client_id, table_type, self.id, 1)
 
         # Se commitea el working state
         self.working_state.processed_ids.add(chunk.message_id())
@@ -191,15 +192,22 @@ class Filter:
             total_received = self.working_state.get_total_chunks_received(client_id, table_type)
             total_not_sent = self.working_state.get_total_not_sent_chunks(client_id, table_type)
 
-            if not self.working_state.stats_are_already_sent(client_id, table_type):
-                stats_msg = FilterStatsMessage(self.id, client_id, table_type, total_expected, total_received,
-                                               total_not_sent)
+            if self.working_state.should_send_stats(client_id, table_type, own_received, own_not_sent):
+                # Send OWN stats (not the sum of all filters)
+                own_received = self.working_state.get_own_chunks_received(client_id, table_type, self.id)
+                own_not_sent = self.working_state.get_own_chunks_not_sent(client_id, table_type, self.id)
+                
+                stats_msg = FilterStatsMessage(self.id, client_id, table_type, total_expected, own_received, own_not_sent)
                 self.middleware_end_exchange.send(stats_msg.encode())
-                self.working_state.stats_sent(client_id, table_type)
+                self.working_state.mark_stats_sent(client_id, table_type, own_received, own_not_sent)
             """
             else:
                 stats_msg = FilterStatsMessage(self.id, client_id, table_type, total_expected, 1, 0 if chunk_was_sent else 1)
             """
+            # Use TOTAL to check if all filters are done
+            total_received = self.working_state.get_total_chunks_received(client_id, table_type)
+            total_not_sent = self.working_state.get_total_not_sent_chunks(client_id, table_type)
+            
             if self.working_state.can_send_end_message(client_id, table_type, total_expected, self.id):
                 self._send_end_message(client_id, table_type, total_expected, total_not_sent)
 
@@ -208,30 +216,41 @@ class Filter:
         client_id = end_message.client_id()
         table_type = end_message.table_type()
         total_expected = end_message.total_chunks()
-        total_received = self.working_state.get_total_chunks_received(client_id, table_type)
-        total_not_sent = self.working_state.get_total_not_sent_chunks(client_id, table_type)
+        
+        # For amount filter, ensure the output queue exists even if no chunks were processed
+        if self.filter_type == "amount" and f"to_merge_data_{client_id}" not in self.middleware_queue_sender:
+            self.middleware_queue_sender[f"to_merge_data_{client_id}"] = MessageMiddlewareQueue("rabbitmq", f"to_merge_data_{client_id}")
+            logging.info(f"action: created_merge_queue_on_end | cli_id:{client_id} | queue:to_merge_data_{client_id}")
+        
+        # Get own stats for this filter
+        own_received = self.working_state.get_own_chunks_received(client_id, table_type, self.id)
+        own_not_sent = self.working_state.get_own_chunks_not_sent(client_id, table_type, self.id)
 
         self.working_state.end_received(client_id, table_type)
         logging.info(
             "action: end_message_received | type:%s | cli_id:%s | file_type:%s | chunks_received:%d | chunks_not_sent:%d | chunks_expected:%d",
             self.filter_type, client_id, table_type,
-            total_received,
-            total_not_sent,
+            own_received,
+            own_not_sent,
             total_expected)
 
         self.working_state.set_total_chunks_expected(client_id, table_type, total_expected)
 
-        # Only send stats if not already sent
-        if not self.working_state.stats_are_already_sent(client_id, table_type):
-            stats_msg = FilterStatsMessage(self.id, client_id, table_type, total_expected, total_received, total_not_sent)
+        # Only send stats if not already sent or if values changed - send OWN stats, not total
+        if self.working_state.should_send_stats(client_id, table_type, own_received, own_not_sent):
+            stats_msg = FilterStatsMessage(self.id, client_id, table_type, total_expected, own_received, own_not_sent)
 
             logging.info(
-                f"action: sending_stats_message | type:{self.filter_type} | cli_id:{client_id} | file_type:{table_type.name} | chunks_received:{total_received} | chunks_not_sent:{total_not_sent} | chunks_expected:{total_expected}")
+                f"action: sending_stats_message | type:{self.filter_type} | cli_id:{client_id} | file_type:{table_type.name} | chunks_received:{own_received} | chunks_not_sent:{own_not_sent} | chunks_expected:{total_expected}")
             logging.info(f"action: sending_stats_message | msg:{stats_msg.encode()}")
             self.middleware_end_exchange.send(stats_msg.encode())
-            # Mark stats as sent to prevent duplicate messages
-            self.working_state.stats_sent(client_id, table_type)
+            # Mark stats as sent with current values
+            self.working_state.mark_stats_sent(client_id, table_type, own_received, own_not_sent)
 
+        # Use TOTAL to check if all filters are done
+        total_received = self.working_state.get_total_chunks_received(client_id, table_type)
+        total_not_sent = self.working_state.get_total_not_sent_chunks(client_id, table_type)
+        
         if self.working_state.can_send_end_message(client_id, table_type, total_expected, self.id):
             self._send_end_message(client_id, table_type, total_expected, total_not_sent)
         else:

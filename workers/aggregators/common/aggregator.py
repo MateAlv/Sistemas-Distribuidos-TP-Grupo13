@@ -700,7 +700,7 @@ class Aggregator:
                 self.accumulate_tpv(client_id, SimpleNamespace(rows=rows))
 
     def publish_final_results(self, client_id, table_type):
-        if client_id not in self.global_accumulator:
+        if client_id not in self.working_state.global_accumulator:
             logging.warning(
                 f"action: publish_final_results | client_id:{client_id} | warning: no_accumulated_data"
             )
@@ -722,7 +722,7 @@ class Aggregator:
             )
 
     def _publish_final_products(self, client_id):
-        data = self.global_accumulator[client_id].get("products")
+        data = self.working_state.global_accumulator[client_id].get("products")
         if not data:
             return
 
@@ -758,7 +758,7 @@ class Aggregator:
             )
 
     def _publish_final_purchases(self, client_id):
-        data = self.global_accumulator[client_id].get("purchases")
+        data = self.working_state.global_accumulator[client_id].get("purchases")
         if not data:
             return
 
@@ -802,7 +802,7 @@ class Aggregator:
             )
 
     def _publish_final_tpv(self, client_id):
-        data = self.global_accumulator[client_id].get("tpv")
+        data = self.working_state.global_accumulator[client_id].get("tpv")
         if not data:
             return
 

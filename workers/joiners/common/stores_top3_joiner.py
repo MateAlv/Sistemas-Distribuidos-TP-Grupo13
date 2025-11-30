@@ -3,7 +3,7 @@ import logging
 from middleware.middleware_interface import MessageMiddlewareQueue
 from utils.eof_protocol.end_messages import MessageEnd
 from utils.file_utils.table_type import TableType
-from utils.processing.process_chunk import ProcessChunk
+from utils.processing.process_chunk import ProcessChunk, ProcessChunkHeader
 from utils.processing.process_table import TableProcessRow, PurchasesPerUserStoreRow
 from .joiner import Joiner
 
@@ -39,7 +39,7 @@ class StoresTop3Joiner(Joiner):
             else:
                 logging.warning(f"action: invalid_stores_join_row | type:{self.joiner_type} | row_type:{type(row)} | missing_fields | has_store_id:{hasattr(row, 'store_id')} | has_store_name:{hasattr(row, 'store_name')}")
 
-        logging.info(f"action: saved_stores_join_data | type:{self.joiner_type} | client_id:{client_id} | stores_loaded:{self.working_state_join.get_join_data_count(client_id)}")
+        logging.info(f"action: saved_stores_join_data | type:{self.joiner_type} | client_id:{client_id} | stores_loaded:{self.working_state_join.get_all_join_data(client_id)}")
         return True
 
     def join_result(self, row: TableProcessRow, client_id):
@@ -95,7 +95,6 @@ class StoresTop3Joiner(Joiner):
         if joiner_results:
             try:
                 # Crear chunk con las filas que tienen store_name llenado
-                from utils.processing.process_chunk import ProcessChunkHeader
                 logging.debug(f"action: creating_chunk_header | type:{self.joiner_type} | client_id:{client_id}")
                 header = ProcessChunkHeader(client_id, TableType.PURCHASES_PER_USER_STORE)
 

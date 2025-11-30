@@ -65,10 +65,16 @@ class AggregatorWorkingState(WorkingState):
         return self.chunks_to_receive.get(client_id, {}).get(table_type)
 
     def update_chunks_received(self, client_id, table_type, aggregator_id, value):
-        self._set_aggregator_value(self.chunks_received_per_client, client_id, table_type, aggregator_id, value)
+        # Get current value and only update if the new value is different (from another aggregator)
+        current = self._get_aggregator_value(self.chunks_received_per_client, client_id, table_type, aggregator_id)
+        if value != current:
+            self._set_aggregator_value(self.chunks_received_per_client, client_id, table_type, aggregator_id, value)
 
     def update_chunks_processed(self, client_id, table_type, aggregator_id, value):
-        self._set_aggregator_value(self.chunks_processed_per_client, client_id, table_type, aggregator_id, value)
+        # Get current value and only update if the new value is different (from another aggregator)
+        current = self._get_aggregator_value(self.chunks_processed_per_client, client_id, table_type, aggregator_id)
+        if value != current:
+            self._set_aggregator_value(self.chunks_processed_per_client, client_id, table_type, aggregator_id, value)
 
     def increment_chunks_received(self, client_id, table_type, aggregator_id, delta=1):
         self._increment_aggregator_value(self.chunks_received_per_client, client_id, table_type, aggregator_id, delta)

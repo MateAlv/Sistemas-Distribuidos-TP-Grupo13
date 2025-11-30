@@ -18,6 +18,7 @@ import uuid
 import pickle
 from utils.tolerance.persistence_service import PersistenceService
 from .maximizer_working_state import MaximizerWorkingState
+from utils.common.processing_types import MonthYear
 
 from workers.common.sharding import queue_name_for, slugify_shard_id
 
@@ -403,7 +404,7 @@ class Maximizer:
                 # Extraer año/mes de created_at
                 if hasattr(row.created_at, 'date'):
                     date_obj = row.created_at.date
-                    month_year = type('MonthYear', (), {'year': date_obj.year, 'month': date_obj.month})()
+                    month_year = MonthYear(date_obj.month, date_obj.year)  # Note: (month, year) order
                 else:
                     logging.warning(f"action: invalid_date | item_id:{row.item_id} | created_at:{row.created_at}")
                     continue
