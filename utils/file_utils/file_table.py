@@ -83,7 +83,10 @@ class TransactionsFileRow(TableFileRow):
 
     @staticmethod
     def deserialize(data: bytes):
-        line = data.split(b"\n", 1)[0].decode("utf-8")
+        line = data.split(b"\n", 1)[0].decode("utf-8").rstrip("\r")
+        consumed = len(line.encode("utf-8")) + 1
+        if not line:
+            return None, consumed
         parts = line.split(CSV_DELIMITER)
 
         transaction_id = parts[0] if len(parts[0]) > 0 else None
@@ -149,7 +152,10 @@ class TransactionsItemsFileRow(TableFileRow):
 
     @staticmethod
     def deserialize(data: bytes):
-        line = data.split(b"\n", 1)[0].decode("utf-8")
+        line = data.split(b"\n", 1)[0].decode("utf-8").rstrip("\r")
+        consumed = len(line.encode("utf-8")) + 1
+        if not line:
+            return None, consumed
         parts = line.split(CSV_DELIMITER)
         
         trans_id = parts[0] if len(parts[0]) > 0 else None
@@ -212,7 +218,10 @@ class MenuItemsFileRow(TableFileRow):
 
     @staticmethod
     def deserialize(data: bytes):
-        line = data.split(b"\n", 1)[0].decode("utf-8")
+        line = data.split(b"\n", 1)[0].decode("utf-8").rstrip("\r")
+        consumed = len(line.encode("utf-8")) + 1
+        if not line:
+            return None, consumed
         parts = line.split(CSV_DELIMITER)
         
         item_id = int(float(parts[0])) if len(parts[0]) > 0 else None
@@ -281,7 +290,10 @@ class StoresFileRow(TableFileRow):
 
     @staticmethod
     def deserialize(data: bytes):
-        line = data.split(b"\n", 1)[0].decode("utf-8")
+        line = data.split(b"\n", 1)[0].decode("utf-8").rstrip("\r")
+        consumed = len(line.encode("utf-8")) + 1
+        if not line:
+            return None, consumed
         parts = line.split(CSV_DELIMITER)
 
         store_id = int(float(parts[0])) if len(parts[0]) > 0 else None
@@ -340,7 +352,10 @@ class UsersFileRow(TableFileRow):
 
     @staticmethod
     def deserialize(data: bytes):
-        line = data.split(b"\n", 1)[0].decode("utf-8")
+        line = data.split(b"\n", 1)[0].decode("utf-8").rstrip("\r")
+        consumed = len(line.encode("utf-8")) + 1
+        if not line:
+            return None, consumed
         parts = line.split(CSV_DELIMITER)
 
         user_id = int(float(parts[0])) if len(parts[0]) > 0 else None

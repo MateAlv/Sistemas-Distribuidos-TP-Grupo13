@@ -366,6 +366,7 @@ def define_client(meta: dict, compose: dict, nodo: str, index: int):
             "CLI_OUTPUT_DIR=/output",
             "DATA_MODE=tree",
             "SERVER_ADDRESS=server:12345",
+            "PYTHONUNBUFFERED=1",
         ],
         "volumes": [
             f".{meta['data_path']}:/data:ro",

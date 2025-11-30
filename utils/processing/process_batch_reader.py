@@ -43,7 +43,8 @@ class ProcessBatchReader:
 
         while start_offset < len(file_rows_serialized):
             file_row, consumed = file_cls.deserialize(file_rows_serialized[start_offset:])
-            process_rows.append(process_cls.from_file_row(file_row))
+            if file_row is not None:
+                process_rows.append(process_cls.from_file_row(file_row))
             start_offset += consumed
 
         header = ProcessChunkHeader(client_id, table_type)

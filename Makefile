@@ -66,7 +66,7 @@ test-small:
 	python3 scripts/create_small_dataset.py
 	# Run the docker-compose setup
 	python3 $(COMPOSE_SCRIPT) --config=config/config-small.ini
-	docker compose -f ${DOCKER} up --build
+	timeout --foreground 5m docker compose -f ${DOCKER} up --build --abort-on-container-exit | tee logs.txt
 .PHONY: test-small
 
 down:
