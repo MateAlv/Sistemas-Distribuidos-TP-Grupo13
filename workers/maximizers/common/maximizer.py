@@ -186,8 +186,10 @@ class Maximizer:
                     logging.error(f"action: error_processing_message | type:{self.maximizer_type} | range:{self.maximizer_range} | error:{e}")
 
     def _handle_end_message(self, raw_message: bytes):
+        logging.info(f"DEBUG: _handle_end_message called with {raw_message}")
         try:
             end_message = MessageEnd.decode(raw_message)
+            logging.info(f"DEBUG: decoded end_message: client_id={end_message.client_id()}, table_type={end_message.table_type()}")
         except Exception as e:
             logging.error(f"action: error_decoding_end_message | error:{e}")
             return

@@ -89,6 +89,8 @@ class Aggregator:
         self.persistence = PersistenceService(f"/data/persistence/aggregator_{self.aggregator_type}_{self.aggregator_id}")
         self._recover_state()
 
+
+
         if self.aggregator_type == "PRODUCTS":
             self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", "to_agg_1+2")
             try:
@@ -320,14 +322,14 @@ class Aggregator:
             logging.error(f"action: error_decoding_stats_message | error:{e}")
             return
 
-        logging.info(
+        logging.debug(
             f"action: stats_received | type:{self.aggregator_type} | agg_id:{stats.aggregator_id} "
             f"| cli_id:{stats.client_id} | file_type:{stats.table_type} "
             f"| chunks_received:{stats.chunks_received} | chunks_processed:{stats.chunks_processed}"
         )
 
         if self.working_state.is_processed(stats.message_id):
-            logging.info(f"action: duplicate_stats_message_ignored | message_id:{stats.message_id}")
+            logging.debug(f"action: duplicate_stats_message_ignored | message_id:{stats.message_id}")
             return
 
         # Check if this update actually changes anything for this aggregator
@@ -335,8 +337,8 @@ class Aggregator:
         current_processed = self.working_state.get_processed_for_aggregator(stats.client_id, stats.table_type, stats.aggregator_id)
         
         if current_received == stats.chunks_received and current_processed == stats.chunks_processed:
-            # No change, skip update and propagation
-            return
+             # No change, skip update and propagation
+             return
 
         self.working_state.update_chunks_received(
             stats.client_id,
@@ -357,7 +359,8 @@ class Aggregator:
         self._save_state(stats.message_id)
 
         # Enviar mis propios stats si ya procesé algo
-        self._maybe_send_stats(stats.client_id, stats.table_type)
+        # Force send because we received an update from peer
+        self._maybe_send_stats(stats.client_id, stats.table_type, force=True)
 
         if self._can_send_end_message(stats.client_id, stats.table_type):
             self._send_end_message(stats.client_id, stats.table_type)
@@ -383,7 +386,7 @@ class Aggregator:
 
         self._save_state(uuid.uuid4())
 
-        self._maybe_send_stats(client_id, table_type)
+        self._maybe_send_stats(client_id, table_type, force=True)
 
         if self._can_send_end_message(client_id, table_type):
             self._send_end_message(client_id, table_type)
@@ -486,18 +489,14 @@ class Aggregator:
 
     # Helper methods removed as they are now in WorkingState
 
-    def _maybe_send_stats(self, client_id, table_type):
+    def _maybe_send_stats(self, client_id, table_type, force=False):
         total_expected = self.working_state.get_chunks_to_receive(client_id, table_type)
         if total_expected is None:
             return
 
         received = self.working_state.get_received_for_aggregator(client_id, table_type, self.aggregator_id)
         processed = self.working_state.get_processed_for_aggregator(client_id, table_type, self.aggregator_id)
-
-        # Check if we already sent these exact stats
-        if self.working_state.was_stats_sent(client_id, table_type, (received, processed)):
-            return
-
+    
         stats_msg = AggregatorStatsMessage(
             self.aggregator_id,
             client_id,
@@ -513,6 +512,8 @@ class Aggregator:
         self.middleware_stats_exchange.send(stats_msg.encode())
         self.working_state.mark_stats_sent(client_id, table_type, (received, processed))
 
+
+
     def _can_send_end_message(self, client_id, table_type):
         total_expected = self.working_state.get_chunks_to_receive(client_id, table_type)
         if total_expected is None:
@@ -520,10 +521,12 @@ class Aggregator:
 
         total_received = self.working_state.get_total_received(client_id, table_type)
         if total_received < total_expected:
-            logging.debug(
-                f"action: can_send_end_waiting_more_chunks | type:{self.aggregator_type} | client_id:{client_id} "
-                f"| table_type:{table_type} | expected:{total_expected} | received:{total_received}"
-            )
+            # Throttle this log
+            if total_received % 100 == 0:
+                logging.debug(
+                    f"action: can_send_end_waiting_more_chunks | type:{self.aggregator_type} | client_id:{client_id} "
+                    f"| table_type:{table_type} | expected:{total_expected} | received:{total_received}"
+                )
             return False
 
         total_processed = self.working_state.get_total_processed(client_id, table_type)
@@ -581,8 +584,6 @@ class Aggregator:
         logging.info(
             f"action: cleanup_state | client_id:{client_id} | table_type:{table_type} | aggregator_id:{self.aggregator_id}"
         )
-
-    # _ensure_global_entry removed as it is now in WorkingState
 
     def _check_crash_point(self, point_name):
         if os.environ.get("CRASH_POINT") == point_name:

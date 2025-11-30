@@ -138,7 +138,7 @@ class Server:
         Mantiene el socket abierto y escucha resultados después del finish.
         """
         peer = f"{addr[0]}:{addr[1]}"
-        client_id = self.generate_id()
+        client_id = None
         number_of_chunks_per_file = {}
         middleware_queue_senders = {}
         middleware_queue_senders["to_filter_1"] = MessageMiddlewareQueue("rabbitmq", "to_filter_1")
@@ -155,7 +155,7 @@ class Server:
             logging.debug("action: client_connected | peer:%s", peer)
 
             # -------- Handshake obligatorio --------
-            self._do_handshake(sock)
+            client_id = self._do_handshake(sock)
 
             # -------- Recepción de archivos --------
             files_received = 0
@@ -246,24 +246,31 @@ class Server:
     # Handshake / Lectura / Escritura
     # ---------------------------------------------------------------------
 
-    def _do_handshake(self, sock: socket.socket) -> None:
+    def _do_handshake(self, sock: socket.socket) -> int:
         """
-        Espera un solo byte 'H'. Responde 'O'.
+        Espera 'H' + 1 byte ID. Responde 'O'.
+        Retorna el client_id recibido.
         """
         sock.settimeout(3.0)
         logging.debug("action: handshake_wait | timeout:3s")
         header = self._recv_header_id(sock)
         logging.debug("action: handshake_recv | byte:%r", header)
-        sock.settimeout(DEFAULT_IO_TIMEOUT)
-
+        
         if not header:
             raise RuntimeError("handshake_empty")
 
         if header != H_ID_HANDSHAKE:
             raise RuntimeError(f"handshake_invalid: {header!r}")
 
-        logging.debug("action: handshake_ok | byte:%r", header)
+        # Receive Client ID
+        id_byte = recv_exact(sock, 1)
+        client_id = int.from_bytes(id_byte, byteorder='big')
+
+        logging.debug("action: handshake_ok | byte:%r | client_id:%s", header, client_id)
         sendall(sock, self.header_id_to_bytes(H_ID_OK))
+        
+        sock.settimeout(DEFAULT_IO_TIMEOUT)
+        return client_id
 
     def _handle_file_chunks(self, sock: socket.socket, peer: str, middleware_queue_senders: dict, number_of_chunks_per_file: dict, client_id: int) :
         """
