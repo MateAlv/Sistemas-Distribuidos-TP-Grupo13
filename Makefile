@@ -55,7 +55,13 @@ test:
 	# Run the docker-compose setup
 	make clean-results
 	python3  $(COMPOSE_SCRIPT) --config=config/config-test.ini
-	docker compose -f ${DOCKER} up --build
+	@echo "Running tests... Logs redirected to logs.txt"
+	@if docker compose -f ${DOCKER} up --build > logs.txt 2>&1; then \
+		echo "Test passed"; \
+	else \
+		echo "Test failed. Check logs.txt"; \
+		exit 1; \
+	fi
 .PHONY: test
 
 test-small:
@@ -80,15 +86,16 @@ rebuild:
 	docker compose -f ${DOCKER} build --no-cache
 	docker compose -f ${DOCKER} up -d
 
+	docker compose -f ${DOCKER} up -d
+.PHONY: rebuild
+
 logs:
 	> logs.txt
 	docker compose -f ${DOCKER} logs -f > logs.txt 
 .PHONY: docker-compose-logs
 
 clean-results:
-	rm -rf .results/client-1/*
-	rm -rf .results/client-2/*
-	rm -rf .results/client-3/*
+	find .results -name "*.csv" -type f -delete
 .PHONY: clean-results
 
 hard-down:

@@ -330,6 +330,14 @@ class Aggregator:
             logging.info(f"action: duplicate_stats_message_ignored | message_id:{stats.message_id}")
             return
 
+        # Check if this update actually changes anything for this aggregator
+        current_received = self.working_state.get_received_for_aggregator(stats.client_id, stats.table_type, stats.aggregator_id)
+        current_processed = self.working_state.get_processed_for_aggregator(stats.client_id, stats.table_type, stats.aggregator_id)
+        
+        if current_received == stats.chunks_received and current_processed == stats.chunks_processed:
+            # No change, skip update and propagation
+            return
+
         self.working_state.update_chunks_received(
             stats.client_id,
             stats.table_type,
@@ -486,6 +494,7 @@ class Aggregator:
         received = self.working_state.get_received_for_aggregator(client_id, table_type, self.aggregator_id)
         processed = self.working_state.get_processed_for_aggregator(client_id, table_type, self.aggregator_id)
 
+        # Check if we already sent these exact stats
         if self.working_state.was_stats_sent(client_id, table_type, (received, processed)):
             return
 
