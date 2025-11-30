@@ -332,12 +332,10 @@ class Aggregator:
             logging.debug(f"action: duplicate_stats_message_ignored | message_id:{stats.message_id}")
             return
 
-        # Check if this update actually changes anything for this aggregator
         current_received = self.working_state.get_received_for_aggregator(stats.client_id, stats.table_type, stats.aggregator_id)
         current_processed = self.working_state.get_processed_for_aggregator(stats.client_id, stats.table_type, stats.aggregator_id)
         
         if current_received == stats.chunks_received and current_processed == stats.chunks_processed:
-             # No change, skip update and propagation
              return
 
         self.working_state.update_chunks_received(
@@ -521,7 +519,6 @@ class Aggregator:
 
         total_received = self.working_state.get_total_received(client_id, table_type)
         if total_received < total_expected:
-            # Throttle this log
             if total_received % 100 == 0:
                 logging.debug(
                     f"action: can_send_end_waiting_more_chunks | type:{self.aggregator_type} | client_id:{client_id} "
