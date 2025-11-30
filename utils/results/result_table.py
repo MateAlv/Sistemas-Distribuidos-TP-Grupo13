@@ -165,10 +165,12 @@ class Query4ResultRow(TableResultRow):
         self.purchase_quantity = purchase_quantity
 
     def serialize(self) -> bytes:
-        return f"{self.store_id},{self.store_name},{self.user_id},{self.birthdate.isoformat()},{self.purchase_quantity}\n".encode("utf-8")
+        birthdate_str = self.birthdate.isoformat() if self.birthdate is not None else ""
+        return f"{self.store_id},{self.store_name},{self.user_id},{birthdate_str},{self.purchase_quantity}\n".encode("utf-8")
 
     def to_csv(self) -> str:
-        return f"{self.store_name},{self.birthdate.isoformat()}\n"
+        birthdate_str = self.birthdate.isoformat() if self.birthdate is not None else ""
+        return f"{self.store_name},{birthdate_str}\n"
 
     @staticmethod
     def deserialize(data: bytes):

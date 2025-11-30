@@ -61,7 +61,7 @@ class UsersJoiner(Joiner):
 
             if birthdate is None:
                 logging.warning(f"action: user_not_found | user_id:{user_id} | using_placeholder")
-                birthdate = "UNKNOWN"
+                birthdate = None
 
             # Crear resultado final para Query 4
             result = Query4ResultRow(
