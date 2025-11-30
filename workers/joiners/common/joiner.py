@@ -9,6 +9,7 @@ import sys
 import os
 import pickle
 import uuid
+from collections import deque
 from utils.tolerance.persistence_service import PersistenceService
 
 TIMEOUT = 3
@@ -99,7 +100,7 @@ class Joiner:
 
     def handle_join_data(self):
         """Maneja datos de join (tabla de productos del server)"""
-        results = []
+        results = deque()
         
         def callback(msg): results.append(msg)
         def stop():
@@ -113,21 +114,22 @@ class Joiner:
             except (OSError, RuntimeError, MessageMiddlewareMessageError) as e:
                 logging.error(f"Error en consumo: {e}")
 
-            for data in results:
+            while results:
+                data = results.popleft()
                 try:
                     if data.startswith(b"END;"):
                         end_message = MessageEnd.decode(data)
                         logging.info(f"action: received_server_end_message_for_join_data | type:{self.joiner_type} | client_id:{end_message.client_id()} | table_type:{end_message.table_type()} | count:{end_message.total_chunks()}")
                         with self.lock:
                             self.working_state_main.set_ready_to_join(end_message.client_id)
+                            # Si ya tenemos END de datos principales, intentar procesar ahora
+                            self._process_client_if_ready(end_message.client_id)
                     else:
                         self._handle_join_chunk_bytes(data)
                 except ValueError as e:
                     logging.error(f"action: error_parsing_join_data | type:{self.joiner_type} | error:{e} | error_type:{type(e).__name__} | data_preview:{data[:100] if len(data) > 100 else data}")
                 except Exception as e:
                     logging.error(f"action: unexpected_error_join_data | type:{self.joiner_type} | error:{e} | error_type:{type(e).__name__} | error_traceback:", exc_info=True)
-
-                results.remove(data)
 
     def _handle_join_chunk_bytes(self, data: bytes):
         chunk = ProcessBatchReader.from_bytes(data)
@@ -147,7 +149,7 @@ class Joiner:
                 
     def handle_data(self):
         """Maneja datos del maximizer y END messages del exchange"""
-        results = []
+        results = deque()
         end_results = []
         
         def callback(msg): results.append(msg)
@@ -164,7 +166,8 @@ class Joiner:
                 logging.error(f"Error en consumo: {e}")
 
             # Procesar datos del maximizer
-            for data in results:
+            while results:
+                data = results.popleft()
 
                 try:
                     if data.startswith(b"END;"):
@@ -188,29 +191,7 @@ class Joiner:
                                 if finished_count >= self.expected_inputs:
                                     logging.info(f"action: all_inputs_finished | type:{self.joiner_type} | client_id:{client_id}")
                                     self.working_state_main.mark_end_message_received(client_id)
-                                    
-                                    # Solo procesar si está listo para join
-                                    if self.is_ready_to_join_for_client(client_id):
-                                        logging.info(f"action: ready_to_join_after_end | type:{self.joiner_type} | client_id:{client_id}")
-                                        try:
-                                            logging.debug(f"action: starting_apply_for_client | type:{self.joiner_type} | client_id:{client_id}")
-                                            self.apply_for_client(client_id)
-                                            logging.debug(f"action: completed_apply_for_client | type:{self.joiner_type} | client_id:{client_id}")
-                                            
-                                            logging.debug(f"action: starting_publish_results | type:{self.joiner_type} | client_id:{client_id}")
-                                            self.publish_results(client_id)
-                                            logging.debug(f"action: completed_publish_results | type:{self.joiner_type} | client_id:{client_id}")
-                                            
-                                            logging.debug(f"action: starting_clean_client_data | type:{self.joiner_type} | client_id:{client_id}")
-                                            self.clean_client_data(client_id)
-                                            logging.debug(f"action: completed_clean_client_data | type:{self.joiner_type} | client_id:{client_id}")
-                                            
-                                            self.working_state_main.mark_client_completed(client_id)
-                                            self.working_state_main.add_pending_end_message(client_id)
-                                            logging.debug(f"action: processing_complete | type:{self.joiner_type} | client_id:{client_id}")
-                                        except Exception as inner_e:
-                                            logging.error(f"action: error_in_join_processing | type:{self.joiner_type} | client_id:{client_id} | error:{inner_e} | error_type:{type(inner_e).__name__}")
-                                            raise inner_e
+                                    self._process_client_if_ready(client_id)
                                 else:
                                     logging.info(f"action: waiting_for_more_senders | type:{self.joiner_type} | client_id:{client_id} | finished:{finished_count} | expected:{self.expected_inputs}")
 
@@ -235,8 +216,6 @@ class Joiner:
                     logging.error(f"action: error_parsing_data | type:{self.joiner_type} | error:{e} | error_type:{type(e).__name__} | data_preview:{data[:100] if len(data) > 100 else data}")
                 except Exception as e:
                     logging.error(f"action: unexpected_error | type:{self.joiner_type} | error:{e} | error_type:{type(e).__name__} | error_traceback:", exc_info=True)
- 
-                results.remove(data)
 
     def _handle_data_chunk(self, data: bytes):
         self._check_crash_point("CRASH_BEFORE_PROCESS")
@@ -255,34 +234,9 @@ class Joiner:
             self.save_data(chunk)
             # Check if we're ready to join for this specific client
             client_id = chunk.client_id()
-            if self.is_ready_to_join_for_client(client_id):
+            if self.is_ready_to_join_for_client(client_id) and self.working_state_main.is_end_message_received(client_id):
                 logging.info(f"action: ready_to_join | type:{self.joiner_type} | client_id:{client_id}")
-                try:
-                    logging.debug(f"action: starting_apply_for_client_from_data | type:{self.joiner_type} | client_id:{client_id}")
-                    # Aplica el join
-                    self.apply_for_client(client_id)
-                    logging.debug(f"action: completed_apply_for_client_from_data | type:{self.joiner_type} | client_id:{client_id}")
-                    
-                    self._check_crash_point("CRASH_AFTER_PROCESS_BEFORE_COMMIT")
-
-                    logging.debug(f"action: starting_publish_results_from_data | type:{self.joiner_type} | client_id:{client_id}")
-                    # Publica los resultados al to_merge_data
-                    self.publish_results(client_id)
-                    logging.debug(f"action: completed_publish_results_from_data | type:{self.joiner_type} | client_id:{client_id}")
-                    
-                    logging.debug(f"action: starting_clean_client_data_from_data | type:{self.joiner_type} | client_id:{client_id}")
-                    # Limpiar datos del cliente después de procesar
-                    self.clean_client_data(client_id)
-                    logging.debug(f"action: completed_clean_client_data_from_data | type:{self.joiner_type} | client_id:{client_id}")
-                    
-                    # Mark this client as processed
-                    self.working_state_main.mark_client_completed(client_id)
-                    self.working_state_main.add_pending_end_message(client_id)
-                    logging.debug(f"action: processing_complete_from_data | type:{self.joiner_type} | client_id:{client_id}")
-                except Exception as inner_e:
-                    logging.error(f"action: error_in_join_processing_from_data | type:{self.joiner_type} | client_id:{client_id} | error:{inner_e} | error_type:{type(inner_e).__name__}")
-                    raise inner_e
-            
+                self._process_client_if_ready(client_id)
             else:
                 logging.debug(f"action: waiting_join_data | type:{self.joiner_type} | cli_id:{client_id} | file_type:{chunk.table_type()}")
 
@@ -305,6 +259,39 @@ class Joiner:
         self.working_state_main.add_chunk(client_id, chunk)
         
         return True
+
+    def _process_client_if_ready(self, client_id: int):
+        """
+        Ejecuta apply/publish/cleanup si ya se recibieron todos los END esperados
+        y el join data está listo. Evita reprocesar clientes completados.
+        """
+        if self.working_state_main.is_client_completed(client_id):
+            return
+        if not (self.working_state_main.is_end_message_received(client_id) and self.is_ready_to_join_for_client(client_id)):
+            return
+
+        logging.info(f"action: processing_client | type:{self.joiner_type} | client_id:{client_id} | reason:ready_and_end_received")
+        try:
+            logging.debug(f"action: starting_apply_for_client | type:{self.joiner_type} | client_id:{client_id}")
+            self.apply_for_client(client_id)
+            logging.debug(f"action: completed_apply_for_client | type:{self.joiner_type} | client_id:{client_id}")
+
+            self._check_crash_point("CRASH_AFTER_PROCESS_BEFORE_COMMIT")
+
+            logging.debug(f"action: starting_publish_results | type:{self.joiner_type} | client_id:{client_id}")
+            self.publish_results(client_id)
+            logging.debug(f"action: completed_publish_results | type:{self.joiner_type} | client_id:{client_id}")
+
+            logging.debug(f"action: starting_clean_client_data | type:{self.joiner_type} | client_id:{client_id}")
+            self.clean_client_data(client_id)
+            logging.debug(f"action: completed_clean_client_data | type:{self.joiner_type} | client_id:{client_id}")
+
+            self.working_state_main.mark_client_completed(client_id)
+            self.working_state_main.add_pending_end_message(client_id)
+            logging.debug(f"action: processing_complete | type:{self.joiner_type} | client_id:{client_id}")
+        except Exception as inner_e:
+            logging.error(f"action: error_in_join_processing | type:{self.joiner_type} | client_id:{client_id} | error:{inner_e} | error_type:{type(inner_e).__name__}")
+            raise inner_e
 
     def save_data_join(self, chunk) -> bool:
         """

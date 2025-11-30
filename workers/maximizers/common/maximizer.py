@@ -110,21 +110,24 @@ class Maximizer:
         self.working_state.mark_client_end_processed(client_id)
         logging.info(f"action: end_received_processing_final | type:{self.maximizer_type} | range:{self.maximizer_range} | client_id:{client_id}")
 
+        chunks_sent = 0
+        sender_id = self.shard_slug if self.shard_slug else self.maximizer_range
+
         if self.maximizer_type == "MAX":
             if self.is_absolute_max():
-                self.publish_absolute_max_results(client_id)
-                self._send_end_message(client_id, TableType.TRANSACTION_ITEMS, "joiner")
+                chunks_sent = self.publish_absolute_max_results(client_id)
+                self._send_end_message(client_id, TableType.TRANSACTION_ITEMS, "joiner", chunks_sent, sender_id or "absolute")
             else:
-                self.publish_partial_max_results(client_id)
-                self._send_end_message(client_id, TableType.TRANSACTION_ITEMS, "absolute")
+                chunks_sent = self.publish_partial_max_results(client_id)
+                self._send_end_message(client_id, TableType.TRANSACTION_ITEMS, "absolute", chunks_sent, sender_id or "partial")
                 logging.info(f"action: partial_maximizer_finished | range:{self.maximizer_range} | client_id:{client_id}")
         elif self.maximizer_type == "TOP3":
             if self.is_absolute_top3():
-                self.publish_absolute_top3_results(client_id)
-                self._send_end_message(client_id, TableType.PURCHASES_PER_USER_STORE, "joiner")
+                chunks_sent = self.publish_absolute_top3_results(client_id)
+                self._send_end_message(client_id, TableType.PURCHASES_PER_USER_STORE, "joiner", chunks_sent, sender_id or "absolute")
             else:
-                self.publish_partial_top3_results(client_id)
-                self._send_end_message(client_id, TableType.PURCHASES_PER_USER_STORE, "absolute")
+                chunks_sent = self.publish_partial_top3_results(client_id)
+                self._send_end_message(client_id, TableType.PURCHASES_PER_USER_STORE, "absolute", chunks_sent, sender_id or "partial")
                 logging.info(f"action: partial_top3_finished | range:{self.maximizer_range} | client_id:{client_id}")
 
         logging.info(f"action: maximizer_finished | type:{self.maximizer_type} | range:{self.maximizer_range} | client_id:{client_id}")
@@ -305,14 +308,12 @@ class Maximizer:
         self.working_state.mark_processed(chunk.message_id())
         self._save_state(chunk.message_id())
 
-    def _send_end_message(self, client_id: int, table_type: TableType, target: str):
+    def _send_end_message(self, client_id: int, table_type: TableType, target: str, count: int, sender_id: str):
         try:
-            logging.info(f"action: sending_end_message_to_{target} | client_id:{client_id}")
-            end_msg = MessageEnd(client_id, table_type, 1)
+            logging.info(f"action: sending_end_message_to_{target} | client_id:{client_id} | chunks:{count} | sender_id:{sender_id}")
+            end_msg = MessageEnd(client_id, table_type, count, sender_id)
             self.data_sender.send(end_msg.encode())
-            # Commit send ack? No message_id for end message here, but we could commit state if needed.
-            # But end message is usually triggered by processing, so state save after processing covers it.
-            logging.info(f"action: sent_end_message_to_{target} | client_id:{client_id} | format:END;{client_id};{table_type.value};1")
+            logging.info(f"action: sent_end_message_to_{target} | client_id:{client_id} | format:END;{client_id};{table_type.value};{count};{sender_id}")
         except Exception as e:
             logging.error(f"action: error_sending_end_to_{target} | client_id:{client_id} | error:{e}")
 
@@ -494,7 +495,7 @@ class Maximizer:
             logging.error(f"Maximizador desconocido: {self.maximizer_type}")
             return False
     
-    def publish_partial_max_results(self, client_id: int):
+    def publish_partial_max_results(self, client_id: int) -> int:
         """
         Los maximizers parciales envían sus máximos locales al absolute max.
         """
@@ -542,11 +543,13 @@ class Maximizer:
             # If called from handle_data_chunk, we save state after return.
             
             logging.info(f"action: publish_partial_max_results | shard:{self.shard_id} | client_id:{client_id} | rows_sent:{len(accumulated_results)} | selling_entries:{len(client_sellings)} | profit_entries:{len(client_profit)} | bytes_sent:{len(chunk_data)} | queue:{self.data_sender.queue_name}")
+            return 1
         else:
             logging.warning(f"action: no_partial_results_to_send | shard:{self.shard_id} | client_id:{client_id}")
+            return 0
         
 
-    def publish_partial_top3_results(self, client_id: int):
+    def publish_partial_top3_results(self, client_id: int) -> int:
         """
         Publica los resultados parciales de TOP3 al TOP3 absoluto después del END message.
         """
@@ -582,10 +585,12 @@ class Maximizer:
             logging.info(
                 f"action: publish_partial_top3_results | shard:{self.shard_id} | client_id:{client_id} | stores:{len(client_top3)} | total_clients:{len(accumulated_results)}"
             )
+            return 1
         else:
             logging.warning(f"action: no_partial_top3_results_to_send | shard:{self.shard_id} | client_id:{client_id}")
+            return 0
 
-    def publish_absolute_top3_results(self, client_id: int):
+    def publish_absolute_top3_results(self, client_id: int) -> int:
         """
         Publica los resultados finales del TOP3 absoluto.
         Los maximizers parciales ya enviaron su TOP3 calculado, solo necesitamos reenviarlos.
@@ -625,10 +630,12 @@ class Maximizer:
             self.data_sender.send(chunk.serialize())
             
             logging.info(f"action: publish_absolute_top3_results | result: success | client_id:{client_id} | stores_processed:{len(client_top3)} | total_results_forwarded:{len(accumulated_results)}")
+            return 1
         else:
             logging.warning(f"action: no_absolute_top3_results | client_id:{client_id}")
+            return 0
 
-    def publish_absolute_max_results(self, client_id: int):
+    def publish_absolute_max_results(self, client_id: int) -> int:
         """
         Publica los resultados de máximos absolutos por mes.
         Solo los máximos de cada mes para Q2.
@@ -698,8 +705,10 @@ class Maximizer:
             self.data_sender.send(chunk.serialize())
             
             logging.info(f"action: publish_absolute_max_results | result: success | client_id:{client_id} | months_selling:{len(monthly_max_selling)} | months_profit:{len(monthly_max_profit)} | total_rows:{len(accumulated_results)}")
+            return 1
         else:
             logging.warning(f"action: no_absolute_max_results | client_id:{client_id}")
+            return 0
 
     def _check_crash_point(self, point_name):
         if os.environ.get("CRASH_POINT") == point_name:

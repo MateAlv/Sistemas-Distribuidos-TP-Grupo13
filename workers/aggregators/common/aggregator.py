@@ -332,26 +332,35 @@ class Aggregator:
             logging.debug(f"action: duplicate_stats_message_ignored | message_id:{stats.message_id}")
             return
 
-        current_received = self.working_state.get_received_for_aggregator(stats.client_id, stats.table_type, stats.aggregator_id)
-        current_processed = self.working_state.get_processed_for_aggregator(stats.client_id, stats.table_type, stats.aggregator_id)
-        
-        if current_received == stats.chunks_received and current_processed == stats.chunks_processed:
-             return
+        current_received = self.working_state.get_received_for_aggregator(
+            stats.client_id, stats.table_type, stats.aggregator_id
+        )
+        current_processed = self.working_state.get_processed_for_aggregator(
+            stats.client_id, stats.table_type, stats.aggregator_id
+        )
 
-        self.working_state.update_chunks_received(
-            stats.client_id,
-            stats.table_type,
-            stats.aggregator_id,
-            stats.chunks_received,
-        )
-        self.working_state.update_chunks_processed(
-            stats.client_id,
-            stats.table_type,
-            stats.aggregator_id,
-            stats.chunks_processed,
-        )
+        # Always record END/expected totals, even if counts did not change
         self.working_state.mark_end_message_received(stats.client_id, stats.table_type)
         self.working_state.set_chunks_to_receive(stats.client_id, stats.table_type, stats.total_expected)
+
+        if current_received == stats.chunks_received and current_processed == stats.chunks_processed:
+            logging.debug(
+                f"action: stats_no_change | type:{self.aggregator_type} | agg_id:{stats.aggregator_id} "
+                f"| cli_id:{stats.client_id} | file_type:{stats.table_type} | expected:{stats.total_expected}"
+            )
+        else:
+            self.working_state.update_chunks_received(
+                stats.client_id,
+                stats.table_type,
+                stats.aggregator_id,
+                stats.chunks_received,
+            )
+            self.working_state.update_chunks_processed(
+                stats.client_id,
+                stats.table_type,
+                stats.aggregator_id,
+                stats.chunks_processed,
+            )
 
         self.working_state.mark_processed(stats.message_id)
         self._save_state(stats.message_id)
@@ -445,34 +454,39 @@ class Aggregator:
                 payload = self._build_tpv_payload(aggregated_chunk)
                 has_output = True
 
-        if has_output:
-            self.working_state.increment_chunks_processed(
-                client_id,
-                table_type,
-                self.aggregator_id,
-                1,
+        if not has_output:
+            logging.info(
+                f"action: aggregate_no_output | type:{self.aggregator_type} | cli_id:{client_id} "
+                f"| file_type:{table_type} | rows_in:{len(chunk.rows)}"
             )
-            self.working_state.increment_accumulated_chunks(client_id, table_type, self.aggregator_id)
 
-            self._check_crash_point("CRASH_AFTER_PROCESS_BEFORE_COMMIT")
+        self.working_state.increment_chunks_processed(
+            client_id,
+            table_type,
+            self.aggregator_id,
+            1,
+        )
+        self.working_state.increment_accumulated_chunks(client_id, table_type, self.aggregator_id)
 
-            if payload:
-                try:
-                    data_msg = AggregatorDataMessage(
-                        self.aggregator_type,
-                        self.aggregator_id,
-                        client_id,
-                        table_type,
-                        payload,
-                    )
-                    logging.debug(
-                        f"action: aggregator_data_sent | type:{self.aggregator_type} | agg_id:{self.aggregator_id} "
-                        f"| client_id:{client_id} | table_type:{table_type} | payload_size:{len(payload)}"
-                    )
-                    self.middleware_data_exchange.send(data_msg.encode())
-                    self.persistence.commit_send_ack(client_id, chunk.message_id())
-                except Exception as e:
-                    logging.error(f"action: error_sending_data_message | error:{e}")
+        self._check_crash_point("CRASH_AFTER_PROCESS_BEFORE_COMMIT")
+
+        if payload:
+            try:
+                data_msg = AggregatorDataMessage(
+                    self.aggregator_type,
+                    self.aggregator_id,
+                    client_id,
+                    table_type,
+                    payload,
+                )
+                logging.debug(
+                    f"action: aggregator_data_sent | type:{self.aggregator_type} | agg_id:{self.aggregator_id} "
+                    f"| client_id:{client_id} | table_type:{table_type} | payload_size:{len(payload)}"
+                )
+                self.middleware_data_exchange.send(data_msg.encode())
+                self.persistence.commit_send_ack(client_id, chunk.message_id())
+            except Exception as e:
+                logging.error(f"action: error_sending_data_message | error:{e}")
 
         self.working_state.mark_processed(chunk.message_id())
         self._save_state(chunk.message_id())

@@ -192,11 +192,11 @@ class Filter:
             total_received = self.working_state.get_total_chunks_received(client_id, table_type)
             total_not_sent = self.working_state.get_total_not_sent_chunks(client_id, table_type)
 
+            # Send OWN stats (not the sum of all filters)
+            own_received = self.working_state.get_own_chunks_received(client_id, table_type, self.id)
+            own_not_sent = self.working_state.get_own_chunks_not_sent(client_id, table_type, self.id)
+
             if self.working_state.should_send_stats(client_id, table_type, own_received, own_not_sent):
-                # Send OWN stats (not the sum of all filters)
-                own_received = self.working_state.get_own_chunks_received(client_id, table_type, self.id)
-                own_not_sent = self.working_state.get_own_chunks_not_sent(client_id, table_type, self.id)
-                
                 stats_msg = FilterStatsMessage(self.id, client_id, table_type, total_expected, own_received, own_not_sent)
                 self.middleware_end_exchange.send(stats_msg.encode())
                 self.working_state.mark_stats_sent(client_id, table_type, own_received, own_not_sent)
