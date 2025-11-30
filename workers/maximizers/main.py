@@ -108,7 +108,14 @@ def main():
     monitor = HeartbeatSender()
     monitor.start()
 
-    maximizer = Maximizer(max_type, role, shard_id, partial_shards, monitor)
+    expected_inputs = int(os.getenv("EXPECTED_INPUTS", 1))
+    
+    # Determine maximizer_range based on role and shard_id
+    maximizer_range = "absolute"
+    if role == "partial":
+        maximizer_range = shard_id
+
+    maximizer = Maximizer(max_type, maximizer_range, expected_inputs, monitor)
 
     signal.signal(signal.SIGTERM, maximizer.shutdown)
         

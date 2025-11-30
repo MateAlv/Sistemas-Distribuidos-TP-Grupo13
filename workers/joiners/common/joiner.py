@@ -22,11 +22,12 @@ from .joiner_working_state import JoinerMainWorkingState, JoinerJoinWorkingState
 
 class Joiner:
     
-    def __init__(self, join_type: str, monitor=None):
+    def __init__(self, join_type: str, expected_inputs: int = 1, monitor=None):
         logging.getLogger('pika').setLevel(logging.CRITICAL)
         self.monitor = monitor
 
         self.joiner_type = join_type
+        self.expected_inputs = int(expected_inputs) # Number of upstream workers (Aggregators)
         
         # State is now managed by WorkingState classes
         self.working_state_main = JoinerMainWorkingState()
@@ -170,37 +171,48 @@ class Joiner:
                         end_message = MessageEnd.decode(data)
                         client_id = end_message.client_id()
                         table_type = end_message.table_type()
+                        sender_id = end_message.sender_id()
+                        count = end_message.total_chunks()
                         
                         with self.lock:
-                            # Solo agregar el client_id si no está ya en la lista de END messages recibidos
-                            if not self.working_state_main.is_end_message_received(client_id):
-                                self.working_state_main.mark_end_message_received(client_id)
-                                logging.info(f"action: received_end_message | type:{self.joiner_type} | client_id:{client_id} | table_type:{table_type} | count:{end_message.total_chunks()}")
-                                
-                                # Solo procesar si está listo para join
-                                if self.is_ready_to_join_for_client(client_id):
-                                    logging.info(f"action: ready_to_join_after_end | type:{self.joiner_type} | client_id:{client_id}")
-                                    try:
-                                        logging.debug(f"action: starting_apply_for_client | type:{self.joiner_type} | client_id:{client_id}")
-                                        self.apply_for_client(client_id)
-                                        logging.debug(f"action: completed_apply_for_client | type:{self.joiner_type} | client_id:{client_id}")
-                                        
-                                        logging.debug(f"action: starting_publish_results | type:{self.joiner_type} | client_id:{client_id}")
-                                        self.publish_results(client_id)
-                                        logging.debug(f"action: completed_publish_results | type:{self.joiner_type} | client_id:{client_id}")
-                                        
-                                        logging.debug(f"action: starting_clean_client_data | type:{self.joiner_type} | client_id:{client_id}")
-                                        self.clean_client_data(client_id)
-                                        logging.debug(f"action: completed_clean_client_data | type:{self.joiner_type} | client_id:{client_id}")
-                                        
-                                        self.working_state_main.mark_client_completed(client_id)
-                                        self.working_state_main.add_pending_end_message(client_id)
-                                        logging.debug(f"action: processing_complete | type:{self.joiner_type} | client_id:{client_id}")
-                                    except Exception as inner_e:
-                                        logging.error(f"action: error_in_join_processing | type:{self.joiner_type} | client_id:{client_id} | error:{inner_e} | error_type:{type(inner_e).__name__}")
-                                        raise inner_e
+                            # Multi-Sender Tracking Logic
+                            if self.working_state_main.is_sender_finished(client_id, sender_id):
+                                logging.debug(f"action: duplicate_end_from_sender | type:{self.joiner_type} | client_id:{client_id} | sender_id:{sender_id}")
                             else:
-                                logging.debug(f"action: duplicate_end_message_ignored | type:{self.joiner_type} | client_id:{client_id}")
+                                self.working_state_main.mark_sender_finished(client_id, sender_id)
+                                self.working_state_main.add_expected_chunks(client_id, count)
+                                
+                                finished_count = self.working_state_main.get_finished_senders_count(client_id)
+                                logging.info(f"action: end_received | type:{self.joiner_type} | client_id:{client_id} | sender_id:{sender_id} | count:{count} | finished:{finished_count}/{self.expected_inputs}")
+                                
+                                if finished_count >= self.expected_inputs:
+                                    logging.info(f"action: all_inputs_finished | type:{self.joiner_type} | client_id:{client_id}")
+                                    self.working_state_main.mark_end_message_received(client_id)
+                                    
+                                    # Solo procesar si está listo para join
+                                    if self.is_ready_to_join_for_client(client_id):
+                                        logging.info(f"action: ready_to_join_after_end | type:{self.joiner_type} | client_id:{client_id}")
+                                        try:
+                                            logging.debug(f"action: starting_apply_for_client | type:{self.joiner_type} | client_id:{client_id}")
+                                            self.apply_for_client(client_id)
+                                            logging.debug(f"action: completed_apply_for_client | type:{self.joiner_type} | client_id:{client_id}")
+                                            
+                                            logging.debug(f"action: starting_publish_results | type:{self.joiner_type} | client_id:{client_id}")
+                                            self.publish_results(client_id)
+                                            logging.debug(f"action: completed_publish_results | type:{self.joiner_type} | client_id:{client_id}")
+                                            
+                                            logging.debug(f"action: starting_clean_client_data | type:{self.joiner_type} | client_id:{client_id}")
+                                            self.clean_client_data(client_id)
+                                            logging.debug(f"action: completed_clean_client_data | type:{self.joiner_type} | client_id:{client_id}")
+                                            
+                                            self.working_state_main.mark_client_completed(client_id)
+                                            self.working_state_main.add_pending_end_message(client_id)
+                                            logging.debug(f"action: processing_complete | type:{self.joiner_type} | client_id:{client_id}")
+                                        except Exception as inner_e:
+                                            logging.error(f"action: error_in_join_processing | type:{self.joiner_type} | client_id:{client_id} | error:{inner_e} | error_type:{type(inner_e).__name__}")
+                                            raise inner_e
+                                else:
+                                    logging.info(f"action: waiting_for_more_senders | type:{self.joiner_type} | client_id:{client_id} | finished:{finished_count} | expected:{self.expected_inputs}")
 
                     else:
                         self._handle_data_chunk(data)

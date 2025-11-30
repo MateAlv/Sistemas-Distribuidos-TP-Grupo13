@@ -19,6 +19,10 @@ class MaximizerWorkingState(WorkingState):
         # TOP3 type state
         self.top3_by_store = defaultdict(default_top3_value)  # client_id -> store_id -> heap[(count, user_id)]
         self.partial_top3_finished = defaultdict(int)  # client_id -> cantidad de END recibidos
+        
+        # Multi-Sender Tracking
+        self.finished_senders = defaultdict(set) # client_id -> set(sender_id)
+        self.total_expected_chunks = defaultdict(int) # client_id -> total_chunks
 
     def is_processed(self, message_id):
         return message_id in self.processed_ids
@@ -79,3 +83,23 @@ class MaximizerWorkingState(WorkingState):
             self.top3_by_store.pop(client_id, None)
             if is_absolute:
                 self.partial_top3_finished.pop(client_id, None)
+        
+        # Cleanup multi-sender state
+        self.finished_senders.pop(client_id, None)
+        self.total_expected_chunks.pop(client_id, None)
+
+    # Multi-Sender Tracking Methods
+    def is_sender_finished(self, client_id, sender_id):
+        return sender_id in self.finished_senders[client_id]
+
+    def mark_sender_finished(self, client_id, sender_id):
+        self.finished_senders[client_id].add(sender_id)
+
+    def get_finished_senders_count(self, client_id):
+        return len(self.finished_senders[client_id])
+
+    def add_expected_chunks(self, client_id, count):
+        self.total_expected_chunks[client_id] += count
+
+    def get_total_expected_chunks(self, client_id):
+        return self.total_expected_chunks[client_id]

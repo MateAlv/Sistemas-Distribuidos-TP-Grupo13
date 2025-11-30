@@ -226,10 +226,12 @@ class Filter:
         own_received = self.working_state.get_own_chunks_received(client_id, table_type, self.id)
         own_not_sent = self.working_state.get_own_chunks_not_sent(client_id, table_type, self.id)
 
+        sender_id = end_message.sender_id()
+
         self.working_state.end_received(client_id, table_type)
         logging.info(
-            "action: end_message_received | type:%s | cli_id:%s | file_type:%s | chunks_received:%d | chunks_not_sent:%d | chunks_expected:%d",
-            self.filter_type, client_id, table_type,
+            "action: end_message_received | type:%s | cli_id:%s | file_type:%s | sender_id:%s | chunks_received:%d | chunks_not_sent:%d | chunks_expected:%d",
+            self.filter_type, client_id, table_type, sender_id,
             own_received,
             own_not_sent,
             total_expected)
@@ -272,7 +274,7 @@ class Filter:
 
     def _end_message_to_send(self, client_id, table_type, total_expected, total_not_sent):
         if self.filter_type != "amount":
-            return MessageEnd(client_id, table_type, total_expected - total_not_sent)
+            return MessageEnd(client_id, table_type, total_expected - total_not_sent, str(self.id))
         else:
             return MessageQueryEnd(client_id, ResultTableType.QUERY_1, total_expected - total_not_sent)
             

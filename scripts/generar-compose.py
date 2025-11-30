@@ -227,7 +227,7 @@ def define_aggregator(meta: dict, compose: dict, nodo: str, worker_id: int):
 def is_maximizer(nodo: str):
     return nodo.startswith("MAXIMIZER_")
 
-def define_maximizer(meta: dict, compose: dict, nodo: str, worker_id: int, max_shards, top3_shards):
+def define_maximizer(meta: dict, compose: dict, nodo: str, worker_id: int, max_shards, top3_shards, nodes: dict):
     parts = nodo.split("_")
     if len(parts) < 3:
         raise ValueError(f"Nombre de maximizer inválido: {nodo}")
@@ -244,6 +244,21 @@ def define_maximizer(meta: dict, compose: dict, nodo: str, worker_id: int, max_s
         f"WORKER_ID={worker_id}",
         f"CONTAINER_NAME={service_name}",
     ]
+
+    # Calculate expected inputs
+    expected_inputs = 1
+    if role == "PARTIAL":
+        if max_type == "MAX":
+            expected_inputs = nodes.get("AGGREGATOR_PRODUCTS", 1)
+        elif max_type == "TOP3":
+            expected_inputs = nodes.get("AGGREGATOR_PURCHASES", 1)
+    elif role == "ABSOLUTE":
+        if max_type == "MAX":
+             expected_inputs = nodes.get("MAXIMIZER_MAX_PARTIAL", 1)
+        elif max_type == "TOP3":
+             expected_inputs = nodes.get("MAXIMIZER_TOP3_PARTIAL", 1)
+    
+    env.append(f"EXPECTED_INPUTS={expected_inputs}")
 
     if role == "PARTIAL":
         if max_type == "MAX":
@@ -319,7 +334,7 @@ def get_joiner_type(nodo: str):
     # JOINER_USERS -> USERS
     return nodo.split("_", 1)[1].upper()
 
-def define_joiner(meta: dict, compose: dict, nodo: str, worker_id: int):
+def define_joiner(meta: dict, compose: dict, nodo: str, worker_id: int, nodes: dict):
     base_service_name = f"{nodo.lower()}_service"
     service_name = f"{base_service_name}-{worker_id}" if worker_id > 1 else base_service_name
     compose["services"][service_name] = {
@@ -345,6 +360,23 @@ def define_joiner(meta: dict, compose: dict, nodo: str, worker_id: int):
             "rabbitmq": {"condition": "service_healthy"},
         }
     }
+
+    # Calculate expected inputs
+    expected_inputs = 1
+    joiner_type = get_joiner_type(nodo)
+    if joiner_type == "STORES_TPV":
+        expected_inputs = nodes.get("AGGREGATOR_TPV", 1)
+    elif joiner_type == "STORES_TOP3":
+        # Receives from Absolute Top3 Maximizer (which is 1)
+        expected_inputs = nodes.get("MAXIMIZER_TOP3_ABSOLUTE", 1)
+    elif joiner_type == "ITEMS":
+        # Receives from Absolute Max Maximizer (which is 1)
+        expected_inputs = nodes.get("MAXIMIZER_MAX_ABSOLUTE", 1)
+    elif joiner_type == "USERS":
+        pass
+        
+    compose["services"][service_name]["environment"].append(f"EXPECTED_INPUTS={expected_inputs}")
+
     return service_name
 
 def is_client(nodo: str):
@@ -509,9 +541,9 @@ def generate_compose(meta: dict, nodes: dict, services: dict = None):
                 elif is_aggregator(nodo):
                     service_name = define_aggregator(meta, compose, nodo, worker_id)
                 elif is_maximizer(nodo):
-                    service_name = define_maximizer(meta, compose, nodo, worker_id, max_shards, top3_shards)
+                    service_name = define_maximizer(meta, compose, nodo, worker_id, max_shards, top3_shards, nodes)
                 elif is_joiner(nodo):
-                    service_name = define_joiner(meta, compose, nodo, worker_id)
+                    service_name = define_joiner(meta, compose, nodo, worker_id, nodes)
                 else:
                     raise ValueError(f"Tipo de nodo inválido: {nodo}")
                 

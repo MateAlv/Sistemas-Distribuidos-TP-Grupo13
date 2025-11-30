@@ -12,6 +12,10 @@ class JoinerMainWorkingState(WorkingState):
         self._pending_end_messages = []
         self.ready_to_join = {}
         self.processed_ids_main = set()
+        
+        # Multi-Sender Tracking
+        self.finished_senders = {} # client_id -> set(sender_id)
+        self.total_expected_chunks = {} # client_id -> total_chunks
 
     def is_processed(self, message_id):
         return message_id in self.processed_ids_main
@@ -97,7 +101,9 @@ class JoinerMainWorkingState(WorkingState):
             "completed_clients": self.completed_clients,
             "_pending_end_messages": self._pending_end_messages,
             "ready_to_join": self.ready_to_join,
-            "processed_ids_main": self.processed_ids_main
+            "processed_ids_main": self.processed_ids_main,
+            "finished_senders": self.finished_senders,
+            "total_expected_chunks": self.total_expected_chunks
         }
         return pickle.dumps(state)
 
@@ -113,7 +119,36 @@ class JoinerMainWorkingState(WorkingState):
         instance._pending_end_messages = state.get("_pending_end_messages", [])
         instance.ready_to_join = state.get("ready_to_join", {})
         instance.processed_ids_main = state.get("processed_ids_main", set())
+        
+        # Recover multi-sender state
+        instance.finished_senders = state.get("finished_senders", {})
+        instance.total_expected_chunks = state.get("total_expected_chunks", {})
+        
         return instance
+
+    # Multi-Sender Tracking Methods
+    def is_sender_finished(self, client_id, sender_id):
+        if client_id not in self.finished_senders:
+            return False
+        return sender_id in self.finished_senders[client_id]
+
+    def mark_sender_finished(self, client_id, sender_id):
+        if client_id not in self.finished_senders:
+            self.finished_senders[client_id] = set()
+        self.finished_senders[client_id].add(sender_id)
+
+    def get_finished_senders_count(self, client_id):
+        if client_id not in self.finished_senders:
+            return 0
+        return len(self.finished_senders[client_id])
+
+    def add_expected_chunks(self, client_id, count):
+        if client_id not in self.total_expected_chunks:
+            self.total_expected_chunks[client_id] = 0
+        self.total_expected_chunks[client_id] += count
+
+    def get_total_expected_chunks(self, client_id):
+        return self.total_expected_chunks.get(client_id, 0)
 
 
 class JoinerJoinWorkingState(WorkingState):

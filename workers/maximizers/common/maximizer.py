@@ -29,29 +29,18 @@ def default_top3_value():
     return defaultdict(list)
 
 class Maximizer:
-    def __init__(self, max_type: str, role: str, shard_id: Optional[str], partial_shards: list[str], monitor=None):
+    def __init__(self, maximizer_type: str, maximizer_range: str, expected_inputs: int = 1, monitor=None):
         logging.getLogger('pika').setLevel(logging.CRITICAL)
         self.monitor = monitor
 
         self.__running = True
-
-        self.maximizer_type = max_type
-        if role not in {"partial", "absolute"}:
-            raise ValueError(f"Rol de maximizer inválido: {role}")
-        self.role = role
-        self.shard_id = shard_id
-        self.maximizer_range = shard_id if shard_id else "absolute"
-        self.partial_shards = partial_shards or []
-        self.shard_slug = slugify_shard_id(shard_id) if shard_id else None
-        self.partial_shards_lookup = {slugify_shard_id(s): s for s in self.partial_shards}
-        self.expected_shard_slugs = set(self.partial_shards_lookup.keys())
-        self.expected_partial_maximizers = len(self.expected_shard_slugs) if role == "absolute" and max_type == "MAX" else 0
-        self.expected_partial_top3 = len(self.expected_shard_slugs) if role == "absolute" and max_type == "TOP3" else 0
-
-        if self.role == "partial" and not self.shard_id:
-            raise ValueError("Los maximizers parciales requieren un identificador de shard.")
-        if self.role == "absolute" and self.maximizer_type in {"MAX", "TOP3"} and not self.partial_shards:
-            raise ValueError("Los maximizers absolutos requieren la lista de shards parciales configurados.")
+        
+        self.maximizer_type = maximizer_type
+        self.maximizer_range = maximizer_range
+        self.expected_inputs = int(expected_inputs)
+        
+        self.role = "absolute" if self.maximizer_range == "absolute" else "partial"
+        self.shard_id = self.maximizer_range if self.role == "partial" else None
 
         self.persistence = PersistenceService(f"/data/persistence/maximizer_{self.maximizer_type}_{self.maximizer_range}")
         self.working_state = MaximizerWorkingState()
@@ -189,51 +178,64 @@ class Maximizer:
         logging.info(f"DEBUG: _handle_end_message called with {raw_message}")
         try:
             end_message = MessageEnd.decode(raw_message)
-            logging.info(f"DEBUG: decoded end_message: client_id={end_message.client_id()}, table_type={end_message.table_type()}")
+            logging.info(f"DEBUG: decoded end_message: client_id={end_message.client_id()}, table_type={end_message.table_type()}, sender_id={end_message.sender_id()}")
         except Exception as e:
             logging.error(f"action: error_decoding_end_message | error:{e}")
             return
 
         client_id = end_message.client_id()
         table_type = end_message.table_type()
-        expected_table = self._expected_table_type()
+        sender_id = end_message.sender_id()
+        count = end_message.total_chunks()
 
         if not self._is_valid_table_type(table_type, for_end=True):
             expected_table = self._expected_table_type()
             logging.debug(f"action: ignoring_end_wrong_table | expected:{expected_table} | received:{table_type} | client_id:{client_id}")
             return
-
-        if self.maximizer_type == "MAX" and self.is_absolute_max():
-            if self.working_state.is_client_end_processed(client_id):
-                logging.debug(f"action: ignoring_end_already_processed | client_id:{client_id}")
+            
+        # Multi-Sender Tracking Logic
+        with self.lock:
+            # Track sender
+            if self.working_state.is_sender_finished(client_id, sender_id):
+                logging.debug(f"action: duplicate_end_from_sender | client_id:{client_id} | sender_id:{sender_id}")
                 return
+            
+            self.working_state.mark_sender_finished(client_id, sender_id)
+            self.working_state.add_expected_chunks(client_id, count)
+            
+            finished_count = self.working_state.get_finished_senders_count(client_id)
+            logging.info(f"action: end_received | client_id:{client_id} | sender_id:{sender_id} | count:{count} | finished:{finished_count}/{self.expected_inputs}")
+            
+            if finished_count >= self.expected_inputs:
+                logging.info(f"action: all_inputs_finished | client_id:{client_id}")
+                # Now we know the TOTAL expected chunks from all upstreams
+                total_expected = self.working_state.get_total_expected_chunks(client_id)
+                
+                # Check if we have processed everything
+                # Note: Maximizers process data as it comes. 
+                # If we are Absolute, we might wait for Partials.
+                # If we are Partial, we process data from Aggregators.
+                
+                if self.maximizer_type == "MAX" and self.is_absolute_max():
+                     # Absolute Max logic (wait for partials)
+                     # The "expected_inputs" for Absolute Max should be the number of Partial Maximizers (e.g. 5)
+                     # The "count" in END message from Partial Max is 1 (result chunk) usually?
+                     # Let's check process_client_end in Partial Max.
+                     self.process_client_end(client_id, table_type)
 
-            current = self.working_state.increment_partial_end_count(client_id)
-            logging.info(f"action: end_received_from_partial | type:{self.maximizer_type} | client_id:{client_id} | received:{current}/{self.expected_partial_maximizers}")
-
-            if current >= self.expected_partial_maximizers:
-                logging.info(f"action: absolute_max_all_partials_finished | client_id:{client_id}")
-                self.process_client_end(client_id, table_type)
+                elif self.maximizer_type == "TOP3" and self.is_absolute_top3():
+                     # Absolute Top3 logic
+                     self.process_client_end(client_id, table_type)
+                
+                else:
+                    # Partial Maximizer logic
+                    # We received END from all Aggregators.
+                    # We should have processed 'total_expected' chunks.
+                    # But wait, 'total_expected' is the sum of 'processed' from Aggregators.
+                    # This should match what we received.
+                    self.process_client_end(client_id, table_type)
             else:
-                logging.info(f"action: waiting_for_more_partials | client_id:{client_id} | received:{current} | expected:{self.expected_partial_maximizers}")
-            return
-
-        if self.maximizer_type == "TOP3" and self.is_absolute_top3():
-            if self.working_state.is_client_end_processed(client_id):
-                logging.debug(f"action: ignoring_end_already_processed | client_id:{client_id}")
-                return
-
-            current = self.working_state.increment_partial_top3_finished(client_id)
-            logging.info(f"action: end_received_from_partial | type:{self.maximizer_type} | client_id:{client_id} | received:{current}/{self.expected_partial_top3}")
-
-            if current >= self.expected_partial_top3:
-                logging.info(f"action: absolute_top3_all_partials_finished | client_id:{client_id}")
-                self.process_client_end(client_id, table_type)
-            else:
-                logging.info(f"action: waiting_for_more_partials | client_id:{client_id} | received:{current} | expected:{self.expected_partial_top3}")
-            return
-
-        self.process_client_end(client_id, table_type)
+                 logging.info(f"action: waiting_for_more_senders | client_id:{client_id} | finished:{finished_count} | expected:{self.expected_inputs}")
 
     def _handle_data_chunk(self, data: bytes):
         self._check_crash_point("CRASH_BEFORE_PROCESS")

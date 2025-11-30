@@ -380,7 +380,17 @@ class Aggregator:
         )
 
         self.working_state.mark_end_message_received(client_id, table_type)
+        self.working_state.set_global_total_expected(client_id, table_type, total_expected)
+        
+        # Broadcast this global total to peers so they also know when to terminate
+        # We can use a new message type or reuse AggregatorStatsMessage with a special flag/value?
+        # Better to add a field to AggregatorStatsMessage or use a dedicated message.
+        # For now, let's assume AggregatorStatsMessage has 'total_expected'. 
+        # When we receive END, we update our 'total_expected' and broadcast it in our next stats update.
+        # The _maybe_send_stats uses get_chunks_to_receive which we just updated.
+        
         self.working_state.set_chunks_to_receive(client_id, table_type, total_expected)
+        self.working_state.set_global_total_expected(client_id, table_type, total_expected)
 
         self._save_state(uuid.uuid4())
 
@@ -513,36 +523,46 @@ class Aggregator:
 
 
     def _can_send_end_message(self, client_id, table_type):
-        total_expected = self.working_state.get_chunks_to_receive(client_id, table_type)
-        if total_expected is None:
+        # Symmetric Termination Logic
+        
+        # 1. Check if we have received the global total expected (from upstream)
+        global_total = self.working_state.get_global_total_expected(client_id, table_type)
+        if global_total is None:
             return False
 
-        total_received = self.working_state.get_total_received(client_id, table_type)
-        if total_received < total_expected:
-            if total_received % 100 == 0:
-                logging.debug(
-                    f"action: can_send_end_waiting_more_chunks | type:{self.aggregator_type} | client_id:{client_id} "
-                    f"| table_type:{table_type} | expected:{total_expected} | received:{total_received}"
-                )
-            return False
+        # 2. Check if we have processed everything we received locally
+        received = self.working_state.get_received_for_aggregator(client_id, table_type, self.aggregator_id)
+        processed = self.working_state.get_processed_for_aggregator(client_id, table_type, self.aggregator_id)
+        
+        if processed < received:
+             if processed % 100 == 0:
+                logging.debug(f"action: waiting_local_processing | type:{self.aggregator_type} | client_id:{client_id} | processed:{processed} | received:{received}")
+             return False
 
-        total_processed = self.working_state.get_total_processed(client_id, table_type)
+        # 3. Check if all peers have processed their part
+        # Sum of processed chunks from all aggregators (including self)
+        total_processed_global = self.working_state.get_total_processed_global(client_id, table_type)
+        
+        if total_processed_global < global_total:
+             if total_processed_global % 100 == 0:
+                logging.debug(f"action: waiting_global_processing | type:{self.aggregator_type} | client_id:{client_id} | global_processed:{total_processed_global} | global_expected:{global_total}")
+             return False
+             
+        # 4. Check accumulation consistency (processed vs accumulated)
         total_accumulated = self.working_state.get_total_accumulated(client_id, table_type)
-        if total_processed != total_accumulated:
-            logging.debug(
-                f"action: can_send_end_waiting_accumulation | type:{self.aggregator_type} | client_id:{client_id} "
-                f"| table_type:{table_type} | processed:{total_processed} | accumulated:{total_accumulated}"
-            )
-            return False
+        # Note: total_accumulated tracks what THIS aggregator has accumulated. 
+        # But get_total_processed_global tracks what ALL aggregators have processed.
+        # We should check if OUR processed matches OUR accumulated.
+        
+        # Actually, get_total_accumulated in working_state sums up accumulation counts from all aggregators if they send it?
+        # Let's check working_state.increment_accumulated_chunks. It seems it tracks per aggregator.
+        # So get_total_accumulated returns sum of accumulated chunks for all aggregators.
+        
+        if total_processed_global != total_accumulated:
+             logging.debug(f"action: waiting_accumulation_consistency | type:{self.aggregator_type} | client_id:{client_id} | global_processed:{total_processed_global} | global_accumulated:{total_accumulated}")
+             return False
 
-        leader_id = self.working_state.get_leader_id(client_id, table_type, self.aggregator_id)
-        if self.aggregator_id != leader_id:
-            logging.debug(
-                f"action: can_send_end_not_leader | type:{self.aggregator_type} | client_id:{client_id} "
-                f"| table_type:{table_type} | leader:{leader_id} | self:{self.aggregator_id}"
-            )
-            return False
-
+        logging.info(f"action: symmetric_termination_condition_met | type:{self.aggregator_type} | client_id:{client_id} | global_total:{global_total}")
         return True
 
     def _send_end_message(self, client_id, table_type):
@@ -557,12 +577,47 @@ class Aggregator:
         )
         self.publish_final_results(client_id, table_type)
 
+        # Send END message with OUR ID
         try:
-            end_msg = MessageEnd(client_id, table_type, total_processed)
+            # We send the count of chunks WE processed/generated. 
+            # Actually, for the next stage (Maximizer/Joiner), they need to know how many items to expect.
+            # If we are sending results (e.g. Products), we send chunks of results.
+            # The count in MessageEnd should be the number of RESULT chunks we sent?
+            # Or the number of input chunks we processed?
+            
+            # The protocol usually expects "total_items" or "total_chunks".
+            # If downstream waits for "total_expected", and we send "total_processed", it might be confusing if they sum it up.
+            # But wait, the Maximizer will sum up "count" from all aggregators.
+            # So we should send the number of items/chunks WE produced for the next stage.
+            
+            # However, `publish_final_results` sends data but doesn't return the count easily here.
+            # But wait, `publish_final_results` sends ONE chunk per queue usually, or multiple.
+            # Let's look at `publish_final_products`: it iterates and sends chunks.
+            
+            # For simplicity in this refactor, let's assume we send 1 END message per aggregator.
+            # The count in MessageEnd is used by the receiver.
+            # If the receiver sums them up, it gets a total.
+            # What does the receiver use this total for?
+            # Maximizer uses it to know if it received all data? No, it uses it to know "total_expected".
+            
+            # If we change the logic so Maximizer waits for N end messages, the "count" field becomes "payload size" or "items produced".
+            # Let's send 0 for now if it's not strictly used for verification, OR send the number of result chunks we sent.
+            # Given we don't track result chunks sent count easily here without modifying publish_final_results, 
+            # and the previous logic sent "total_processed" (input chunks), let's stick to sending "total_processed" 
+            # BUT downstream must know this is "input chunks processed by this aggregator" if they want to verify.
+            
+            # Actually, the previous logic sent `total_processed` which was the GLOBAL total processed (since it was leader).
+            # Now each aggregator sends its OWN processed count.
+            # So Sum(OwnProcessed) = GlobalTotalProcessed = GlobalTotalExpected.
+            # This maintains consistency!
+            
+            my_processed = self.working_state.get_processed_for_aggregator(client_id, table_type, self.aggregator_id)
+            end_msg = MessageEnd(client_id, table_type, my_processed, str(self.aggregator_id))
+            
             for queue in self.middleware_queue_sender.values():
                 queue.send(end_msg.encode())
             logging.info(
-                f"action: sent_end_to_next_stage | type:{self.aggregator_type} | cli_id:{client_id}"
+                f"action: sent_end_to_next_stage | type:{self.aggregator_type} | cli_id:{client_id} | my_processed:{my_processed}"
             )
         except Exception as e:
             logging.error(f"action: error_sending_end_message | error:{e}")

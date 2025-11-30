@@ -101,6 +101,16 @@ class AggregatorWorkingState(WorkingState):
     def get_processed_for_aggregator(self, client_id, table_type, aggregator_id):
         return self._get_aggregator_value(self.chunks_processed_per_client, client_id, table_type, aggregator_id)
 
+    def set_global_total_expected(self, client_id, table_type, total):
+        self._ensure_dict_entry(self.chunks_to_receive, client_id, table_type)
+        self.chunks_to_receive[client_id][table_type] = total
+
+    def get_global_total_expected(self, client_id, table_type):
+        return self.chunks_to_receive.get(client_id, {}).get(table_type)
+
+    def get_total_processed_global(self, client_id, table_type):
+        return self._sum_counts(self.chunks_processed_per_client, client_id, table_type)
+
     def get_leader_id(self, client_id, table_type, default_id):
         aggregators = self.chunks_received_per_client.get(client_id, {}).get(table_type, {}).keys()
         return min(aggregators) if aggregators else default_id

@@ -1,17 +1,18 @@
 from utils.file_utils.table_type import TableType, ResultTableType
 
 class MessageEnd:
-    def __init__(self, client_id: int, table_type: TableType, count: int):
+    def __init__(self, client_id: int, table_type: TableType, count: int, sender_id: str = ""):
         self._client_id = client_id
         self._table_type = table_type
         self._count = count
+        self._sender_id = sender_id
 
     def encode(self) -> bytes:
         """
         Serializa el objeto a bytes con el formato:
-        b"END;{client_id};{table_type.value};{count}"
+        b"END;{client_id};{table_type.value};{count};{sender_id}"
         """
-        return f"END;{self._client_id};{self._table_type.value};{self._count}".encode("utf-8")
+        return f"END;{self._client_id};{self._table_type.value};{self._count};{self._sender_id}".encode("utf-8")
 
     @classmethod
     def decode(cls, message: bytes) -> "MessageEnd":
@@ -20,17 +21,24 @@ class MessageEnd:
         """
         decoded = message.decode("utf-8")
         parts = decoded.split(";")
-        if len(parts) != 4 or parts[0] != "END":
+        
+        # Backward compatibility or new format
+        if len(parts) == 4 and parts[0] == "END":
+            # Old format: END;client_id;table_type;count
+            _, client_id, table_type_value, count = parts
+            sender_id = ""
+        elif len(parts) == 5 and parts[0] == "END":
+            # New format: END;client_id;table_type;count;sender_id
+            _, client_id, table_type_value, count, sender_id = parts
+        else:
             raise ValueError(f"Formato inválido de mensaje END: {decoded}")
         
-        _, client_id, table_type_value, count = parts
-
         try:
             table_type = TableType(int(table_type_value))
         except KeyError:
             raise ValueError(f"TableType inválido: {table_type_value}")
 
-        return cls(int(client_id), table_type, int(count))
+        return cls(int(client_id), table_type, int(count), sender_id)
     
     def client_id(self) -> int:
         return self._client_id
@@ -40,6 +48,9 @@ class MessageEnd:
     
     def total_chunks(self) -> int:
         return self._count
+    
+    def sender_id(self) -> str:
+        return self._sender_id
     
 class MessageQueryEnd:
     def __init__(self, client_id: int, query: ResultTableType, count: int):
