@@ -8,8 +8,12 @@ import pika
 from utils.protocol import (
     MSG_HEARTBEAT, MSG_ELECTION, MSG_COORDINATOR, MSG_DEATH,
     HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT, ELECTION_TIMEOUT,
-    CONTROL_EXCHANGE, HEARTBEAT_EXCHANGE
+    CONTROL_EXCHANGE, HEARTBEAT_EXCHANGE,
+    COORDINATION_EXCHANGE, COORDINATION_ROUTING_KEY,
+    MSG_WORKER_END, MSG_WORKER_STATS, MSG_BARRIER_FORWARD
 )
+from collections import defaultdict
+import uuid
 
 class MonitorNode:
     def __init__(self):
@@ -26,17 +30,34 @@ class MonitorNode:
         # Election State
         self.election_in_progress = False
         self.election_start_time = 0
+
+        # Barrier State: client_id -> stage -> tracker
+        # stage: logical pipeline step (e.g., filter_year, agg_products, max_partials, join_items, etc.)
+        # tracker holds counts, expected, last_forward_ts, and senders seen.
+        self.barrier_state = defaultdict(lambda: defaultdict(lambda: {
+            'expected': None,
+            'received_end': 0,
+            'sender_ids': set(),
+            'total_chunks': 0,
+            'last_forward_ts': 0,
+            'forwarded': False,
+        }))
+
+        # How often we forward (seconds). Default: 60s.
+        self.forward_interval = int(os.environ.get('BARRIER_FORWARD_INTERVAL', '60'))
         
         # Threads
         self.sender_thread = threading.Thread(target=self._sender_loop, daemon=True)
         self.listener_thread = threading.Thread(target=self._listener_loop, daemon=True)
         self.checker_thread = threading.Thread(target=self._checker_loop, daemon=True)
+        self.forward_thread = threading.Thread(target=self._forward_loop, daemon=True)
 
     def start(self):
         logging.info(f"Starting MonitorNode {self.node_id}")
         self.sender_thread.start()
         self.listener_thread.start()
         self.checker_thread.start()
+        self.forward_thread.start()
 
     def _get_connection(self):
         return pika.BlockingConnection(pika.ConnectionParameters(host='rabbitmq', heartbeat=0))
@@ -79,6 +100,7 @@ class MonitorNode:
                 channel = connection.channel()
                 channel.exchange_declare(exchange=CONTROL_EXCHANGE, exchange_type='topic', durable=True)
                 channel.exchange_declare(exchange=HEARTBEAT_EXCHANGE, exchange_type='topic', durable=True)
+                channel.exchange_declare(exchange=COORDINATION_EXCHANGE, exchange_type='topic', durable=True)
                 
                 queue_name = f"monitor_listener_{self.node_id}"
                 channel.queue_declare(queue=queue_name, exclusive=True)
@@ -90,6 +112,8 @@ class MonitorNode:
                 channel.queue_bind(exchange=CONTROL_EXCHANGE, queue=queue_name, routing_key="election.#")
                 # 3. Control (Coordinator, Death)
                 channel.queue_bind(exchange=CONTROL_EXCHANGE, queue=queue_name, routing_key="control.#")
+                # 4. Coordination END/stats from workers/server
+                channel.queue_bind(exchange=COORDINATION_EXCHANGE, queue=queue_name, routing_key="coordination.#")
 
                 def callback(ch, method, properties, body):
                     self._handle_message(body)
@@ -152,6 +176,11 @@ class MonitorNode:
                     else:
                         logging.info(f"New Leader elected: {sender_id}")
                         logging.info(f"Accepting {sender_id} as Coordinator.")
+            elif msg_type in (MSG_WORKER_END, MSG_WORKER_STATS):
+                # Only leader tracks barrier data
+                if not self.is_leader:
+                    return
+                self._handle_barrier_message(data)
 
         except Exception as e:
             logging.error(f"Error handling message: {e}")
@@ -191,6 +220,24 @@ class MonitorNode:
                 if time.time() - self.last_leader_heartbeat > HEARTBEAT_TIMEOUT:
                     logging.warning("Leader died! Starting election...")
                     self._start_election()
+
+    def _forward_loop(self):
+        """Periodically forward barrier completion messages downstream"""
+        while self.running:
+            time.sleep(1)
+            if not self.is_leader:
+                continue
+            now = time.time()
+            for client_id, stages in list(self.barrier_state.items()):
+                for stage, tracker in list(stages.items()):
+                    if tracker['forwarded']:
+                        continue
+                    if tracker['expected'] is None:
+                        continue
+                    if tracker['received_end'] >= tracker['expected']:
+                        if now - tracker['last_forward_ts'] >= self.forward_interval:
+                            self._forward_barrier(client_id, stage, tracker)
+                            tracker['last_forward_ts'] = now
 
     def _start_election(self):
         if self.election_in_progress: return
@@ -242,3 +289,49 @@ class MonitorNode:
             connection.close()
         except Exception as e:
             logging.error(f"Death cert error: {e}")
+
+    # ===== Barrier handling =====
+    def _handle_barrier_message(self, data):
+        try:
+            client_id = data.get('client_id')
+            stage = data.get('stage')
+            expected = data.get('expected')
+            sender = data.get('sender')
+            chunks = data.get('chunks', 0)
+            msg_type = data.get('type')
+            tracker = self.barrier_state[client_id][stage]
+            if expected is not None:
+                tracker['expected'] = expected
+            if sender:
+                tracker['sender_ids'].add(sender)
+            if msg_type == MSG_WORKER_END:
+                tracker['received_end'] += 1
+                tracker['total_chunks'] += chunks
+            # Persist? (future) – could be written to disk; keeping in-memory for now.
+        except Exception as e:
+            logging.error(f\"Barrier handle error: {e} | data:{data}\")
+
+    def _forward_barrier(self, client_id, stage, tracker):
+        try:
+            # Build a BARRIER_FORWARD message
+            msg = {
+                'type': MSG_BARRIER_FORWARD,
+                'client_id': client_id,
+                'stage': stage,
+                'timestamp': time.time(),
+                'total_chunks': tracker['total_chunks'],
+                'senders': list(tracker['sender_ids']),
+            }
+            connection = self._get_connection()
+            channel = connection.channel()
+            channel.exchange_declare(exchange=COORDINATION_EXCHANGE, exchange_type='topic', durable=True)
+            channel.basic_publish(
+                exchange=COORDINATION_EXCHANGE,
+                routing_key=COORDINATION_ROUTING_KEY,
+                body=json.dumps(msg)
+            )
+            connection.close()
+            tracker['forwarded'] = True
+            logging.info(f\"Barrier forward | client:{client_id} | stage:{stage} | total_chunks:{tracker['total_chunks']} | senders:{tracker['sender_ids']}\")
+        except Exception as e:
+            logging.error(f\"Barrier forward error: {e} | client:{client_id} | stage:{stage}\")

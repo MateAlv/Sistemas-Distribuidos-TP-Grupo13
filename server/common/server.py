@@ -10,7 +10,13 @@ from utils.results.result_batch_reader import ResultBatchReader
 from utils.file_utils.file_chunk import FileChunk
 from utils.file_utils.table_type import TableType, ResultTableType
 from utils.eof_protocol.end_messages import MessageEnd, MessageQueryEnd
-from middleware.middleware_interface import MessageMiddlewareQueue, TIMEOUT
+from utils.protocol import (
+    COORDINATION_EXCHANGE,
+    MSG_WORKER_END,
+    MSG_WORKER_STATS,
+    STAGE_SERVER_RESULTS,
+)
+from middleware.middleware_interface import MessageMiddlewareQueue, MessageMiddlewareExchange, TIMEOUT
 
 # Delimitadores / framing
 _MESSAGE_DELIM = b"\n"
@@ -86,6 +92,9 @@ class Server:
                 logging.debug("action: save_dir_ready | dir: %s", SAVE_DIR)
             except Exception as e:
                 logging.warning("action: save_dir_create_fail | dir: %s | error: %r", SAVE_DIR, e)
+
+        # Coordination publisher
+        self.middleware_coordination = MessageMiddlewareExchange("rabbitmq", COORDINATION_EXCHANGE, [""], "topic")
 
     # ---------------------------------------------------------------------
 
@@ -193,6 +202,21 @@ class Server:
                             middleware_queue_senders["to_join_menu_items"].send(message)
                         
                     sendall(sock, self.header_id_to_bytes(H_ID_OK))
+                    # Publish coordination END for server ingestion stage
+                    try:
+                        payload = {
+                            "type": MSG_WORKER_END,
+                            "id": "server",
+                            "client_id": client_id,
+                            "stage": STAGE_SERVER_RESULTS,
+                            "expected": 1,
+                            "chunks": sum(number_of_chunks_per_file.values()),
+                            "sender": "server",
+                        }
+                        self.middleware_coordination.send(json.dumps(payload).encode("utf-8"), routing_key="coordination.server")
+                        logging.debug("action: coordination_end_sent | stage:server | cli_id:%s | chunks:%s", client_id, sum(number_of_chunks_per_file.values()))
+                    except Exception as e:
+                        logging.error("action: coordination_end_send_error | stage:server | cli_id:%s | error:%s", client_id, e)
                     
                     if client_id is not None:
                         logging.debug("action: waiting_for_results | peer:%s | client_id:%s", peer, client_id)
@@ -477,6 +501,10 @@ class Server:
                 fd = self._server_socket.fileno()
                 self._server_socket.close()
                 logging.debug("action: fd_close | result: success | kind: listen_socket | fd:%s", fd)
+            try:
+                self.middleware_coordination.close()
+            except Exception:
+                pass
                 
             # Esperar a que terminen los threads de cliente
             with self.clients_lock:

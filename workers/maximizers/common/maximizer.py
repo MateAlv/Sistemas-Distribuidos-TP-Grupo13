@@ -1,5 +1,6 @@
 from utils.processing.process_table import TransactionItemsProcessRow, PurchasesPerUserStoreRow
 import logging
+import json
 from utils.processing.process_table import TableProcessRow
 from utils.processing.process_chunk import ProcessChunk
 from utils.processing.process_batch_reader import ProcessBatchReader
@@ -14,6 +15,7 @@ import heapq
 import re
 import sys
 import os
+import threading
 import uuid
 import pickle
 from utils.tolerance.persistence_service import PersistenceService
@@ -21,6 +23,14 @@ from .maximizer_working_state import MaximizerWorkingState
 from utils.common.processing_types import MonthYear
 
 from workers.common.sharding import queue_name_for, slugify_shard_id
+from utils.protocol import (
+    COORDINATION_EXCHANGE,
+    MSG_WORKER_END,
+    STAGE_MAX_PARTIALS,
+    STAGE_MAX_ABSOLUTE,
+    STAGE_TOP3_PARTIALS,
+    STAGE_TOP3_ABSOLUTE,
+)
 
 TIMEOUT = 3
 
@@ -32,6 +42,7 @@ class Maximizer:
     def __init__(self, maximizer_type: str, maximizer_range: str, expected_inputs: int = 1, monitor=None):
         logging.getLogger('pika').setLevel(logging.CRITICAL)
         self.monitor = monitor
+        self.lock = threading.Lock()
 
         self.__running = True
         
@@ -41,9 +52,15 @@ class Maximizer:
         
         self.role = "absolute" if self.maximizer_range == "absolute" else "partial"
         self.shard_id = self.maximizer_range if self.role == "partial" else None
+        self.shard_slug = self.shard_id
 
         self.persistence = PersistenceService(f"/data/persistence/maximizer_{self.maximizer_type}_{self.maximizer_range}")
         self.working_state = MaximizerWorkingState()
+        # Stage name for centralized barrier
+        if self.maximizer_type == "MAX":
+            self.stage = STAGE_MAX_ABSOLUTE if self.is_absolute_max() else STAGE_MAX_PARTIALS
+        else:
+            self.stage = STAGE_TOP3_ABSOLUTE if self.is_absolute_top3() else STAGE_TOP3_PARTIALS
         
         if self.maximizer_type == "MAX":
             if self.is_absolute_max():
@@ -80,6 +97,9 @@ class Maximizer:
                 self.data_receiver = MessageMiddlewareQueue("rabbitmq", queue_name)
         else:
             raise ValueError(f"Tipo de maximizer inválido: {self.maximizer_type}")
+
+        # Coordination publisher
+        self.middleware_coordination = MessageMiddlewareExchange("rabbitmq", COORDINATION_EXCHANGE, [""], "topic")
 
         self._recover_state()
 
@@ -314,6 +334,21 @@ class Maximizer:
             end_msg = MessageEnd(client_id, table_type, count, sender_id)
             self.data_sender.send(end_msg.encode())
             logging.info(f"action: sent_end_message_to_{target} | client_id:{client_id} | format:END;{client_id};{table_type.value};{count};{sender_id}")
+            # Publish coordination END
+            try:
+                payload = {
+                    "type": MSG_WORKER_END,
+                    "id": sender_id,
+                    "client_id": client_id,
+                    "stage": self.stage,
+                    "expected": self.expected_inputs,
+                    "chunks": count,
+                    "sender": sender_id,
+                }
+                self.middleware_coordination.send(json.dumps(payload).encode("utf-8"), routing_key="coordination.maximizer")
+                logging.debug(f"action: coordination_end_sent | stage:{self.stage} | cli_id:{client_id} | chunks:{count}")
+            except Exception as e:
+                logging.error(f"action: coordination_end_send_error | stage:{self.stage} | cli_id:{client_id} | error:{e}")
         except Exception as e:
             logging.error(f"action: error_sending_end_to_{target} | client_id:{client_id} | error:{e}")
 
@@ -365,6 +400,10 @@ class Maximizer:
             self.middleware_exchange_receiver.stop_consuming()
         except (OSError, RuntimeError, AttributeError):
             pass
+        try:
+            self.middleware_coordination.stop_consuming()
+        except (OSError, RuntimeError, AttributeError):
+            pass
 
         # Cerrar conexiones
         try:
@@ -381,6 +420,10 @@ class Maximizer:
             pass
         try:
             self.middleware_exchange_receiver.close()
+        except (OSError, RuntimeError, AttributeError):
+            pass
+        try:
+            self.middleware_coordination.close()
         except (OSError, RuntimeError, AttributeError):
             pass
 

@@ -5,6 +5,7 @@ from utils.processing.process_chunk import ProcessChunk
 from utils.results.result_chunk import ResultChunkHeader, ResultChunk
 from utils.processing.process_batch_reader import ProcessBatchReader
 from utils.eof_protocol.end_messages import MessageEnd, MessageQueryEnd
+from utils.protocol import COORDINATION_EXCHANGE, MSG_WORKER_END, MSG_WORKER_STATS, STAGE_FILTER_YEAR, STAGE_FILTER_HOUR, STAGE_FILTER_AMOUNT
 from utils.file_utils.table_type import TableType, ResultTableType
 from middleware.middleware_interface import MessageMiddlewareQueue, MessageMiddlewareExchange, TIMEOUT, \
     MessageMiddlewareMessageError
@@ -23,6 +24,15 @@ class Filter:
         self.id = cfg["id"]
         self.cfg = cfg
         self.filter_type = cfg["filter_type"]
+        # Stage name for centralized barrier
+        if self.filter_type == "year":
+            self.stage = STAGE_FILTER_YEAR
+        elif self.filter_type == "hour":
+            self.stage = STAGE_FILTER_HOUR
+        elif self.filter_type == "amount":
+            self.stage = STAGE_FILTER_AMOUNT
+        else:
+            self.stage = f"filter_{self.filter_type}"
 
         self.working_state = FilterWorkingState()
 
@@ -32,6 +42,8 @@ class Filter:
                                                                  f"end_exchange_filter_{self.filter_type}", 
                                                                  [f"{self.id}"], 
                                                                  "fanout")
+        # Coordination publisher (fire-and-forget)
+        self.middleware_coordination = MessageMiddlewareExchange("rabbitmq", COORDINATION_EXCHANGE, [""], "topic")
         self.stats_timer = None
         self.consume_timer = None
         
@@ -208,8 +220,8 @@ class Filter:
             total_received = self.working_state.get_total_chunks_received(client_id, table_type)
             total_not_sent = self.working_state.get_total_not_sent_chunks(client_id, table_type)
             
-            if self.working_state.can_send_end_message(client_id, table_type, total_expected, self.id):
-                self._send_end_message(client_id, table_type, total_expected, total_not_sent)
+                if self.working_state.can_send_end_message(client_id, table_type, total_expected, self.id):
+                    self._send_end_message(client_id, table_type, total_expected, total_not_sent)
 
     def _handle_end_message(self, msg):
         end_message = MessageEnd.decode(msg)
@@ -244,8 +256,24 @@ class Filter:
 
             logging.info(
                 f"action: sending_stats_message | type:{self.filter_type} | cli_id:{client_id} | file_type:{table_type.name} | chunks_received:{own_received} | chunks_not_sent:{own_not_sent} | chunks_expected:{total_expected}")
-            logging.info(f"action: sending_stats_message | msg:{stats_msg.encode()}")
+            logging.debug(f"action: sending_stats_message_raw | msg:{stats_msg.encode()}")
             self.middleware_end_exchange.send(stats_msg.encode())
+            # Publish coordination stats (throttled by should_send_stats)
+            try:
+                payload = {
+                    "type": MSG_WORKER_STATS,
+                    "id": str(self.id),
+                    "client_id": client_id,
+                    "stage": self.stage,
+                    "expected": total_expected,
+                    "chunks": own_received,
+                    "not_sent": own_not_sent,
+                    "sender": str(self.id),
+                }
+                self.middleware_coordination.send(json.dumps(payload).encode("utf-8"), routing_key="coordination.filter")
+                logging.debug(f"action: coordination_stats_sent | stage:{self.stage} | cli_id:{client_id} | received:{own_received} | not_sent:{own_not_sent}")
+            except Exception as e:
+                logging.error(f"action: coordination_stats_send_error | stage:{self.stage} | cli_id:{client_id} | error:{e}")
             # Mark stats as sent with current values
             self.working_state.mark_stats_sent(client_id, table_type, own_received, own_not_sent)
 
@@ -268,6 +296,21 @@ class Filter:
             logging.info(f"action: sending_end_to_queue | type:{self.filter_type} | queue:{queue_name} | total_chunks:{total_expected-total_not_sent}")
             msg_to_send = self._end_message_to_send(client_id, table_type, total_expected, total_not_sent)
             queue.send(msg_to_send.encode())
+        # Publish to coordination for centralized barrier
+        try:
+            payload = {
+                "type": MSG_WORKER_END,
+                "id": str(self.id),
+                "client_id": client_id,
+                "stage": self.stage,
+                "expected": total_expected,
+                "chunks": total_expected - total_not_sent,
+                "sender": str(self.id),
+            }
+            self.middleware_coordination.send(json.dumps(payload).encode("utf-8"), routing_key="coordination.filter")
+            logging.debug(f"action: coordination_end_sent | stage:{self.stage} | cli_id:{client_id} | chunks:{total_expected-total_not_sent}")
+        except Exception as e:
+            logging.error(f"action: coordination_end_send_error | stage:{self.stage} | cli_id:{client_id} | error:{e}")
         end_msg = FilterStatsEndMessage(self.id, client_id, table_type)
         self.middleware_end_exchange.send(end_msg.encode())
         self.working_state.delete_client_stats_data(end_msg)
@@ -385,6 +428,11 @@ class Filter:
                 sender.close()
             except (OSError, RuntimeError, AttributeError):
                 pass
+
+        try:
+            self.middleware_coordination.close()
+        except (OSError, RuntimeError, AttributeError):
+            pass
 
         # Detener el loop principal
         self.__running = False

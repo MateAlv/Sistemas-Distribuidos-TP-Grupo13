@@ -2,7 +2,7 @@
 from utils.processing.process_table import TableProcessRow
 from utils.processing.process_batch_reader import ProcessBatchReader
 from utils.eof_protocol.end_messages import MessageEnd
-from middleware.middleware_interface import MessageMiddlewareMessageError
+from middleware.middleware_interface import MessageMiddlewareMessageError, MessageMiddlewareExchange
 import logging
 import threading
 import sys
@@ -10,7 +10,17 @@ import os
 import pickle
 import uuid
 from collections import deque
+import json
 from utils.tolerance.persistence_service import PersistenceService
+from utils.protocol import (
+    COORDINATION_EXCHANGE,
+    MSG_WORKER_END,
+    MSG_WORKER_STATS,
+    STAGE_JOIN_ITEMS,
+    STAGE_JOIN_STORES_TPV,
+    STAGE_JOIN_STORES_TOP3,
+    STAGE_JOIN_USERS,
+)
 
 TIMEOUT = 3
 
@@ -29,6 +39,16 @@ class Joiner:
 
         self.joiner_type = join_type
         self.expected_inputs = int(expected_inputs) # Number of upstream workers (Aggregators)
+        if self.joiner_type == ITEMS_JOINER:
+            self.stage = STAGE_JOIN_ITEMS
+        elif self.joiner_type == STORES_TPV_JOINER:
+            self.stage = STAGE_JOIN_STORES_TPV
+        elif self.joiner_type == STORES_TOP3_JOINER:
+            self.stage = STAGE_JOIN_STORES_TOP3
+        elif self.joiner_type == USERS_JOINER:
+            self.stage = STAGE_JOIN_USERS
+        else:
+            self.stage = f"join_{self.joiner_type.lower()}"
         
         # State is now managed by WorkingState classes
         self.working_state_main = JoinerMainWorkingState()
@@ -54,6 +74,8 @@ class Joiner:
         
         # Join persistence (Server data)
         self.persistence_join = PersistenceService(directory=os.path.join(base_dir, "join"))
+        # Coordination publisher
+        self.middleware_coordination = MessageMiddlewareExchange("rabbitmq", COORDINATION_EXCHANGE, [""], "topic")
 
         self.define_queues()
 
@@ -202,13 +224,28 @@ class Joiner:
                     pending_msgs = self.working_state_main.get_pending_end_messages()
                     if pending_msgs:
                         for client_id in pending_msgs:
-                            try:
-                                logging.debug(f"action: starting_send_end_query_msg | type:{self.joiner_type} | client_id:{client_id}")
-                                self.send_end_query_msg(client_id)
-                                logging.debug(f"action: completed_send_end_query_msg | type:{self.joiner_type} | client_id:{client_id}")
-                            except Exception as end_msg_error:
-                                logging.error(f"action: error_sending_end_message | type:{self.joiner_type} | client_id:{client_id} | error:{end_msg_error} | error_type:{type(end_msg_error).__name__}")
-                                raise end_msg_error
+            try:
+                logging.debug(f"action: starting_send_end_query_msg | type:{self.joiner_type} | client_id:{client_id}")
+                self.send_end_query_msg(client_id)
+                # Publish coordination END
+                try:
+                    payload = {
+                        "type": MSG_WORKER_END,
+                        "id": str(self.id) if hasattr(self, "id") else self.joiner_type,
+                        "client_id": client_id,
+                        "stage": self.stage,
+                        "expected": self.expected_inputs,
+                        "chunks": 1,
+                        "sender": str(self.id) if hasattr(self, "id") else self.joiner_type,
+                    }
+                    self.middleware_coordination.send(json.dumps(payload).encode("utf-8"), routing_key="coordination.joiner")
+                    logging.debug(f"action: coordination_end_sent | stage:{self.stage} | cli_id:{client_id}")
+                except Exception as e:
+                    logging.error(f"action: coordination_end_send_error | stage:{self.stage} | cli_id:{client_id} | error:{e}")
+                logging.debug(f"action: completed_send_end_query_msg | type:{self.joiner_type} | client_id:{client_id}")
+            except Exception as end_msg_error:
+                logging.error(f"action: error_sending_end_message | type:{self.joiner_type} | client_id:{client_id} | error:{end_msg_error} | error_type:{type(end_msg_error).__name__}")
+                raise end_msg_error
                         self.working_state_main.clear_pending_end_messages()
                         logging.debug(f"action: cleared_pending_end_messages | type:{self.joiner_type}")
                     
@@ -419,6 +456,10 @@ class Joiner:
             self.data_join_receiver.stop_consuming()
         except (OSError, RuntimeError, AttributeError):
             pass
+        try:
+            self.middleware_coordination.stop_consuming()
+        except (OSError, RuntimeError, AttributeError):
+            pass
 
         # Cerrar conexiones
         try:
@@ -431,6 +472,10 @@ class Joiner:
             pass
         try:
             self.data_sender.close()
+        except (OSError, RuntimeError, AttributeError):
+            pass
+        try:
+            self.middleware_coordination.close()
         except (OSError, RuntimeError, AttributeError):
             pass
 
