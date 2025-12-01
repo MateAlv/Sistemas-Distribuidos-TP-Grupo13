@@ -95,8 +95,9 @@ class Aggregator:
             )
 
         self.shard_configs: list[ShardConfig] = []
-        self.shard_configs: list[ShardConfig] = []
         self.id_to_shard: dict[int, ShardConfig] = {}
+        self.shard_id = os.getenv("AGGREGATOR_SHARD_ID", None)
+        self.shard_count = int(os.getenv("AGGREGATOR_SHARDS", "1"))
 
         self.persistence = PersistenceService(f"/data/persistence/aggregator_{self.aggregator_type}_{self.aggregator_id}")
         self.persistence = PersistenceService(f"/data/persistence/aggregator_{self.aggregator_type}_{self.aggregator_id}")
@@ -105,7 +106,6 @@ class Aggregator:
 
 
         if self.aggregator_type == "PRODUCTS":
-            self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", "to_agg_1+2")
             self.stage = STAGE_AGG_PRODUCTS
             try:
                 self.shard_configs = load_shards_from_env("MAX_SHARDS", worker_kind="MAX")
@@ -114,11 +114,20 @@ class Aggregator:
                     f"Invalid MAX shards configuration: {exc}"
                 ) from exc
             self.id_to_shard = build_id_lookup(self.shard_configs)
+            # If shard_id is numeric index, map to shard_configs order; otherwise treat as name
+            shard_to_use = None
+            if self.shard_id is None:
+                raise ShardingConfigError("AGGREGATOR_SHARD_ID must be set for PRODUCTS aggregator")
+            try:
+                shard_idx = int(self.shard_id) - 1
+                shard_to_use = self.shard_configs[shard_idx]
+            except (ValueError, IndexError):
+                shard_to_use = shard_by_id(self.shard_configs, self.shard_id)
+            self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", f"to_agg_products_shard_{shard_to_use.shard_id}")
             for shard in self.shard_configs:
                 self.middleware_queue_sender[shard.queue_name] = MessageMiddlewareQueue("rabbitmq", shard.queue_name)
 
         elif self.aggregator_type == "PURCHASES":
-            self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", "to_agg_4")
             self.stage = STAGE_AGG_PURCHASES
             try:
                 self.shard_configs = load_shards_from_env("TOP3_SHARDS", worker_kind="TOP3")
@@ -127,11 +136,22 @@ class Aggregator:
                     f"Invalid TOP3 shards configuration: {exc}"
                 ) from exc
             self.id_to_shard = build_id_lookup(self.shard_configs)
+            shard_to_use = None
+            if self.shard_id is None:
+                raise ShardingConfigError("AGGREGATOR_SHARD_ID must be set for PURCHASES aggregator")
+            try:
+                shard_idx = int(self.shard_id) - 1
+                shard_to_use = self.shard_configs[shard_idx]
+            except (ValueError, IndexError):
+                shard_to_use = shard_by_id(self.shard_configs, self.shard_id)
+            self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", f"to_agg_purchases_shard_{shard_to_use.shard_id}")
             for shard in self.shard_configs:
                 self.middleware_queue_sender[shard.queue_name] = MessageMiddlewareQueue("rabbitmq", shard.queue_name)
 
         elif self.aggregator_type == "TPV":
-            self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", "to_agg_3")
+            if self.shard_id is None:
+                raise ShardingConfigError("AGGREGATOR_SHARD_ID must be set for TPV aggregator")
+            self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", f"to_agg_tpv_shard_{self.shard_id}")
             self.middleware_queue_sender["to_join_with_stores_tvp"] = MessageMiddlewareQueue("rabbitmq", "to_join_with_stores_tvp")
             self.stage = STAGE_AGG_TPV
         else:
@@ -143,7 +163,7 @@ class Aggregator:
             COORDINATION_EXCHANGE,
             f"aggregator_{self.aggregator_type}_{self.aggregator_id}",
             "topic",
-            routing_keys=[f"coordination.barrier.{self.stage}.{DEFAULT_SHARD}"],
+            routing_keys=[f"coordination.barrier.{self.stage}.{self.shard_id or DEFAULT_SHARD}"],
         )
 
 
@@ -606,13 +626,13 @@ class Aggregator:
                     "id": str(self.aggregator_id),
                     "client_id": client_id,
                     "stage": self.stage,
-                    "shard": DEFAULT_SHARD,
+                    "shard": self.shard_id or DEFAULT_SHARD,
                     "expected": total_expected,
                     "chunks": received,
                     "processed": processed,
                     "sender": str(self.aggregator_id),
                 }
-                rk = f"coordination.barrier.{self.stage}.{DEFAULT_SHARD}"
+                rk = f"coordination.barrier.{self.stage}.{self.shard_id or DEFAULT_SHARD}"
                 self.middleware_coordination.send(json.dumps(payload).encode("utf-8"), routing_key=rk)
                 logging.debug(f"action: coordination_stats_sent | stage:{self.stage} | cli_id:{client_id} | received:{received} | processed:{processed}")
             except Exception as e:
@@ -729,12 +749,12 @@ class Aggregator:
                     "id": str(self.aggregator_id),
                     "client_id": client_id,
                     "stage": self.stage,
-                    "shard": DEFAULT_SHARD,
+                    "shard": self.shard_id or DEFAULT_SHARD,
                     "expected": self.working_state.get_chunks_to_receive(client_id, table_type),
                     "chunks": my_processed,
                     "sender": str(self.aggregator_id),
                 }
-                rk = f"coordination.barrier.{self.stage}.{DEFAULT_SHARD}"
+                rk = f"coordination.barrier.{self.stage}.{self.shard_id or DEFAULT_SHARD}"
                 self.middleware_coordination.send(json.dumps(payload).encode("utf-8"), routing_key=rk)
                 logging.debug(f"action: coordination_end_sent | stage:{self.stage} | cli_id:{client_id} | chunks:{my_processed}")
             except Exception as e:

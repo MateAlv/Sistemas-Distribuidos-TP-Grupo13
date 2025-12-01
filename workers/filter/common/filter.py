@@ -1,6 +1,7 @@
 import logging
 import json
-from collections import deque
+import os
+from collections import deque, defaultdict
 from utils.processing.process_table import TableProcessRow
 from utils.processing.process_chunk import ProcessChunk
 from utils.results.result_chunk import ResultChunkHeader, ResultChunk
@@ -38,6 +39,12 @@ class Filter:
         self.working_state = FilterWorkingState()
 
         self.middleware_queue_sender = {}
+        # Shard counts for downstream routing
+        self.products_shards = int(os.getenv("PRODUCTS_SHARDS", "1"))
+        self.purchases_shards = int(os.getenv("PURCHASES_SHARDS", "1"))
+        self.tpv_shards = int(os.getenv("TPV_SHARDS", "1"))
+        # Track chunk index per destination/client/table to compute shard deterministically
+        self.chunk_counters = defaultdict(int)
 
         self.middleware_end_exchange = MessageMiddlewareExchange("rabbitmq", 
                                                                  f"end_exchange_filter_{self.filter_type}", 
@@ -59,12 +66,9 @@ class Filter:
         if self.filter_type == "year":
             self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", "to_filter_1")
             self.middleware_queue_sender["to_filter_2"] = MessageMiddlewareQueue("rabbitmq", "to_filter_2")
-            self.middleware_queue_sender["to_agg_1+2"] = MessageMiddlewareQueue("rabbitmq", "to_agg_1+2")
-            self.middleware_queue_sender["to_agg_4"] = MessageMiddlewareQueue("rabbitmq", "to_agg_4")
         elif self.filter_type == "hour":
             self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", "to_filter_2")
             self.middleware_queue_sender["to_filter_3"] = MessageMiddlewareQueue("rabbitmq", "to_filter_3")
-            self.middleware_queue_sender["to_agg_3"] = MessageMiddlewareQueue("rabbitmq", "to_agg_3")
         elif self.filter_type == "amount":
             self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", "to_filter_3")
         else:
@@ -423,15 +427,50 @@ class Filter:
         filtered_rows = [tx for tx in chunk.rows if self.apply(tx)]
         logging.debug(f"action: filter_result | type:{self.filter_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()} | rows_out:{len(filtered_rows)}")
         if filtered_rows:
-            for queue_name, queue in self.middleware_queue_sender.items():
-                if self._should_skip_queue(table_type, queue_name, client_id):
-                    continue
-                logging.debug(f"action: sending_to_queue | type:{self.filter_type} | queue:{queue_name} | rows:{len(filtered_rows)/len(chunk.rows):.2%} | cli_id:{chunk.client_id()}")
-                if self.filter_type != "amount":
-                    queue.send(ProcessChunk(chunk.header, filtered_rows).serialize())
+            # Dispatch according to filter type and destination
+            if self.filter_type == "year":
+                # Always forward to next filter in Q1/Q3 path
+                queue = self.middleware_queue_sender["to_filter_2"]
+                logging.debug(f"action: sending_to_queue | type:{self.filter_type} | queue:{queue.queue_name} | rows:{len(filtered_rows)/len(chunk.rows):.2%} | cli_id:{chunk.client_id()}")
+                queue.send(ProcessChunk(chunk.header, filtered_rows).serialize())
 
-                else:
-                    converted_rows = [ Query1ResultRow(tx.transaction_id, tx.final_amount) for tx in filtered_rows]
+                if table_type == TableType.TRANSACTION_ITEMS:
+                    # Q2: route items to products aggregator shards
+                    shard_id = self._next_shard("agg_products", client_id, table_type, self.products_shards)
+                    queue_name = f"to_agg_products_shard_{shard_id}"
+                    if queue_name not in self.middleware_queue_sender:
+                        self.middleware_queue_sender[queue_name] = MessageMiddlewareQueue("rabbitmq", queue_name)
+                    logging.debug(f"action: sending_to_queue | type:{self.filter_type} | queue:{queue_name} | rows:{len(filtered_rows)/len(chunk.rows):.2%} | cli_id:{chunk.client_id()} | shard:{shard_id}")
+                    self.middleware_queue_sender[queue_name].send(ProcessChunk(chunk.header, filtered_rows).serialize())
+                elif table_type == TableType.TRANSACTIONS:
+                    # Q4: route transactions to purchases aggregator shards
+                    shard_id = self._next_shard("agg_purchases", client_id, table_type, self.purchases_shards)
+                    queue_name = f"to_agg_purchases_shard_{shard_id}"
+                    if queue_name not in self.middleware_queue_sender:
+                        self.middleware_queue_sender[queue_name] = MessageMiddlewareQueue("rabbitmq", queue_name)
+                    logging.debug(f"action: sending_to_queue | type:{self.filter_type} | queue:{queue_name} | rows:{len(filtered_rows)/len(chunk.rows):.2%} | cli_id:{chunk.client_id()} | shard:{shard_id}")
+                    self.middleware_queue_sender[queue_name].send(ProcessChunk(chunk.header, filtered_rows).serialize())
+
+            elif self.filter_type == "hour":
+                # Forward to amount filter for Q1
+                queue = self.middleware_queue_sender["to_filter_3"]
+                logging.debug(f"action: sending_to_queue | type:{self.filter_type} | queue:{queue.queue_name} | rows:{len(filtered_rows)/len(chunk.rows):.2%} | cli_id:{chunk.client_id()}")
+                queue.send(ProcessChunk(chunk.header, filtered_rows).serialize())
+
+                if table_type == TableType.TRANSACTIONS:
+                    # Q3: route transactions to TPV aggregator shards
+                    shard_id = self._next_shard("agg_tpv", client_id, table_type, self.tpv_shards)
+                    queue_name = f"to_agg_tpv_shard_{shard_id}"
+                    if queue_name not in self.middleware_queue_sender:
+                        self.middleware_queue_sender[queue_name] = MessageMiddlewareQueue("rabbitmq", queue_name)
+                    logging.debug(f"action: sending_to_queue | type:{self.filter_type} | queue:{queue_name} | rows:{len(filtered_rows)/len(chunk.rows):.2%} | cli_id:{chunk.client_id()} | shard:{shard_id}")
+                    self.middleware_queue_sender[queue_name].send(ProcessChunk(chunk.header, filtered_rows).serialize())
+
+            elif self.filter_type == "amount":
+                converted_rows = [Query1ResultRow(tx.transaction_id, tx.final_amount) for tx in filtered_rows]
+                # Amount filter only sends to merge queue per client
+                for queue_name, queue in self.middleware_queue_sender.items():
+                    logging.debug(f"action: sending_to_queue | type:{self.filter_type} | queue:{queue_name} | rows:{len(filtered_rows)/len(chunk.rows):.2%} | cli_id:{chunk.client_id()}")
                     queue.send(ResultChunk(ResultChunkHeader(client_id, ResultTableType.QUERY_1), converted_rows).serialize())
 
             logging.info(f"action: rows_sent | type:{self.filter_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()} | rows_out:{len(filtered_rows)}")
@@ -445,14 +484,20 @@ class Filter:
 
 
     def _should_skip_queue(self, table_type: TableType, queue_name: str, client_id: int) -> bool:
-        if table_type == TableType.TRANSACTION_ITEMS and queue_name in ["to_filter_2", "to_agg_4"]:
-            return True
-        if table_type == TableType.TRANSACTIONS and queue_name in ["to_agg_1+2"]:
-            return True
+        # Legacy skip logic is superseded by explicit routing
         if self.filter_type == "amount" and queue_name != f"to_merge_data_{client_id}":
             return True
-        
         return False
+
+    def _next_shard(self, dest: str, client_id: int, table_type: TableType, shard_count: int) -> int:
+        """
+        Compute deterministic shard id per destination/client/table using chunk index.
+        """
+        key = (dest, client_id, table_type)
+        idx = self.chunk_counters[key]
+        shard_id = (idx % shard_count) + 1
+        self.chunk_counters[key] += 1
+        return shard_id
 
     def shutdown(self, signum=None, frame=None):
         logging.info(f"SIGTERM recibido: cerrando filtro {self.filter_type} (ID: {self.id})")

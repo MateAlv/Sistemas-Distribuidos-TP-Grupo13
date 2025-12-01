@@ -95,6 +95,37 @@ def read_config(path: str):
     
     return meta, nodes
 
+
+def apply_shard_overrides(meta: dict, nodes: dict):
+    """
+    Allow using SHARDS_Q2/Q3/Q4 as single sources of truth for shard counts.
+    These override the individual aggregator/maximizer counts and generate shard specs.
+    """
+    q2_shards = nodes.pop("SHARDS_Q2", None)
+    q3_shards = nodes.pop("SHARDS_Q3", None)
+    q4_shards = nodes.pop("SHARDS_Q4", None)
+
+    if q2_shards:
+        nodes["AGGREGATOR_PRODUCTS"] = q2_shards
+        nodes["MAXIMIZER_MAX_PARTIAL"] = q2_shards
+        try:
+            meta["max_shards"] = build_shard_spec(PRODUCT_ITEM_IDS, q2_shards, "items")
+        except ValueError as exc:
+            raise ValueError(f"No se puede generar MAX_SHARDS automáticamente con SHARDS_Q2={q2_shards}: {exc}") from exc
+
+    if q3_shards:
+        nodes["AGGREGATOR_TPV"] = q3_shards
+
+    if q4_shards:
+        nodes["AGGREGATOR_PURCHASES"] = q4_shards
+        nodes["MAXIMIZER_TOP3_PARTIAL"] = q4_shards
+        try:
+            meta["top3_shards"] = build_shard_spec(PURCHASE_STORE_IDS, q4_shards, "stores")
+        except ValueError as exc:
+            raise ValueError(f"No se puede generar TOP3_SHARDS automáticamente con SHARDS_Q4={q4_shards}: {exc}") from exc
+
+    return meta, nodes
+
 def define_rabbitmq(compose: dict):
     compose["services"]["rabbitmq"] = {
         "image": "rabbitmq:3-management",
@@ -158,7 +189,7 @@ def get_filter_config_path(nodo: str):
 def is_filter(nodo: str):
     return nodo.startswith("FILTER_")
 
-def define_filter(meta: dict, compose: dict, nodo: str, worker_id: int):
+def define_filter(meta: dict, compose: dict, nodo: str, worker_id: int, nodes: dict):
     base_service_name = f"{nodo.lower()}_service"
     service_name = f"{base_service_name}-{worker_id}" if worker_id > 1 else base_service_name
     config_path = get_filter_config_path(nodo)
@@ -176,6 +207,10 @@ def define_filter(meta: dict, compose: dict, nodo: str, worker_id: int):
             f"LOGGING_LEVEL={meta['logging_level']}",
             f"WORKER_ID={worker_id}",
             f"CONTAINER_NAME={service_name}",
+            # Shard counts for downstream routing
+            f"PRODUCTS_SHARDS={nodes.get('AGGREGATOR_PRODUCTS', 1)}",
+            f"PURCHASES_SHARDS={nodes.get('AGGREGATOR_PURCHASES', 1)}",
+            f"TPV_SHARDS={nodes.get('AGGREGATOR_TPV', 1)}",
         ],
         "volumes": [
             f".{config_path}:{config_path}:ro",
@@ -197,7 +232,7 @@ def define_filter(meta: dict, compose: dict, nodo: str, worker_id: int):
 def is_aggregator(nodo: str):
     return nodo.startswith("AGGREGATOR_")
 
-def define_aggregator(meta: dict, compose: dict, nodo: str, worker_id: int):
+def define_aggregator(meta: dict, compose: dict, nodo: str, worker_id: int, nodes: dict):
     base_service_name = f"{nodo.lower()}_service"
     service_name = f"{base_service_name}-{worker_id}" if worker_id > 1 else base_service_name
     agg_type = nodo.split("_")[1].upper()
@@ -214,6 +249,8 @@ def define_aggregator(meta: dict, compose: dict, nodo: str, worker_id: int):
             f"AGGREGATOR_TYPE={agg_type}",
             f"WORKER_ID={worker_id}",
             f"CONTAINER_NAME={service_name}",
+            f"AGGREGATOR_SHARD_ID={worker_id}",
+            f"AGGREGATOR_SHARDS={nodes.get(nodo, 1)}",
         ],
         "volumes": [
             "./data/persistence:/data/persistence",
@@ -509,29 +546,21 @@ def generate_compose(meta: dict, nodes: dict, services: dict = None):
     agg_products = nodes.get("AGGREGATOR_PRODUCTS", 0)
     agg_purchases = nodes.get("AGGREGATOR_PURCHASES", 0)
 
-    if agg_products > 0 and max_partials == 0:
-        raise ValueError("AGGREGATOR_PRODUCTS requiere MAXIMIZER_MAX_PARTIAL > 0.")
-    if max_partials > 0 and agg_products == 0:
-        raise ValueError("MAXIMIZER_MAX_PARTIAL definido pero AGGREGATOR_PRODUCTS es 0.")
-
-    if agg_purchases > 0 and top3_partials == 0:
-        raise ValueError("AGGREGATOR_PURCHASES requiere MAXIMIZER_TOP3_PARTIAL > 0.")
-    if top3_partials > 0 and agg_purchases == 0:
-        raise ValueError("MAXIMIZER_TOP3_PARTIAL definido pero AGGREGATOR_PURCHASES es 0.")
-
     max_shards_spec = meta.get("max_shards")
     top3_shards_spec = meta.get("top3_shards")
 
-    if not max_shards_spec and max_partials:
+    # Si no hay spec de shards para productos, la generamos con la cantidad de shards de aggregator_products
+    if not max_shards_spec and agg_products:
         try:
-            max_shards_spec = build_shard_spec(PRODUCT_ITEM_IDS, max_partials, "items")
+            max_shards_spec = build_shard_spec(PRODUCT_ITEM_IDS, agg_products, "items")
         except ValueError as exc:
             raise ValueError(f"No se puede generar MAX_SHARDS automáticamente: {exc}") from exc
         meta["max_shards"] = max_shards_spec
 
-    if not top3_shards_spec and top3_partials:
+    # Si no hay spec de shards para purchases, la generamos con la cantidad de shards de aggregator_purchases
+    if not top3_shards_spec and agg_purchases:
         try:
-            top3_shards_spec = build_shard_spec(PURCHASE_STORE_IDS, top3_partials, "stores")
+            top3_shards_spec = build_shard_spec(PURCHASE_STORE_IDS, agg_purchases, "stores")
         except ValueError as exc:
             raise ValueError(f"No se puede generar TOP3_SHARDS automáticamente: {exc}") from exc
         meta["top3_shards"] = top3_shards_spec
@@ -545,15 +574,6 @@ def generate_compose(meta: dict, nodes: dict, services: dict = None):
         top3_shards = parse_shards_spec(top3_shards_spec, worker_kind="TOP3") if top3_shards_spec else []
     except ShardingConfigError as exc:
         raise ValueError(f"TOP3_SHARDS inválido: {exc}") from exc
-
-    if nodes.get("MAXIMIZER_MAX_PARTIAL", 0) not in (0, len(max_shards)):
-        raise ValueError(
-            f"MAXIMIZER_MAX_PARTIAL debe coincidir con la cantidad de shards definidos ({len(max_shards)})."
-        )
-    if nodes.get("MAXIMIZER_TOP3_PARTIAL", 0) not in (0, len(top3_shards)):
-        raise ValueError(
-            f"MAXIMIZER_TOP3_PARTIAL debe coincidir con la cantidad de shards definidos ({len(top3_shards)})."
-        )
 
     define_rabbitmq(compose)
     client_amount = 0
@@ -583,9 +603,9 @@ def generate_compose(meta: dict, nodes: dict, services: dict = None):
                 worker_id = worker_counters[nodo]
                 
                 if is_filter(nodo):
-                    service_name = define_filter(meta, compose, nodo, worker_id)
+                    service_name = define_filter(meta, compose, nodo, worker_id, nodes)
                 elif is_aggregator(nodo):
-                    service_name = define_aggregator(meta, compose, nodo, worker_id)
+                    service_name = define_aggregator(meta, compose, nodo, worker_id, nodes)
                 elif is_maximizer(nodo):
                     service_name = define_maximizer(meta, compose, nodo, worker_id, max_shards, top3_shards, nodes)
                 elif is_joiner(nodo):
@@ -629,6 +649,7 @@ def main():
     args = parser.parse_args()
 
     meta, nodes = read_config(args.config)
+    meta, nodes = apply_shard_overrides(meta, nodes)
     meta['config_path'] = args.config
     
     output_file = meta.get("output_file", "docker-compose.yaml")

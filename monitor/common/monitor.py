@@ -358,9 +358,14 @@ class MonitorNode:
             "JOINER_USERS": STAGE_JOIN_USERS,
             "SERVER_RESULTS": STAGE_SERVER_RESULTS,
         }
+        # For sharded stages we expect 1 worker per shard; config values represent shard count, not workers-per-shard.
+        sharded_stages = {STAGE_AGG_PRODUCTS, STAGE_AGG_TPV, STAGE_AGG_PURCHASES}
         stage_expected = {}
         for cfg_key, stage in stage_map.items():
-            stage_expected[stage] = raw.get(cfg_key, 1)
+            if stage in sharded_stages:
+                stage_expected[stage] = 1
+            else:
+                stage_expected[stage] = raw.get(cfg_key, 1)
         return stage_expected
 
     # ===== Barrier handling =====
@@ -369,13 +374,13 @@ class MonitorNode:
             client_id = data.get('client_id')
             stage = data.get('stage')
             shard = data.get('shard') or DEFAULT_SHARD
-            expected = self.stage_expected.get(stage) or data.get('expected')
+            expected_workers = self.stage_expected.get(stage)
             sender = data.get('sender')
             chunks = data.get('chunks', 0)
             msg_type = data.get('type')
             tracker = self.barrier_state[client_id][stage][shard]
-            if expected is not None:
-                tracker['expected'] = expected
+            if tracker.get('expected') is None and expected_workers is not None:
+                tracker['expected'] = expected_workers
             if sender:
                 tracker['sender_ids'].add(sender)
             if msg_type == MSG_WORKER_END:
@@ -386,7 +391,7 @@ class MonitorNode:
                 tracker['total_chunks'] += chunks
             elif msg_type == MSG_WORKER_STATS:
                 # Track latest stats
-                tracker['stats_expected_chunks'] = expected if expected is not None else tracker.get('stats_expected_chunks')
+                tracker['stats_expected_chunks'] = data.get('expected') if data.get('expected') is not None else tracker.get('stats_expected_chunks')
                 tracker['stats_received'] = max(tracker.get('stats_received', 0), data.get('chunks', 0))
                 tracker['stats_processed'] = max(tracker.get('stats_processed', 0), data.get('processed', data.get('chunks', 0)))
             # Persist? (future) – could be written to disk; keeping in-memory for now.
