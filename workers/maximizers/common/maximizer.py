@@ -26,6 +26,7 @@ from workers.common.sharding import queue_name_for, slugify_shard_id
 from utils.protocol import (
     COORDINATION_EXCHANGE,
     MSG_WORKER_END,
+    MSG_BARRIER_FORWARD,
     STAGE_MAX_PARTIALS,
     STAGE_MAX_ABSOLUTE,
     STAGE_TOP3_PARTIALS,
@@ -49,6 +50,7 @@ class Maximizer:
         self.maximizer_type = maximizer_type
         self.maximizer_range = maximizer_range
         self.expected_inputs = int(expected_inputs)
+        self.barrier_forwarded = set()
         
         self.role = "absolute" if self.maximizer_range == "absolute" else "partial"
         self.shard_id = self.maximizer_range if self.role == "partial" else None
@@ -56,11 +58,12 @@ class Maximizer:
 
         self.persistence = PersistenceService(f"/data/persistence/maximizer_{self.maximizer_type}_{self.maximizer_range}")
         self.working_state = MaximizerWorkingState()
-        # Stage name for centralized barrier
+        # Stage name and shard for centralized barrier
         if self.maximizer_type == "MAX":
             self.stage = STAGE_MAX_ABSOLUTE if self.is_absolute_max() else STAGE_MAX_PARTIALS
         else:
             self.stage = STAGE_TOP3_ABSOLUTE if self.is_absolute_top3() else STAGE_TOP3_PARTIALS
+        self.shard_id = self.shard_slug if self.shard_slug else DEFAULT_SHARD
         
         if self.maximizer_type == "MAX":
             if self.is_absolute_max():
@@ -98,8 +101,14 @@ class Maximizer:
         else:
             raise ValueError(f"Tipo de maximizer inválido: {self.maximizer_type}")
 
-        # Coordination publisher
-        self.middleware_coordination = MessageMiddlewareExchange("rabbitmq", COORDINATION_EXCHANGE, [""], "topic")
+        # Coordination publisher with shard-aware routing
+        self.middleware_coordination = MessageMiddlewareExchange(
+            "rabbitmq",
+            COORDINATION_EXCHANGE,
+            [""],
+            "topic",
+            routing_keys=[f"coordination.barrier.{self.stage}.{self.shard_id}"],
+        )
 
         self._recover_state()
 
@@ -157,16 +166,25 @@ class Maximizer:
         logging.info(f"Maximizer iniciado. Tipo: {self.maximizer_type}, Rango: {self.maximizer_range}, Receiver: {getattr(self.data_receiver, 'queue_name', 'unknown')}")
         
         messages = deque()
+        coord_messages = deque()
         
         def callback(msg):
             messages.append(msg)
             logging.info(f"action: data_received | type:{self.maximizer_type} | range:{self.maximizer_range} | size:{len(msg)}")
+        def coord_callback(msg):
+            coord_messages.append(msg)
+            logging.debug(f"action: coordination_received | type:{self.maximizer_type} | range:{self.maximizer_range} | size:{len(msg)}")
             
         def stop():
             try:
                 self.data_receiver.stop_consuming()
             except Exception as e:
                 logging.debug(f"action: stop_consuming_warning | type:{self.maximizer_type} | range:{self.maximizer_range} | error:{e}")
+        def coord_stop():
+            try:
+                self.middleware_coordination.stop_consuming()
+            except Exception as e:
+                logging.debug(f"action: coord_stop_consuming_warning | type:{self.maximizer_type} | range:{self.maximizer_range} | error:{e}")
 
         # Recover last processing chunk if exists
         last_chunk = self.persistence.recover_last_processing_chunk()
@@ -185,6 +203,12 @@ class Maximizer:
                 self.data_receiver.start_consuming(callback)
             except Exception as e:
                 logging.error(f"action: error_during_consumption | type:{self.maximizer_type} | range:{self.maximizer_range} | error:{e}")
+            try:
+                if hasattr(self.middleware_coordination, "connection"):
+                    self.middleware_coordination.connection.call_later(TIMEOUT, coord_stop)
+                self.middleware_coordination.start_consuming(coord_callback)
+            except Exception as e:
+                logging.error(f"action: coordination_consume_error | type:{self.maximizer_type} | range:{self.maximizer_range} | error:{e}")
 
             while messages:
 
@@ -196,6 +220,13 @@ class Maximizer:
                         self._handle_data_chunk(data)
                 except Exception as e:
                     logging.error(f"action: error_processing_message | type:{self.maximizer_type} | range:{self.maximizer_range} | error:{e}")
+
+            while coord_messages:
+                cmsg = coord_messages.popleft()
+                try:
+                    self._handle_barrier_forward(cmsg)
+                except Exception as e:
+                    logging.error(f"action: error_processing_coord | type:{self.maximizer_type} | range:{self.maximizer_range} | error:{e}")
 
     def _handle_end_message(self, raw_message: bytes):
         logging.info(f"DEBUG: _handle_end_message called with {raw_message}")
@@ -341,14 +372,34 @@ class Maximizer:
                     "id": sender_id,
                     "client_id": client_id,
                     "stage": self.stage,
-                    "expected": self.expected_inputs,
+                    "shard": self.shard_id,
+                    # For barrier gating, expected = chunks we produced
+                    "expected": count,
                     "chunks": count,
                     "sender": sender_id,
                 }
-                self.middleware_coordination.send(json.dumps(payload).encode("utf-8"), routing_key="coordination.maximizer")
+                rk = f"coordination.maximizer.{self.stage}.{self.shard_id}"
+                self.middleware_coordination.send(json.dumps(payload).encode("utf-8"), routing_key=rk)
                 logging.debug(f"action: coordination_end_sent | stage:{self.stage} | cli_id:{client_id} | chunks:{count}")
             except Exception as e:
                 logging.error(f"action: coordination_end_send_error | stage:{self.stage} | cli_id:{client_id} | error:{e}")
+            # Publish coordination STATS (one-shot, alongside END) to signal progress without flooding
+            try:
+                stats_payload = {
+                    "type": MSG_WORKER_STATS,
+                    "id": sender_id,
+                    "client_id": client_id,
+                    "stage": self.stage,
+                    "shard": self.shard_id,
+                    "expected": count,
+                    "chunks": count,
+                    "processed": count,
+                    "sender": sender_id,
+                }
+                self.middleware_coordination.send(json.dumps(stats_payload).encode("utf-8"), routing_key=rk)
+                logging.debug(f"action: coordination_stats_sent | stage:{self.stage} | cli_id:{client_id} | chunks:{count}")
+            except Exception as e:
+                logging.error(f"action: coordination_stats_send_error | stage:{self.stage} | cli_id:{client_id} | error:{e}")
         except Exception as e:
             logging.error(f"action: error_sending_end_to_{target} | client_id:{client_id} | error:{e}")
 
@@ -420,6 +471,10 @@ class Maximizer:
             pass
         try:
             self.middleware_exchange_receiver.close()
+        except (OSError, RuntimeError, AttributeError):
+            pass
+        try:
+            self.middleware_coordination.close()
         except (OSError, RuntimeError, AttributeError):
             pass
         try:
@@ -757,6 +812,29 @@ class Maximizer:
         if os.environ.get("CRASH_POINT") == point_name:
             logging.critical(f"Simulating crash at {point_name}")
             sys.exit(1)
+
+    def _handle_barrier_forward(self, raw_msg: bytes):
+        try:
+            data = json.loads(raw_msg)
+            if data.get("type") != MSG_BARRIER_FORWARD:
+                return
+            stage = data.get("stage")
+            if stage != self.stage:
+                return
+            shard = data.get("shard", DEFAULT_SHARD)
+            if shard != self.shard_id:
+                return
+            client_id = data.get("client_id")
+            key = (client_id, stage, shard)
+            if key in self.barrier_forwarded:
+                return
+            logging.info(f"action: barrier_forward_received | type:{self.maximizer_type} | stage:{stage} | client_id:{client_id}")
+            # Barrier forward means upstream finished; process end if not already
+            expected_table = self._expected_table_type()
+            self.process_client_end(client_id, expected_table)
+            self.barrier_forwarded.add(key)
+        except Exception as e:
+            logging.error(f"action: barrier_forward_error | type:{self.maximizer_type} | error:{e}")
 
     def _recover_state(self):
         state_data = self.persistence.recover_working_state()

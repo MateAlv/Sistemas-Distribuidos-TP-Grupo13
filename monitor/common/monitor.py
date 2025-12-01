@@ -9,8 +9,14 @@ from utils.protocol import (
     MSG_HEARTBEAT, MSG_ELECTION, MSG_COORDINATOR, MSG_DEATH,
     HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT, ELECTION_TIMEOUT,
     CONTROL_EXCHANGE, HEARTBEAT_EXCHANGE,
-    COORDINATION_EXCHANGE, COORDINATION_ROUTING_KEY,
-    MSG_WORKER_END, MSG_WORKER_STATS, MSG_BARRIER_FORWARD
+    COORDINATION_EXCHANGE, COORDINATION_ROUTING_KEY, DEFAULT_SHARD,
+    MSG_WORKER_END, MSG_WORKER_STATS, MSG_BARRIER_FORWARD,
+    STAGE_FILTER_YEAR, STAGE_FILTER_HOUR, STAGE_FILTER_AMOUNT,
+    STAGE_AGG_PRODUCTS, STAGE_AGG_TPV, STAGE_AGG_PURCHASES,
+    STAGE_MAX_PARTIALS, STAGE_MAX_ABSOLUTE,
+    STAGE_TOP3_PARTIALS, STAGE_TOP3_ABSOLUTE,
+    STAGE_JOIN_ITEMS, STAGE_JOIN_STORES_TPV, STAGE_JOIN_STORES_TOP3, STAGE_JOIN_USERS,
+    STAGE_SERVER_RESULTS,
 )
 from collections import defaultdict
 import uuid
@@ -31,17 +37,19 @@ class MonitorNode:
         self.election_in_progress = False
         self.election_start_time = 0
 
-        # Barrier State: client_id -> stage -> tracker
-        # stage: logical pipeline step (e.g., filter_year, agg_products, max_partials, join_items, etc.)
-        # tracker holds counts, expected, last_forward_ts, and senders seen.
-        self.barrier_state = defaultdict(lambda: defaultdict(lambda: {
+        # Barrier State: client_id -> stage -> shard -> tracker
+        # tracker holds counts, expected, last_forward_ts, senders seen, and latest stats.
+        self.barrier_state = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: {
             'expected': None,
             'received_end': 0,
             'sender_ids': set(),
             'total_chunks': 0,
             'last_forward_ts': 0,
             'forwarded': False,
-        }))
+            'stats_expected_chunks': None,
+            'stats_received': 0,
+            'stats_processed': 0,
+        })))
 
         # How often we forward (seconds). Default: 60s.
         self.forward_interval = int(os.environ.get('BARRIER_FORWARD_INTERVAL', '60'))
@@ -52,8 +60,12 @@ class MonitorNode:
         self.checker_thread = threading.Thread(target=self._checker_loop, daemon=True)
         self.forward_thread = threading.Thread(target=self._forward_loop, daemon=True)
 
+        # Expected worker counts per stage (loaded from config)
+        self.stage_expected = self._load_expected_from_config()
+
     def start(self):
         logging.info(f"Starting MonitorNode {self.node_id}")
+        logging.info(f"Barrier expected counts: {self.stage_expected}")
         self.sender_thread.start()
         self.listener_thread.start()
         self.checker_thread.start()
@@ -100,6 +112,7 @@ class MonitorNode:
                 channel = connection.channel()
                 channel.exchange_declare(exchange=CONTROL_EXCHANGE, exchange_type='topic', durable=True)
                 channel.exchange_declare(exchange=HEARTBEAT_EXCHANGE, exchange_type='topic', durable=True)
+                channel.exchange_declare(exchange=COORDINATION_EXCHANGE, exchange_type='topic', durable=True)
                 channel.exchange_declare(exchange=COORDINATION_EXCHANGE, exchange_type='topic', durable=True)
                 
                 queue_name = f"monitor_listener_{self.node_id}"
@@ -229,15 +242,26 @@ class MonitorNode:
                 continue
             now = time.time()
             for client_id, stages in list(self.barrier_state.items()):
-                for stage, tracker in list(stages.items()):
-                    if tracker['forwarded']:
-                        continue
-                    if tracker['expected'] is None:
-                        continue
-                    if tracker['received_end'] >= tracker['expected']:
-                        if now - tracker['last_forward_ts'] >= self.forward_interval:
-                            self._forward_barrier(client_id, stage, tracker)
-                            tracker['last_forward_ts'] = now
+                for stage, shards in list(stages.items()):
+                    for shard, tracker in list(shards.items()):
+                        if tracker['forwarded']:
+                            continue
+                        # Determine expected workers for this stage
+                        expected_workers = tracker['expected'] or self.stage_expected.get(stage)
+                        if expected_workers is None:
+                            continue
+                        tracker['expected'] = expected_workers
+                        # Gate on END count and stats (if available)
+                        ends_ok = tracker['received_end'] >= expected_workers
+                        stats_expected = tracker.get('stats_expected_chunks')
+                        if stats_expected is None:
+                            stats_ok = False
+                        else:
+                            stats_ok = max(tracker.get('stats_received', 0), tracker.get('stats_processed', 0)) >= stats_expected
+                        if ends_ok and stats_ok:
+                            if now - tracker['last_forward_ts'] >= self.forward_interval:
+                                self._forward_barrier(client_id, stage, shard, tracker)
+                                tracker['last_forward_ts'] = now
 
     def _start_election(self):
         if self.election_in_progress: return
@@ -290,23 +314,77 @@ class MonitorNode:
         except Exception as e:
             logging.error(f"Death cert error: {e}")
 
+    def _load_expected_from_config(self):
+        cfg_path = os.environ.get("MONITOR_CONFIG_PATH", "/home/mate/FIUBA/sistemas-distribuidos/Sistemas-Distribuidos-TP-Grupo13/config/config.ini")
+        raw = {}
+        try:
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    if ":" not in line:
+                        continue
+                    key, val = line.split(":", 1)
+                    key = key.strip()
+                    val = val.strip()
+                    try:
+                        num = int(val)
+                    except ValueError:
+                        continue
+                    raw[key] = num
+        except FileNotFoundError:
+            logging.warning(f"Monitor config not found at {cfg_path}, using defaults of 1 per stage.")
+        except Exception as e:
+            logging.error(f"Failed to load monitor config {cfg_path}: {e}")
+
+        stage_map = {
+            "FILTER_YEAR": STAGE_FILTER_YEAR,
+            "FILTER_HOUR": STAGE_FILTER_HOUR,
+            "FILTER_AMOUNT": STAGE_FILTER_AMOUNT,
+            "AGGREGATOR_PRODUCTS": STAGE_AGG_PRODUCTS,
+            "AGGREGATOR_TPV": STAGE_AGG_TPV,
+            "AGGREGATOR_PURCHASES": STAGE_AGG_PURCHASES,
+            "MAXIMIZER_MAX_PARTIAL": STAGE_MAX_PARTIALS,
+            "MAXIMIZER_MAX_ABSOLUTE": STAGE_MAX_ABSOLUTE,
+            "MAXIMIZER_TOP3_PARTIAL": STAGE_TOP3_PARTIALS,
+            "MAXIMIZER_TOP3_ABSOLUTE": STAGE_TOP3_ABSOLUTE,
+            "JOINER_ITEMS": STAGE_JOIN_ITEMS,
+            "JOINER_STORES_TPV": STAGE_JOIN_STORES_TPV,
+            "JOINER_STORES_TOP3": STAGE_JOIN_STORES_TOP3,
+            "JOINER_USERS": STAGE_JOIN_USERS,
+            "SERVER_RESULTS": STAGE_SERVER_RESULTS,
+        }
+        stage_expected = {}
+        for cfg_key, stage in stage_map.items():
+            stage_expected[stage] = raw.get(cfg_key, 1)
+        return stage_expected
+
     # ===== Barrier handling =====
     def _handle_barrier_message(self, data):
         try:
             client_id = data.get('client_id')
             stage = data.get('stage')
-            expected = data.get('expected')
+            shard = data.get('shard') or DEFAULT_SHARD
+            expected = self.stage_expected.get(stage) or data.get('expected')
             sender = data.get('sender')
             chunks = data.get('chunks', 0)
             msg_type = data.get('type')
-            tracker = self.barrier_state[client_id][stage]
+            tracker = self.barrier_state[client_id][stage][shard]
             if expected is not None:
                 tracker['expected'] = expected
             if sender:
                 tracker['sender_ids'].add(sender)
             if msg_type == MSG_WORKER_END:
-                tracker['received_end'] += 1
+                # Count END only once per sender
+                if sender not in tracker['sender_ids']:
+                    tracker['received_end'] += 1
                 tracker['total_chunks'] += chunks
+            elif msg_type == MSG_WORKER_STATS:
+                # Track latest stats
+                tracker['stats_expected_chunks'] = expected if expected is not None else tracker.get('stats_expected_chunks')
+                tracker['stats_received'] = max(tracker.get('stats_received', 0), data.get('chunks', 0))
+                tracker['stats_processed'] = max(tracker.get('stats_processed', 0), data.get('processed', data.get('chunks', 0)))
             # Persist? (future) – could be written to disk; keeping in-memory for now.
         except Exception as e:
             logging.error(f\"Barrier handle error: {e} | data:{data}\")
@@ -332,6 +410,7 @@ class MonitorNode:
             )
             connection.close()
             tracker['forwarded'] = True
-            logging.info(f\"Barrier forward | client:{client_id} | stage:{stage} | total_chunks:{tracker['total_chunks']} | senders:{tracker['sender_ids']}\")
+            logging.info(
+                f\"Barrier forward | client:{client_id} | stage:{stage} | total_chunks:{tracker['total_chunks']} | \"\n+                f\"ends:{tracker['received_end']}/{tracker.get('expected')} | stats:{tracker.get('stats_received',0)}/{tracker.get('stats_expected_chunks')}\"\n+                f\" | senders:{tracker['sender_ids']}\")\n*** End Patch
         except Exception as e:
             logging.error(f\"Barrier forward error: {e} | client:{client_id} | stage:{stage}\")

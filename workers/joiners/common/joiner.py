@@ -16,6 +16,7 @@ from utils.protocol import (
     COORDINATION_EXCHANGE,
     MSG_WORKER_END,
     MSG_WORKER_STATS,
+    MSG_BARRIER_FORWARD,
     STAGE_JOIN_ITEMS,
     STAGE_JOIN_STORES_TPV,
     STAGE_JOIN_STORES_TOP3,
@@ -66,6 +67,7 @@ class Joiner:
         # Iniciar hilos para manejar data y join_data (eliminamos end_message_handler_thread)
         self.data_handler_thread = threading.Thread(target=self.handle_data, name="DataHandler")
         self.join_data_handler_thread = threading.Thread(target=self.handle_join_data, name="JoinDataHandler")
+        self.barrier_forwarded = set()
 
         # Persistence
         # Main persistence (Maximizer data)
@@ -75,7 +77,14 @@ class Joiner:
         # Join persistence (Server data)
         self.persistence_join = PersistenceService(directory=os.path.join(base_dir, "join"))
         # Coordination publisher
-        self.middleware_coordination = MessageMiddlewareExchange("rabbitmq", COORDINATION_EXCHANGE, [""], "topic")
+        # Coordination publisher and consumer with shard-aware routing (joiners are non-sharded: use global)
+        self.middleware_coordination = MessageMiddlewareExchange(
+            "rabbitmq",
+            COORDINATION_EXCHANGE,
+            [""],
+            "topic",
+            routing_keys=[f"coordination.barrier.{self.stage}.{DEFAULT_SHARD}"],
+        )
 
         self.define_queues()
 
@@ -172,11 +181,14 @@ class Joiner:
     def handle_data(self):
         """Maneja datos del maximizer y END messages del exchange"""
         results = deque()
-        end_results = []
+        coord_results = deque()
         
         def callback(msg): results.append(msg)
+        def coord_callback(msg): coord_results.append(msg)
         def stop():
             self.data_receiver.stop_consuming()
+        def coord_stop():
+            self.middleware_coordination.stop_consuming()
 
         while self.__running:
 
@@ -186,6 +198,11 @@ class Joiner:
                 self.data_receiver.start_consuming(callback)
             except (OSError, RuntimeError, MessageMiddlewareMessageError) as e:
                 logging.error(f"Error en consumo: {e}")
+            try:
+                self.middleware_coordination.connection.call_later(TIMEOUT, coord_stop)
+                self.middleware_coordination.start_consuming(coord_callback)
+            except (OSError, RuntimeError, MessageMiddlewareMessageError) as e:
+                logging.error(f"Error en consumo coordination: {e}")
 
             # Procesar datos del maximizer
             while results:
@@ -224,28 +241,35 @@ class Joiner:
                     pending_msgs = self.working_state_main.get_pending_end_messages()
                     if pending_msgs:
                         for client_id in pending_msgs:
-            try:
-                logging.debug(f"action: starting_send_end_query_msg | type:{self.joiner_type} | client_id:{client_id}")
-                self.send_end_query_msg(client_id)
-                # Publish coordination END
-                try:
-                    payload = {
-                        "type": MSG_WORKER_END,
-                        "id": str(self.id) if hasattr(self, "id") else self.joiner_type,
-                        "client_id": client_id,
-                        "stage": self.stage,
-                        "expected": self.expected_inputs,
-                        "chunks": 1,
-                        "sender": str(self.id) if hasattr(self, "id") else self.joiner_type,
-                    }
-                    self.middleware_coordination.send(json.dumps(payload).encode("utf-8"), routing_key="coordination.joiner")
-                    logging.debug(f"action: coordination_end_sent | stage:{self.stage} | cli_id:{client_id}")
-                except Exception as e:
-                    logging.error(f"action: coordination_end_send_error | stage:{self.stage} | cli_id:{client_id} | error:{e}")
-                logging.debug(f"action: completed_send_end_query_msg | type:{self.joiner_type} | client_id:{client_id}")
-            except Exception as end_msg_error:
-                logging.error(f"action: error_sending_end_message | type:{self.joiner_type} | client_id:{client_id} | error:{end_msg_error} | error_type:{type(end_msg_error).__name__}")
-                raise end_msg_error
+                            try:
+                                logging.debug(f"action: starting_send_end_query_msg | type:{self.joiner_type} | client_id:{client_id}")
+                                self.send_end_query_msg(client_id)
+                                # Publish coordination END
+                                try:
+                                    payload = {
+                                        "type": MSG_WORKER_END,
+                                        "id": str(self.id) if hasattr(self, "id") else self.joiner_type,
+                                        "client_id": client_id,
+                                        "stage": self.stage,
+                                        "shard": DEFAULT_SHARD,
+                                        "expected": self.expected_inputs,
+                                        "chunks": 1,
+                                        "sender": str(self.id) if hasattr(self, "id") else self.joiner_type,
+                                    }
+                                    rk = f"coordination.joiner.{self.stage}."shard": DEFAULT_SHARD,
+                                        "expected": self.expected_inputs,
+                                        "chunks": 1,
+                                        "sender": str(self.id) if hasattr(self, "id") else self.joiner_type,
+                                    }
+                                    rk = f"coordination.joiner.{self.stage}.{DEFAULT_SHARD}"
+                                    self.middleware_coordination.send(json.dumps(payload).encode("utf-8"), routing_key=rk)
+                                    logging.debug(f"action: coordination_end_sent | stage:{self.stage} | cli_id:{client_id}")
+                                except Exception as e:
+                                    logging.error(f"action: coordination_end_send_error | stage:{self.stage} | cli_id:{client_id} | error:{e}")
+                                logging.debug(f"action: completed_send_end_query_msg | type:{self.joiner_type} | client_id:{client_id}")
+                            except Exception as end_msg_error:
+                                logging.error(f"action: error_sending_end_message | type:{self.joiner_type} | client_id:{client_id} | error:{end_msg_error} | error_type:{type(end_msg_error).__name__}")
+                                raise end_msg_error
                         self.working_state_main.clear_pending_end_messages()
                         logging.debug(f"action: cleared_pending_end_messages | type:{self.joiner_type}")
                     
@@ -253,6 +277,13 @@ class Joiner:
                     logging.error(f"action: error_parsing_data | type:{self.joiner_type} | error:{e} | error_type:{type(e).__name__} | data_preview:{data[:100] if len(data) > 100 else data}")
                 except Exception as e:
                     logging.error(f"action: unexpected_error | type:{self.joiner_type} | error:{e} | error_type:{type(e).__name__} | error_traceback:", exc_info=True)
+
+            while coord_results:
+                cmsg = coord_results.popleft()
+                try:
+                    self._handle_barrier_forward(cmsg)
+                except Exception as e:
+                    logging.error(f"action: error_processing_coord | type:{self.joiner_type} | error:{e} | error_type:{type(e).__name__} | error_traceback:", exc_info=True)
 
     def _handle_data_chunk(self, data: bytes):
         self._check_crash_point("CRASH_BEFORE_PROCESS")
@@ -284,6 +315,31 @@ class Joiner:
         if os.environ.get("CRASH_POINT") == point_name:
             logging.critical(f"Simulating crash at {point_name}")
             sys.exit(1)
+
+    def _handle_barrier_forward(self, raw_msg: bytes):
+        try:
+            data = json.loads(raw_msg)
+            if data.get("type") != MSG_BARRIER_FORWARD:
+                return
+            stage = data.get("stage")
+            if stage != self.stage:
+                return
+            shard = data.get("shard", DEFAULT_SHARD)
+            if shard != DEFAULT_SHARD:
+                return
+            client_id = data.get("client_id")
+            key = (client_id, stage, shard)
+            if key in self.barrier_forwarded:
+                return
+            logging.info(f"action: barrier_forward_received | type:{self.joiner_type} | stage:{stage} | client_id:{client_id}")
+            with self.lock:
+                self.working_state_main.mark_end_message_received(client_id)
+                self.working_state_main.mark_sender_finished(client_id, "monitor")
+                self.working_state_main.add_expected_chunks(client_id, data.get("total_chunks", 0))
+            self._process_client_if_ready(client_id)
+            self.barrier_forwarded.add(key)
+        except Exception as e:
+            logging.error(f"action: barrier_forward_error | type:{self.joiner_type} | error:{e}")
 
     def save_data(self, chunk) -> bool:
         """
@@ -425,7 +481,7 @@ class Joiner:
         """Clean client data after processing to prevent reprocessing"""
         self.working_state_main.clean_client_data(client_id)
         logging.info(f"action: client_data_cleaned | type:{self.joiner_type} | client_id:{client_id}")
-    
+
     def reset_for_new_session(self):
         """Reset joiner state for a new processing session (new client batch)"""
         with self.lock:
@@ -472,6 +528,10 @@ class Joiner:
             pass
         try:
             self.data_sender.close()
+        except (OSError, RuntimeError, AttributeError):
+            pass
+        try:
+            self.middleware_coordination.close()
         except (OSError, RuntimeError, AttributeError):
             pass
         try:

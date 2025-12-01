@@ -51,12 +51,13 @@ class MessageMiddleware(ABC):
 # Exchange Middleware
 # ----------------------------
 class MessageMiddlewareExchange(MessageMiddleware):
-    def __init__(self, host: str, exchange_name: str, consumer_id: str, exchange_type: str = "fanout"):
+    def __init__(self, host: str, exchange_name: str, consumer_id: str, exchange_type: str = "fanout", routing_keys=None):
         self.host = host
         self.exchange_name = exchange_name
         self.exchange_type = exchange_type
         self.consumer_id = consumer_id
         self.queue_name = f"{exchange_name}_{consumer_id}"
+        self.routing_keys = routing_keys or [""]
         self._connect()
 
     def _connect(self):
@@ -76,7 +77,9 @@ class MessageMiddlewareExchange(MessageMiddleware):
                     durable=True,
                 )
                 self.channel.queue_declare(queue=self.queue_name, durable=True)
-                self.channel.queue_bind(exchange=self.exchange_name, queue=self.queue_name)
+                # Bind with routing keys
+                for rk in self.routing_keys:
+                    self.channel.queue_bind(exchange=self.exchange_name, queue=self.queue_name, routing_key=rk)
                 self.channel.basic_qos(prefetch_count=1)
                 self.channel.confirm_delivery()
                 return
@@ -114,12 +117,12 @@ class MessageMiddlewareExchange(MessageMiddleware):
         except pika.exceptions.AMQPConnectionError:
             raise MessageMiddlewareDisconnectedError("Conexión perdida al detener consumo.")
 
-    def send(self, message: bytes):
+    def send(self, message: bytes, routing_key: str = ""):
         try:
             props = pika.BasicProperties(delivery_mode=2)
             self.channel.basic_publish(
                 exchange=self.exchange_name,
-                routing_key="",
+                routing_key=routing_key,
                 body=message,
                 properties=props,
                 mandatory=False,

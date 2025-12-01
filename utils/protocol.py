@@ -7,6 +7,7 @@ CONTROL_EXCHANGE = 'control_exchange'
 # New coordination exchanges for END/stats barrier handled by monitor leader
 COORDINATION_EXCHANGE = 'coordination_exchange'
 COORDINATION_ROUTING_KEY = 'coordination.barrier'
+DEFAULT_SHARD = 'global'
 
 # New message types for barrier orchestration
 MSG_WORKER_END = 'WORKER_END'

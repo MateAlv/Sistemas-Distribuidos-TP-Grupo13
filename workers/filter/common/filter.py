@@ -5,7 +5,7 @@ from utils.processing.process_chunk import ProcessChunk
 from utils.results.result_chunk import ResultChunkHeader, ResultChunk
 from utils.processing.process_batch_reader import ProcessBatchReader
 from utils.eof_protocol.end_messages import MessageEnd, MessageQueryEnd
-from utils.protocol import COORDINATION_EXCHANGE, MSG_WORKER_END, MSG_WORKER_STATS, STAGE_FILTER_YEAR, STAGE_FILTER_HOUR, STAGE_FILTER_AMOUNT
+from utils.protocol import COORDINATION_EXCHANGE, MSG_WORKER_END, MSG_WORKER_STATS, MSG_BARRIER_FORWARD, STAGE_FILTER_YEAR, STAGE_FILTER_HOUR, STAGE_FILTER_AMOUNT
 from utils.file_utils.table_type import TableType, ResultTableType
 from middleware.middleware_interface import MessageMiddlewareQueue, MessageMiddlewareExchange, TIMEOUT, \
     MessageMiddlewareMessageError
@@ -43,9 +43,17 @@ class Filter:
                                                                  [f"{self.id}"], 
                                                                  "fanout")
         # Coordination publisher (fire-and-forget)
-        self.middleware_coordination = MessageMiddlewareExchange("rabbitmq", COORDINATION_EXCHANGE, [""], "topic")
+        self.middleware_coordination = MessageMiddlewareExchange(
+            "rabbitmq",
+            COORDINATION_EXCHANGE,
+            [""],
+            "topic",
+            routing_keys=[f"coordination.barrier.{self.stage}.{DEFAULT_SHARD}"],
+        )
         self.stats_timer = None
         self.consume_timer = None
+        self.coord_timer = None
+        self.barrier_forwarded = set()
         
         if self.filter_type == "year":
             self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", "to_filter_1")
@@ -99,6 +107,7 @@ class Filter:
         stats_results = deque()
         def callback(msg): results.append(msg)
         def stats_callback(msg): stats_results.append(msg)
+        def coord_callback(msg): results.append((b"BARRIER", msg))
         def stop():
             if not self.middleware_queue_receiver.connection or not self.middleware_queue_receiver.connection.is_open:
                 return
@@ -123,6 +132,13 @@ class Filter:
                 self.middleware_queue_receiver.start_consuming(callback)
             except (OSError, RuntimeError, MessageMiddlewareMessageError) as e:
                  logging.error(f"Error en consumo: {e}")
+
+            # Consume coordination barrier forwards
+            try:
+                self.coord_timer = self.middleware_coordination.connection.call_later(TIMEOUT, stop)
+                self.middleware_coordination.start_consuming(coord_callback)
+            except (OSError, RuntimeError, MessageMiddlewareMessageError) as e:
+                logging.error(f"Error en consumo coordination: {e}")
 
             while stats_results:
 
@@ -166,7 +182,9 @@ class Filter:
 
                 msg = results.popleft()
                 try:
-                    if msg.startswith(b"END;"):
+                    if isinstance(msg, tuple) and msg[0] == b"BARRIER":
+                        self._handle_barrier_forward(msg[1])
+                    elif msg.startswith(b"END;"):
                         self._handle_end_message(msg)
 
                     else:
@@ -220,8 +238,8 @@ class Filter:
             total_received = self.working_state.get_total_chunks_received(client_id, table_type)
             total_not_sent = self.working_state.get_total_not_sent_chunks(client_id, table_type)
             
-                if self.working_state.can_send_end_message(client_id, table_type, total_expected, self.id):
-                    self._send_end_message(client_id, table_type, total_expected, total_not_sent)
+            if self.working_state.can_send_end_message(client_id, table_type, total_expected, self.id):
+                self._send_end_message(client_id, table_type, total_expected, total_not_sent)
 
     def _handle_end_message(self, msg):
         end_message = MessageEnd.decode(msg)
@@ -270,7 +288,8 @@ class Filter:
                     "not_sent": own_not_sent,
                     "sender": str(self.id),
                 }
-                self.middleware_coordination.send(json.dumps(payload).encode("utf-8"), routing_key="coordination.filter")
+                rk = f"coordination.filter.{self.stage}.{DEFAULT_SHARD}"
+                self.middleware_coordination.send(json.dumps(payload).encode("utf-8"), routing_key=rk)
                 logging.debug(f"action: coordination_stats_sent | stage:{self.stage} | cli_id:{client_id} | received:{own_received} | not_sent:{own_not_sent}")
             except Exception as e:
                 logging.error(f"action: coordination_stats_send_error | stage:{self.stage} | cli_id:{client_id} | error:{e}")
@@ -307,7 +326,8 @@ class Filter:
                 "chunks": total_expected - total_not_sent,
                 "sender": str(self.id),
             }
-            self.middleware_coordination.send(json.dumps(payload).encode("utf-8"), routing_key="coordination.filter")
+            rk = f"coordination.filter.{self.stage}.{DEFAULT_SHARD}"
+            self.middleware_coordination.send(json.dumps(payload).encode("utf-8"), routing_key=rk)
             logging.debug(f"action: coordination_end_sent | stage:{self.stage} | cli_id:{client_id} | chunks:{total_expected-total_not_sent}")
         except Exception as e:
             logging.error(f"action: coordination_end_send_error | stage:{self.stage} | cli_id:{client_id} | error:{e}")
@@ -320,6 +340,45 @@ class Filter:
             return MessageEnd(client_id, table_type, total_expected - total_not_sent, str(self.id))
         else:
             return MessageQueryEnd(client_id, ResultTableType.QUERY_1, total_expected - total_not_sent)
+
+    def _handle_barrier_forward(self, raw_msg):
+        try:
+            data = json.loads(raw_msg)
+            if data.get("type") != MSG_BARRIER_FORWARD:
+                return
+            client_id = data.get("client_id")
+            stage = data.get("stage")
+            shard = data.get("shard", DEFAULT_SHARD)
+            if stage != self.stage:
+                return
+            key = (client_id, stage, shard)
+            if key in self.barrier_forwarded:
+                return
+            total_chunks = data.get("total_chunks", 0)
+            total_expected = total_chunks
+            # Send stats to monitor to record expected
+            try:
+                own_received = self.working_state.get_own_chunks_received(client_id, TableType.TRANSACTIONS, self.id)
+                own_not_sent = self.working_state.get_own_chunks_not_sent(client_id, TableType.TRANSACTIONS, self.id)
+                payload = {
+                    "type": MSG_WORKER_STATS,
+                    "id": str(self.id),
+                    "client_id": client_id,
+                    "stage": self.stage,
+                    "expected": total_expected,
+                    "chunks": own_received,
+                    "not_sent": own_not_sent,
+                    "sender": str(self.id),
+                }
+                self.middleware_coordination.send(json.dumps(payload).encode("utf-8"), routing_key="coordination.filter")
+            except Exception as e:
+                logging.error(f"action: coordination_stats_send_error | stage:{self.stage} | cli_id:{client_id} | error:{e}")
+            # Forward END downstream
+            self._send_end_message(client_id, TableType.TRANSACTIONS, total_expected, 0)
+            self.barrier_forwarded.add(key)
+            logging.info(f"action: barrier_forward_consumed | stage:{self.stage} | cli_id:{client_id} | total_chunks:{total_chunks}")
+        except Exception as e:
+            logging.error(f"action: barrier_forward_error | stage:{self.stage} | error:{e}")
             
     def apply(self, tx: TableProcessRow) -> bool:
         """

@@ -4,6 +4,7 @@ from collections import defaultdict, deque
 from types import SimpleNamespace
 import sys
 import os
+import json
 
 from utils.processing.process_table import (
     TransactionItemsProcessRow,
@@ -64,6 +65,7 @@ class Aggregator:
         self.aggregator_type = agg_type
         self.aggregator_id = agg_id
         self.middleware_queue_sender = {}
+        self.barrier_forwarded = set()
 
         # Estado distribuido encapsulado
         self.working_state = AggregatorWorkingState()
@@ -86,6 +88,7 @@ class Aggregator:
             COORDINATION_EXCHANGE,
             [""],
             "topic",
+            routing_keys=[f"coordination.barrier.{self.stage}.{DEFAULT_SHARD}"],
         )
         try:
             self.middleware_stats_exchange.purge()
@@ -216,6 +219,7 @@ class Aggregator:
         data_results = deque()
         stats_results = deque()
         data_chunks = deque()
+        coord_results = deque()
 
         def data_callback(msg):
             data_results.append(msg)
@@ -225,6 +229,8 @@ class Aggregator:
 
         def chunk_callback(msg):
             data_chunks.append(msg)
+        def coord_callback(msg):
+            coord_results.append(msg)
 
         def data_stop():
             self.middleware_data_exchange.stop_consuming()
@@ -234,6 +240,8 @@ class Aggregator:
 
         def chunk_stop():
             self.middleware_queue_receiver.stop_consuming()
+        def coord_stop():
+            self.middleware_coordination.stop_consuming()
 
         # Recover last processing chunk if exists
         last_chunk = self.persistence.recover_last_processing_chunk()
@@ -272,6 +280,15 @@ class Aggregator:
                     f"action: stats_consume_error | type:{self.aggregator_type} | agg_id:{self.aggregator_id} | error:{e}"
                 )
 
+            # Consume coordination barrier forwards
+            try:
+                coord_timer = self.middleware_coordination.connection.call_later(TIMEOUT, coord_stop)
+                self.middleware_coordination.start_consuming(coord_callback)
+            except Exception as e:
+                logging.error(
+                    f"action: coordination_consume_error | type:{self.aggregator_type} | agg_id:{self.aggregator_id} | error:{e}"
+                )
+
             while data_results:
     
                 raw_data = data_results.popleft()
@@ -281,6 +298,10 @@ class Aggregator:
     
                 raw_stats = stats_results.popleft()
                 self._process_stats_message(raw_stats)
+
+            while coord_results:
+                raw_coord = coord_results.popleft()
+                self._process_coord_message(raw_coord)
 
             while data_chunks:
     
@@ -388,18 +409,43 @@ class Aggregator:
         self.working_state.mark_processed(stats.message_id)
         self._save_state(stats.message_id)
 
-        # Enviar mis propios stats si ya procesé algo
-        # No necesitamos forzar el envío de stats aquí. 
-        # Si nuestros stats cambiaron, ya se habrán enviado en _handle_data_chunk.
-        # Si recibimos un update de un peer, solo actualizamos nuestro estado y verificamos si podemos terminar.
-        # self._maybe_send_stats(stats.client_id, stats.table_type, force=True)
-
         # Si aún no conocemos el total global esperado, tomarlo de los stats recibidos
         if self.working_state.get_global_total_expected(stats.client_id, stats.table_type) is None:
             self.working_state.set_global_total_expected(stats.client_id, stats.table_type, stats.total_expected)
 
         if self._can_send_end_message(stats.client_id, stats.table_type):
             self._send_end_message(stats.client_id, stats.table_type)
+
+    def _process_coord_message(self, raw_msg: bytes):
+        try:
+                data = json.loads(raw_msg)
+                if data.get("type") != MSG_BARRIER_FORWARD:
+                    return
+                stage = data.get("stage")
+                if stage != self.stage:
+                    return
+                shard = data.get("shard", DEFAULT_SHARD)
+                client_id = data.get("client_id")
+                key = (client_id, stage, shard)
+                if key in self.barrier_forwarded:
+                    return
+                total_chunks = data.get("total_chunks", 0)
+                # Map stage to table_type
+                if self.aggregator_type == "PRODUCTS":
+                    table_type = TableType.TRANSACTION_ITEMS
+                elif self.aggregator_type in ["PURCHASES", "TPV"]:
+                    table_type = TableType.TRANSACTIONS
+                else:
+                    return
+                self.working_state.set_global_total_expected(client_id, table_type, total_chunks)
+                self.working_state.set_chunks_to_receive(client_id, table_type, total_chunks)
+                self.working_state.mark_end_message_received(client_id, table_type)
+                self._maybe_send_stats(client_id, table_type, force=True)
+                self._send_end_message(client_id, table_type)
+                self.barrier_forwarded.add(key)
+                logging.info(f"action: barrier_forward_consumed | type:{self.aggregator_type} | cli_id:{client_id} | shard:{shard} | total_chunks:{total_chunks}")
+        except Exception as e:
+            logging.error(f"action: barrier_forward_error | type:{self.aggregator_type} | error:{e}")
 
     def _handle_end_message(self, raw_msg: bytes):
         try:
@@ -576,12 +622,14 @@ class Aggregator:
                 "id": str(self.aggregator_id),
                 "client_id": client_id,
                 "stage": self.stage,
+                "shard": DEFAULT_SHARD,
                 "expected": total_expected,
                 "chunks": received,
                 "processed": processed,
                 "sender": str(self.aggregator_id),
             }
-            self.middleware_coordination.send(json.dumps(payload).encode("utf-8"), routing_key="coordination.aggregator")
+            rk = f"coordination.aggregator.{self.stage}.{DEFAULT_SHARD}"
+            self.middleware_coordination.send(json.dumps(payload).encode("utf-8"), routing_key=rk)
             logging.debug(f"action: coordination_stats_sent | stage:{self.stage} | cli_id:{client_id} | received:{received} | processed:{processed}")
         except Exception as e:
             logging.error(f"action: coordination_stats_send_error | stage:{self.stage} | cli_id:{client_id} | error:{e}")
@@ -692,11 +740,13 @@ class Aggregator:
                     "id": str(self.aggregator_id),
                     "client_id": client_id,
                     "stage": self.stage,
+                    "shard": DEFAULT_SHARD,
                     "expected": self.working_state.get_chunks_to_receive(client_id, table_type),
                     "chunks": my_processed,
                     "sender": str(self.aggregator_id),
                 }
-                self.middleware_coordination.send(json.dumps(payload).encode("utf-8"), routing_key="coordination.aggregator")
+                rk = f"coordination.aggregator.{self.stage}.{DEFAULT_SHARD}"
+                self.middleware_coordination.send(json.dumps(payload).encode("utf-8"), routing_key=rk)
                 logging.debug(f"action: coordination_end_sent | stage:{self.stage} | cli_id:{client_id} | chunks:{my_processed}")
             except Exception as e:
                 logging.error(f"action: coordination_end_send_error | stage:{self.stage} | cli_id:{client_id} | error:{e}")

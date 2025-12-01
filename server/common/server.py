@@ -15,6 +15,7 @@ from utils.protocol import (
     MSG_WORKER_END,
     MSG_WORKER_STATS,
     STAGE_SERVER_RESULTS,
+    DEFAULT_SHARD,
 )
 from middleware.middleware_interface import MessageMiddlewareQueue, MessageMiddlewareExchange, TIMEOUT
 
@@ -93,8 +94,14 @@ class Server:
             except Exception as e:
                 logging.warning("action: save_dir_create_fail | dir: %s | error: %r", SAVE_DIR, e)
 
-        # Coordination publisher
-        self.middleware_coordination = MessageMiddlewareExchange("rabbitmq", COORDINATION_EXCHANGE, [""], "topic")
+        # Coordination publisher (server is non-sharded)
+        self.middleware_coordination = MessageMiddlewareExchange(
+            "rabbitmq",
+            COORDINATION_EXCHANGE,
+            [""],
+            "topic",
+            routing_keys=[f"coordination.barrier.{STAGE_SERVER_RESULTS}.{DEFAULT_SHARD}"],
+        )
 
     # ---------------------------------------------------------------------
 
@@ -209,11 +216,13 @@ class Server:
                             "id": "server",
                             "client_id": client_id,
                             "stage": STAGE_SERVER_RESULTS,
+                            "shard": DEFAULT_SHARD,
                             "expected": 1,
                             "chunks": sum(number_of_chunks_per_file.values()),
                             "sender": "server",
                         }
-                        self.middleware_coordination.send(json.dumps(payload).encode("utf-8"), routing_key="coordination.server")
+                        rk = f"coordination.server.{STAGE_SERVER_RESULTS}.{DEFAULT_SHARD}"
+                        self.middleware_coordination.send(json.dumps(payload).encode("utf-8"), routing_key=rk)
                         logging.debug("action: coordination_end_sent | stage:server | cli_id:%s | chunks:%s", client_id, sum(number_of_chunks_per_file.values()))
                     except Exception as e:
                         logging.error("action: coordination_end_send_error | stage:server | cli_id:%s | error:%s", client_id, e)
