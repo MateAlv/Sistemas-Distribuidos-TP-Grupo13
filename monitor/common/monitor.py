@@ -43,6 +43,7 @@ class MonitorNode:
             'expected': None,
             'received_end': 0,
             'sender_ids': set(),
+            'end_sender_ids': set(),
             'total_chunks': 0,
             'last_forward_ts': 0,
             'forwarded': False,
@@ -377,8 +378,9 @@ class MonitorNode:
                 tracker['sender_ids'].add(sender)
             if msg_type == MSG_WORKER_END:
                 # Count END only once per sender
-                if sender not in tracker['sender_ids']:
+                if sender not in tracker['end_sender_ids']:
                     tracker['received_end'] += 1
+                    tracker['end_sender_ids'].add(sender)
                 tracker['total_chunks'] += chunks
             elif msg_type == MSG_WORKER_STATS:
                 # Track latest stats
@@ -399,7 +401,7 @@ class MonitorNode:
                 'shard': shard,
                 'timestamp': time.time(),
                 'total_chunks': tracker['total_chunks'],
-                'senders': list(tracker['sender_ids']),
+                'senders': list(tracker['end_sender_ids']),
             }
             connection = self._get_connection()
             channel = connection.channel()

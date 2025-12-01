@@ -110,8 +110,8 @@ def define_rabbitmq(compose: dict):
             "timeout": "5s",
             "retries": 10,
         },
-        "environment": [
-            "RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS=-rabbit vm_memory_high_watermark.relative 0.6"
+        "volumes": [
+            "./rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro"
         ],
         "networks": ["testing_net"]
     }
@@ -430,6 +430,7 @@ def define_monitor(meta: dict, compose: dict, count: int):
             ],
             "volumes": [
                 "/var/run/docker.sock:/var/run/docker.sock",
+                f"./{meta['config_path']}:/monitor/config/config.ini:ro",
             ],
             "networks": ["testing_net"],
             "depends_on": {
@@ -586,6 +587,7 @@ def main():
     args = parser.parse_args()
 
     meta, nodes = read_config(args.config)
+    meta['config_path'] = args.config
     
     output_file = meta.get("output_file", "docker-compose.yaml")
 
