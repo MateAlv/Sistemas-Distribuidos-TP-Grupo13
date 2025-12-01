@@ -110,6 +110,9 @@ def define_rabbitmq(compose: dict):
             "timeout": "5s",
             "retries": 10,
         },
+        "environment": [
+            "RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS=-rabbit vm_memory_high_watermark.relative 0.6"
+        ],
         "networks": ["testing_net"]
     }
 
@@ -423,6 +426,7 @@ def define_monitor(meta: dict, compose: dict, count: int):
                 "PYTHONUNBUFFERED=1",
                 f"CONTAINER_NAME={service_name}",
                 f"LOGGING_LEVEL={meta['logging_level']}",
+                "MONITOR_CONFIG_PATH=/monitor/config/config.ini",
             ],
             "volumes": [
                 "/var/run/docker.sock:/var/run/docker.sock",
