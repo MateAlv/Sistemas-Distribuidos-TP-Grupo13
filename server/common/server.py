@@ -3,6 +3,7 @@ import os
 import socket
 import threading
 import logging
+import json
 from typing import Tuple, Optional
 from utils.communication.socket_utils import ensure_socket, recv_exact, sendall
 from utils.processing.process_batch_reader import ProcessBatchReader

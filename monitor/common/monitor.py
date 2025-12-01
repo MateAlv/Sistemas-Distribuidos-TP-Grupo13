@@ -23,6 +23,8 @@ import uuid
 
 class MonitorNode:
     def __init__(self):
+        logging.getLogger('pika').setLevel(logging.CRITICAL)
+        
         self.container_name = os.environ.get('CONTAINER_NAME', 'unknown')
         self.node_id = self.container_name
         self.is_leader = False

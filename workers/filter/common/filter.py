@@ -72,7 +72,9 @@ class Filter:
         logging.info(f"Filtro inicializado. Tipo: {self.filter_type}, ID: {self.id}"
                      f" | Receiver Queue: {self.middleware_queue_receiver.queue_name}"
                      f" | Sender Queues: {list(self.middleware_queue_sender.keys())}"
-                     f" | End Exchange: end_exchange_filter_{self.filter_type}")
+                     f" | End Exchange: end_exchange_filter_{self.filter_type}"
+                     f" | Monitor: {self.monitor}"
+                     )
 
         logging.info("Verificando recuperación de procesamiento previo")
         self.persistence_service = PersistenceService()
