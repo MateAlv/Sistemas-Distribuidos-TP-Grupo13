@@ -1,7 +1,7 @@
 import logging
 
 from middleware.middleware_interface import MessageMiddlewareQueue
-from utils.eof_protocol.end_messages import MessageQueryEnd
+from utils.eof_protocol.end_messages import MessageQueryEnd, MessageForceEnd
 from utils.file_utils.table_type import ResultTableType
 from utils.processing.process_table import TableProcessRow, PurchasesPerUserStoreRow
 from utils.results.result_chunk import ResultChunkHeader, ResultChunk
@@ -101,7 +101,7 @@ class UsersJoiner(Joiner):
 
     def send_force_end_msg(self, client_id):
         try:
-            force_end_msg = MessageQueryEnd.force_end_message(client_id)
+            force_end_msg = MessageForceEnd(client_id)
             client_queue = MessageMiddlewareQueue("rabbitmq", f"to_merge_data_{client_id}")
             client_queue.send(force_end_msg.encode())
             client_queue.close()

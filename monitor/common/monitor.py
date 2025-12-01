@@ -10,6 +10,8 @@ from utils.protocol import (
     HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT, ELECTION_TIMEOUT,
     CONTROL_EXCHANGE, HEARTBEAT_EXCHANGE
 )
+from utils.eof_protocol.end_messages import MessageForceEnd
+from middleware.middleware_interface import MessageMiddlewareQueue
 
 class MonitorNode:
     def __init__(self):
@@ -131,8 +133,6 @@ class MonitorNode:
                         
                         if self.election_in_progress and sender_id > self.node_id:
                             self.election_in_progress = False
-                if component == 'server':
-                    pass
                 
             elif msg_type == MSG_ELECTION:
                 # Only Monitors participate
@@ -182,8 +182,15 @@ class MonitorNode:
 
                 for node_id, last_seen in list(self.nodes_last_seen.items()):
                     if node_id == self.node_id: continue # Don't check self
-                    
+
                     if time.time() - last_seen > HEARTBEAT_TIMEOUT:
+                        if node_id == 'server':
+                            queue = MessageMiddlewareQueue('rabbitmq', 'to_filter_1')
+                            force_end = MessageForceEnd()  # client_id=0 indicates server
+                            logging.warning("Server unresponsive! Sending FORCE_END to all workers.")
+                            queue.send(force_end.encode())
+                            queue.close()
+
                         logging.info(f"Node {node_id} died. Reviving...")
                         self._revive_node(node_id)
                         del self.nodes_last_seen[node_id]

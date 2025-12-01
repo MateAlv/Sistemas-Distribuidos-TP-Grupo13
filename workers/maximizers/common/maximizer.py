@@ -102,10 +102,18 @@ class Maximizer:
     
     def delete_client_data(self, client_id: int):
         """Elimina la información almacenada de un cliente"""
-        self.working_state.delete_client_data(client_id, self.maximizer_type, self.role == "absolute")
+        if client_id == 0:
+            self.working_state.delete_all_data(self.maximizer_type, self.role == "absolute")
+        else:
+            self.working_state.delete_client_data(client_id, self.maximizer_type, self.role == "absolute")
         
         logging.info(f"action: delete_client_data | type:{self.maximizer_type} | range:{self.maximizer_range} | client_id:{client_id}")
         self._save_state(uuid.uuid4())
+    
+    def delete_all_data(self):
+        """Elimina toda la información almacenada"""
+        self.working_state.delete_all_data(self.maximizer_type, self.role == "absolute")
+        logging.info(f"action: delete_all_data | type:{self.maximizer_type} | range:{self.maximizer_range}")
     
     def process_client_end(self, client_id: int, table_type: TableType):
         """Procesa el final de un cliente y envía resultados"""

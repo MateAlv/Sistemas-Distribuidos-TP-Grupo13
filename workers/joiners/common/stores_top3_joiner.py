@@ -1,7 +1,7 @@
 import logging
 
 from middleware.middleware_interface import MessageMiddlewareQueue
-from utils.eof_protocol.end_messages import MessageEnd
+from utils.eof_protocol.end_messages import MessageEnd, MessageForceEnd
 from utils.file_utils.table_type import TableType
 from utils.processing.process_chunk import ProcessChunk, ProcessChunkHeader
 from utils.processing.process_table import TableProcessRow, PurchasesPerUserStoreRow
@@ -87,7 +87,7 @@ class StoresTop3Joiner(Joiner):
 
     def send_force_end_msg(self, client_id):
         try:
-            force_end_msg = MessageEnd.force_end_message(client_id)
+            force_end_msg = MessageForceEnd(client_id)
             self.data_sender.send(force_end_msg.encode())
             logging.info(f"action: sent_force_end_to_users_joiner | client_id:{client_id}")
         except Exception as e:

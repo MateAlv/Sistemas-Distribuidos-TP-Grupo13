@@ -22,6 +22,18 @@ class MaximizerWorkingState(WorkingState):
 
     def is_processed(self, message_id):
         return message_id in self.processed_ids
+    
+    def delete_all_data(self, maximizer_type, is_absolute):
+        if maximizer_type == "MAX":
+            self.sellings_max.clear()
+            self.profit_max.clear()
+            if is_absolute:
+                self.partial_ranges_seen.clear()
+                self.partial_end_counts.clear()
+        elif maximizer_type == "TOP3":
+            self.top3_by_store.clear()
+            if is_absolute:
+                self.partial_top3_finished.clear()
 
     def mark_processed(self, message_id):
         self.processed_ids.add(message_id)

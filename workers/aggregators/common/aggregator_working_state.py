@@ -134,24 +134,33 @@ class AggregatorWorkingState(WorkingState):
         return self.global_accumulator[client_id].setdefault("tpv", defaultdict(float))
     
     def force_delete_client_data(self, client_id):
-        for dictionary in [
-            self.end_message_received,
-            self.chunks_received_per_client,
-            self.chunks_processed_per_client,
-            self.accumulated_chunks_per_client,
-            self.chunks_to_receive,
-        ]:
-            if client_id in dictionary:
-                del dictionary[client_id]
+        if client_id == 0:
+            self.end_message_received.clear()
+            self.chunks_received_per_client.clear()
+            self.chunks_processed_per_client.clear()
+            self.accumulated_chunks_per_client.clear()
+            self.chunks_to_receive.clear()
+            self.already_sent_stats.clear()
+            self.global_accumulator.clear()
+        else:
+            for dictionary in [
+                self.end_message_received,
+                self.chunks_received_per_client,
+                self.chunks_processed_per_client,
+                self.accumulated_chunks_per_client,
+                self.chunks_to_receive,
+            ]:
+                if client_id in dictionary:
+                    del dictionary[client_id]
 
-        keys_to_delete = [
-            key for key in self.already_sent_stats if key[0] == client_id
-        ]
-        for key in keys_to_delete:
-            del self.already_sent_stats[key]
+            keys_to_delete = [
+                key for key in self.already_sent_stats if key[0] == client_id
+            ]
+            for key in keys_to_delete:
+                del self.already_sent_stats[key]
 
-        if client_id in self.global_accumulator:
-            del self.global_accumulator[client_id]
+            if client_id in self.global_accumulator:
+                del self.global_accumulator[client_id]
 
     def delete_client_data(self, client_id, table_type, accumulator_key):
         for dictionary in [

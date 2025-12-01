@@ -19,6 +19,15 @@ class JoinerMainWorkingState(WorkingState):
     def add_processed_id(self, message_id):
         self.processed_ids_main.add(message_id)
 
+    def delete_all_data(self):
+        self.data.clear()
+        self.joiner_data_chunks.clear()
+        self.joiner_results.clear()
+        self.client_end_messages_received.clear()
+        self.completed_clients.clear()
+        self._pending_end_messages.clear()
+        self.ready_to_join.clear()
+
     def add_data(self, client_id, rows):
         if client_id not in self.data:
             self.data[client_id] = []

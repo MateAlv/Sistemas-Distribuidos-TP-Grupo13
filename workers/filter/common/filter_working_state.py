@@ -151,25 +151,33 @@ class FilterWorkingState(WorkingState):
     def force_delete_client_stats_data(self, client_id):
         logging.info(f"action: deleting_client_stats_data | cli_id:{client_id}")
         try:
-            with self._lock:
-                if client_id in self.end_message_received:
-                    del self.end_message_received[client_id]
+            if client_id == 0:
+                self.end_message_received.clear()
+                self.number_of_chunks_to_receive.clear()
+                self.chunks_received_per_filter.clear()
+                self.chunks_not_sent_per_filter.clear()
+                self.already_sent_stats.clear()
+                logging.info(f"action: all_clients_stats_data_deleted")
+            else:
+                with self._lock:
+                    if client_id in self.end_message_received:
+                        del self.end_message_received[client_id]
 
-                if client_id in self.number_of_chunks_to_receive:
-                    del self.number_of_chunks_to_receive[client_id]
+                    if client_id in self.number_of_chunks_to_receive:
+                        del self.number_of_chunks_to_receive[client_id]
 
-                if client_id in self.chunks_received_per_filter:
-                    del self.chunks_received_per_filter[client_id]
+                    if client_id in self.chunks_received_per_filter:
+                        del self.chunks_received_per_filter[client_id]
 
-                if client_id in self.chunks_not_sent_per_filter:
-                    del self.chunks_not_sent_per_filter[client_id]
+                    if client_id in self.chunks_not_sent_per_filter:
+                        del self.chunks_not_sent_per_filter[client_id]
 
-                if client_id in self.number_of_chunks_to_receive:
-                    del self.number_of_chunks_to_receive[client_id]
+                    if client_id in self.number_of_chunks_to_receive:
+                        del self.number_of_chunks_to_receive[client_id]
 
-                keys_to_delete = [key for key in self.already_sent_stats if key[0] == client_id]
-                for key in keys_to_delete:
-                    del self.already_sent_stats[key]
+                    keys_to_delete = [key for key in self.already_sent_stats if key[0] == client_id]
+                    for key in keys_to_delete:
+                        del self.already_sent_stats[key]
 
                 logging.info(f"action: client_stats_data_deleted | cli_id:{client_id}")
         except KeyError:

@@ -172,9 +172,14 @@ class Joiner:
                         logging.info(f"action: received_force_end_message | type:{self.joiner_type} | client_id:{client_id}")
                         
                         with self.lock:
-                            self.working_state_main.clean_client_data(client_id)
+                            if client_id == 0:
+                                self.working_state_main.clean_all_data()
+                            else:
+                                self.working_state_main.clean_client_data(client_id)
                             logging.debug(f"action: force_end_processing_complete | type:{self.joiner_type} | client_id:{client_id}")
                         
+                        self.send_force_end_msg(client_id)
+
                     if data.startswith(b"END;"):
                         end_message = MessageEnd.decode(data)
                         client_id = end_message.client_id()
