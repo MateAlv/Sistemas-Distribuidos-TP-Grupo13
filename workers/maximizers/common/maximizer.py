@@ -26,6 +26,7 @@ from workers.common.sharding import queue_name_for, slugify_shard_id
 from utils.protocol import (
     COORDINATION_EXCHANGE,
     MSG_WORKER_END,
+    MSG_WORKER_STATS,
     MSG_BARRIER_FORWARD,
     DEFAULT_SHARD,
     STAGE_MAX_PARTIALS,

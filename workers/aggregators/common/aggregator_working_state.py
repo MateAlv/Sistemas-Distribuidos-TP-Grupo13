@@ -173,6 +173,12 @@ class AggregatorWorkingState(WorkingState):
             client_id in self.global_accumulator
             and accumulator_key in self.global_accumulator[client_id]
         ):
-            del self.global_accumulator[client_id][accumulator_key]
             if not self.global_accumulator[client_id]:
                 del self.global_accumulator[client_id]
+
+    def get_active_clients_and_tables(self):
+        active = []
+        for client_id, tables in self.chunks_received_per_client.items():
+            for table_type in tables.keys():
+                active.append((client_id, table_type))
+        return active
