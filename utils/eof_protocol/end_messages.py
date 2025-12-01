@@ -79,3 +79,27 @@ class MessageQueryEnd:
     
     def total_chunks(self) -> int:
         return self._count
+    
+class MessageForceEnd:
+    def __init__(self, client_id: int = 0):
+        self._client_id = client_id
+    def encode(self) -> bytes:
+        """
+        Serializa el objeto a bytes con el formato:
+        b"END;{client_id};{table_type.value};{count}"
+        """
+        return f"FORCE_END;{self._client_id};".encode("utf-8")
+    @classmethod
+    def decode(cls, message: bytes) -> "MessageForceEnd":
+        """
+        Crea un objeto MessageForceEnd a partir de bytes.
+        """
+        decoded = message.decode("utf-8")
+        parts = decoded.split(";")
+        if len(parts) != 2 or parts[0] != "FORCE_END":
+            raise ValueError(f"Formato inválido de mensaje FORCE_END: {decoded}")
+        _, client_id = parts
+        return cls(int(client_id))
+    
+    def client_id(self) -> int:
+        return self._client_id

@@ -9,7 +9,7 @@ from utils.processing.process_batch_reader import ProcessBatchReader
 from utils.results.result_batch_reader import ResultBatchReader
 from utils.file_utils.file_chunk import FileChunk
 from utils.file_utils.table_type import TableType, ResultTableType
-from utils.eof_protocol.end_messages import MessageEnd, MessageQueryEnd
+from utils.eof_protocol.end_messages import MessageEnd, MessageQueryEnd, MessageForceEnd
 from middleware.middleware_interface import MessageMiddlewareQueue, TIMEOUT
 
 # Delimitadores / framing
@@ -203,6 +203,16 @@ class Server:
                     logging.warning("action: unknown_header | peer:%s | header:%s", peer, header)
                     break
 
+        except OSError as e:
+            logging.error("action: client_os_error | peer:%s | client_id:%s | error:%r", peer, client_id, e)
+            for name, queue in middleware_queue_senders.items():
+                try:
+                    force_end_message = MessageForceEnd(client_id).encode()
+                    queue.send(force_end_message)
+                    logging.debug("action: sent_force_end_message | peer:%s | client_id:%s | queue:%s", peer, client_id, name)
+                except Exception as e:
+                    logging.warning("action: send_force_end_error | peer:%s | client_id:%s | queue:%s | error:%r", peer, client_id, name, e)
+
         except Exception as e:
             logging.error("action: client_handler_error | peer:%s | client_id:%s | error:%r", peer, client_id, e)
         finally:
@@ -392,6 +402,15 @@ class Server:
 
             for msg in list(results_for_client):
                 try:
+                    if msg.startswith(b"FORCE_END;"):
+                        force_end_message = MessageForceEnd.decode(msg)
+                        logging.info(
+                            "action: force_end_received | peer:%s | cli_id:%s",
+                            peer,
+                            force_end_message.client_id(),
+                        )
+                        return
+                    
                     if msg.startswith(b"QUERY_END;"):
                         query_end_message = MessageQueryEnd.decode(msg)
                         query = query_end_message.query()

@@ -131,7 +131,9 @@ class MonitorNode:
                         
                         if self.election_in_progress and sender_id > self.node_id:
                             self.election_in_progress = False
-
+                if component == 'server':
+                    pass
+                
             elif msg_type == MSG_ELECTION:
                 # Only Monitors participate
                 if sender_id < self.node_id:

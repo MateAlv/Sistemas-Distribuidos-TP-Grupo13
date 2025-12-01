@@ -98,3 +98,13 @@ class UsersJoiner(Joiner):
             logging.info(f"action: sent_query4_results | type:{self.joiner_type} | client_id:{client_id} | results:{len(query4_results)}")
         else:
             logging.info(f"action: no_query4_results_to_send | type:{self.joiner_type} | client_id:{client_id}")
+
+    def send_force_end_msg(self, client_id):
+        try:
+            force_end_msg = MessageQueryEnd.force_end_message(client_id)
+            client_queue = MessageMiddlewareQueue("rabbitmq", f"to_merge_data_{client_id}")
+            client_queue.send(force_end_msg.encode())
+            client_queue.close()
+            logging.info(f"action: sent_force_end_query_4 | client_id:{client_id}")
+        except Exception as e:
+            logging.error(f"action: error_sending_force_end_query_4 | error:{e}")

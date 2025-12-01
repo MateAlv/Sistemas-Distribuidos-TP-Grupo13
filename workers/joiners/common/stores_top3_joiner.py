@@ -85,6 +85,14 @@ class StoresTop3Joiner(Joiner):
         except Exception as e:
             logging.error(f"action: error_sending_end_to_users_joiner | error:{e}")
 
+    def send_force_end_msg(self, client_id):
+        try:
+            force_end_msg = MessageEnd.force_end_message(client_id)
+            self.data_sender.send(force_end_msg.encode())
+            logging.info(f"action: sent_force_end_to_users_joiner | client_id:{client_id}")
+        except Exception as e:
+            logging.error(f"action: error_sending_force_end_to_users_joiner | error:{e}")
+
     def publish_results(self, client_id):
         # Envía PurchasesPerUserStoreRow con store_name llenado al UsersJoiner
         logging.debug(f"action: starting_publish_results | type:{self.joiner_type} | client_id:{client_id}")

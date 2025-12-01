@@ -47,3 +47,22 @@ class FilterStatsEndMessage:
         table_type = TableType(int(table_type_value))
         
         return cls(int(filter_id), int(client_id), table_type)
+
+class FilterStatsForceEndMessage:
+    def __init__(self, filter_id: int, client_id: int):
+        self.filter_id = filter_id
+        self.client_id = client_id
+    
+    def encode(self) -> bytes:
+        return f"FORCE_END;{self.filter_id};{self.client_id}".encode("utf-8")
+    
+    @classmethod
+    def decode(cls, message: bytes) -> "FilterStatsForceEndMessage":
+        decoded = message.decode("utf-8")
+        parts = decoded.split(";")
+        if len(parts) != 3 or parts[0] != "FORCE_END":
+            raise ValueError(f"Formato inválido de mensaje FORCE_END: {decoded}")
+        
+        _, filter_id, client_id = parts
+        
+        return cls(int(filter_id), int(client_id))

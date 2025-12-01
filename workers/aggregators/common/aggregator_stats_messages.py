@@ -57,6 +57,23 @@ class AggregatorStatsEndMessage:
         
         return cls(int(aggregator_id), int(client_id), table_type, message_id)
 
+class AggregatorForceEndMessage:
+    def __init__(self, aggregator_id: int, client_id: int):
+        self.aggregator_id = aggregator_id
+        self.client_id = client_id
+    
+    def encode(self) -> bytes:
+        return f"AGG_FORCE_END;{self.aggregator_id};{self.client_id}".encode("utf-8")
+    
+    @classmethod
+    def decode(cls, message: bytes) -> "AggregatorForceEndMessage":
+        decoded = message.decode("utf-8")
+        parts = decoded.split(";")
+        if len(parts) != 3 or parts[0] != "AGG_FORCE_END":
+            raise ValueError(f"Formato inválido de mensaje AGG_FORCE_END: {decoded}")
+        
+        _, aggregator_id, client_id = parts
+        return cls(int(aggregator_id), int(client_id))
 
 class AggregatorDataMessage:
     def __init__(self, aggregator_type: str, aggregator_id: int, client_id: int, table_type: TableType, payload: dict, message_id: uuid.UUID = None):

@@ -4,7 +4,7 @@ from utils.processing.process_table import TableProcessRow
 from utils.processing.process_chunk import ProcessChunk
 from utils.processing.process_batch_reader import ProcessBatchReader
 from utils.file_utils.file_table import DateTime
-from utils.eof_protocol.end_messages import MessageEnd
+from utils.eof_protocol.end_messages import MessageEnd, MessageForceEnd
 from utils.file_utils.table_type import TableType
 from middleware.middleware_interface import MessageMiddlewareQueue, MessageMiddlewareExchange
 from collections import defaultdict, deque
@@ -178,12 +178,26 @@ class Maximizer:
 
                 data = messages.popleft()
                 try:
+                    if data.startswith(b"FORCE_END;"):
+                        self._handle_force_end_message(data)
                     if data.startswith(b"END;"):
                         self._handle_end_message(data)
                     else:
                         self._handle_data_chunk(data)
                 except Exception as e:
                     logging.error(f"action: error_processing_message | type:{self.maximizer_type} | range:{self.maximizer_range} | error:{e}")
+
+    def _handle_force_end_message(self, raw_message: bytes):
+        try:
+            force_end = MessageForceEnd.decode(raw_message)
+        except Exception as e:
+            logging.error(f"action: error_decoding_force_end_message | error:{e}")
+            return
+
+        client_id = force_end.client_id()
+        logging.info(f"action: force_end_received | type:{self.maximizer_type} | range:{self.maximizer_range} | client_id:{client_id}")
+        self.data_sender.send(force_end.encode())
+        self.delete_client_data(client_id)
 
     def _handle_end_message(self, raw_message: bytes):
         try:

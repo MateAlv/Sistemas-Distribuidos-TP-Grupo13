@@ -4,12 +4,12 @@ from utils.processing.process_table import TableProcessRow
 from utils.processing.process_chunk import ProcessChunk
 from utils.results.result_chunk import ResultChunkHeader, ResultChunk
 from utils.processing.process_batch_reader import ProcessBatchReader
-from utils.eof_protocol.end_messages import MessageEnd, MessageQueryEnd
+from utils.eof_protocol.end_messages import MessageEnd, MessageQueryEnd, MessageForceEnd
 from utils.file_utils.table_type import TableType, ResultTableType
 from middleware.middleware_interface import MessageMiddlewareQueue, MessageMiddlewareExchange, TIMEOUT, \
     MessageMiddlewareMessageError
 from utils.tolerance.persistence_service import PersistenceService
-from .filter_stats_messages import FilterStatsMessage, FilterStatsEndMessage
+from .filter_stats_messages import FilterStatsMessage, FilterStatsEndMessage, FilterStatsForceEndMessage
 from .filter_working_state import FilterWorkingState
 from utils.results.result_table import Query1ResultRow
 
@@ -116,6 +116,13 @@ class Filter:
 
                 stats_msg = stats_results.popleft()
                 try:
+                    if stats_msg.startswith(b"FORCE_END;"):
+                        force_end = FilterStatsForceEndMessage.decode(stats_msg)
+                        if force_end.filter_id == self.id:
+                            continue
+                        client_id = force_end.client_id
+                        logging.info(f"action: force_end_received | type:{self.filter_type} | cli_id:{client_id}")
+                        self.working_state.force_delete_client_stats_data(client_id)
                     if stats_msg.startswith(b"STATS_END"):
                         stats_end = FilterStatsEndMessage.decode(stats_msg)
                         if stats_end.filter_id == self.id:
@@ -154,9 +161,13 @@ class Filter:
 
                 msg = results.popleft()
                 try:
+                    if msg.startswith(b"FORCE_END;"):
+                        force_end = MessageForceEnd.decode(msg)
+                        client_id = force_end.client_id()
+                        logging.info(f"action: force_end_received | type:{self.filter_type} | cli_id:{client_id}")
+                        self.working_state.force_end_received(client_id)
                     if msg.startswith(b"END;"):
                         self._handle_end_message(msg)
-
                     else:
                         self._handle_process_message(msg)
 
@@ -269,6 +280,17 @@ class Filter:
         end_msg = FilterStatsEndMessage(self.id, client_id, table_type)
         self.middleware_end_exchange.send(end_msg.encode())
         self.working_state.delete_client_stats_data(end_msg)
+    
+    def handle_force_end_message(self, msg):
+        force_end = MessageForceEnd.decode(msg)
+        client_id = force_end.client_id()
+        logging.info(f"action: force_end_received | type:{self.filter_type} | cli_id:{client_id}")
+        for queue_name, queue in self.middleware_queue_sender.items():
+            logging.info(f"action: sending_end_to_queue | type:{self.filter_type} | queue:{queue_name}")
+            queue.send(force_end.encode())
+        end_msg = FilterStatsForceEndMessage(self.id, client_id)
+        self.middleware_end_exchange.send(end_msg.encode())
+        self.working_state.force_delete_client_stats_data(client_id)
 
     def _end_message_to_send(self, client_id, table_type, total_expected, total_not_sent):
         if self.filter_type != "amount":

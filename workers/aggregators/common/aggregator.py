@@ -15,7 +15,7 @@ from utils.processing.process_table import (
 from utils.processing.process_chunk import ProcessChunk
 from utils.processing.process_batch_reader import ProcessBatchReader
 from utils.file_utils.file_table import DateTime
-from utils.eof_protocol.end_messages import MessageEnd
+from utils.eof_protocol.end_messages import MessageEnd, MessageForceEnd
 from utils.file_utils.table_type import TableType
 from middleware.middleware_interface import (
     MessageMiddlewareQueue,
@@ -32,6 +32,7 @@ from workers.common.sharding import (
 from .aggregator_stats_messages import (
     AggregatorStatsMessage,
     AggregatorStatsEndMessage,
+    AggregatorForceEndMessage,
     AggregatorDataMessage,
 )
 import pickle
@@ -262,6 +263,8 @@ class Aggregator:
     
                 msg = data_chunks.popleft()
                 try:
+                    if msg.startswith(b"FORCE_END;"):
+                        self._handle_force_end_message(msg)
                     if msg.startswith(b"END;"):
                         self._handle_end_message(msg)
                     else:
@@ -306,6 +309,15 @@ class Aggregator:
 
     def _process_stats_message(self, raw_msg: bytes):
         try:
+            if raw_msg.startswith(b"AGG_FORCE_END"):
+                force_end = AggregatorForceEndMessage.decode(raw_msg)
+                logging.info(
+                    f"action: force_end_received | type:{self.aggregator_type} | agg_id:{force_end.aggregator_id} "
+                    f"| cli_id:{force_end.client_id}"
+                )
+                self.working_state.force_delete_client_data(force_end.client_id)
+                return
+            
             if raw_msg.startswith(b"AGG_STATS_END"):
                 stats_end = AggregatorStatsEndMessage.decode(raw_msg)
                 logging.info(
@@ -354,6 +366,27 @@ class Aggregator:
         if self._can_send_end_message(stats.client_id, stats.table_type):
             self._send_end_message(stats.client_id, stats.table_type)
 
+    def _handle_force_end_message(self, raw_msg: bytes):
+        force_end_msg = MessageForceEnd.decode(raw_msg)
+        client_id = force_end_msg.client_id()
+        logging.info(
+            f"action: force_end_processed | type:{self.aggregator_type} | cli_id:{client_id}"
+        )
+
+        for queue in self.middleware_queue_sender.values():
+            try:
+                end_msg = MessageForceEnd(client_id)
+                queue.send(end_msg.encode())
+                logging.info(
+                    f"action: sent_force_end_to_next_stage | type:{self.aggregator_type} | cli_id:{client_id}"
+                )
+            except Exception as e:
+                logging.error(f"action: error_sending_force_end_message | error:{e}")
+
+        stats_end = AggregatorForceEndMessage(self.aggregator_id, client_id)
+        self.middleware_stats_exchange.send(stats_end.encode())
+        self.working_state.force_delete_client_data(client_id)
+        
     def _handle_end_message(self, raw_msg: bytes):
         try:
             end_message = MessageEnd.decode(raw_msg)

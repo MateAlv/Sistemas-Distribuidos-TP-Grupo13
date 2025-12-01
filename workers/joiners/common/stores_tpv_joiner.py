@@ -88,3 +88,10 @@ class StoresTpvJoiner(Joiner):
         client_queue.send(end_query_msg_3.encode())
         client_queue.close()
         logging.info(f"action: sent_end_query_message | type:{self.joiner_type} | client_id:{client_id}")
+
+    def send_force_end_msg(self, client_id):
+        force_end_msg = MessageQueryEnd.force_end_message(client_id)
+        client_queue = MessageMiddlewareQueue("rabbitmq", f"to_merge_data_{client_id}")
+        client_queue.send(force_end_msg.encode())
+        client_queue.close()
+        logging.info(f"action: sent_force_end_message | type:{self.joiner_type} | client_id:{client_id}")

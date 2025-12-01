@@ -140,6 +140,41 @@ class FilterWorkingState(WorkingState):
                 self.chunks_received_per_filter[client_id][table_type][filter_id] = stats.chunks_received
             if stats.chunks_not_sent != current_not_sent:
                 self.chunks_not_sent_per_filter[client_id][table_type][filter_id] = stats.chunks_not_sent
+        current_received = self.chunks_received_per_filter[client_id][table_type][filter_id]
+        current_not_sent = self.chunks_not_sent_per_filter[client_id][table_type][filter_id]
+        
+        if stats.chunks_received != current_received:
+            self.chunks_received_per_filter[client_id][table_type][filter_id] = stats.chunks_received
+        if stats.chunks_not_sent != current_not_sent:
+            self.chunks_not_sent_per_filter[client_id][table_type][filter_id] = stats.chunks_not_sent
+    
+    def force_delete_client_stats_data(self, client_id):
+        logging.info(f"action: deleting_client_stats_data | cli_id:{client_id}")
+        try:
+            with self._lock:
+                if client_id in self.end_message_received:
+                    del self.end_message_received[client_id]
+
+                if client_id in self.number_of_chunks_to_receive:
+                    del self.number_of_chunks_to_receive[client_id]
+
+                if client_id in self.chunks_received_per_filter:
+                    del self.chunks_received_per_filter[client_id]
+
+                if client_id in self.chunks_not_sent_per_filter:
+                    del self.chunks_not_sent_per_filter[client_id]
+
+                if client_id in self.number_of_chunks_to_receive:
+                    del self.number_of_chunks_to_receive[client_id]
+
+                keys_to_delete = [key for key in self.already_sent_stats if key[0] == client_id]
+                for key in keys_to_delete:
+                    del self.already_sent_stats[key]
+
+                logging.info(f"action: client_stats_data_deleted | cli_id:{client_id}")
+        except KeyError:
+            pass
+
 
     def delete_client_stats_data(self, stats_end):
         """Limpia datos del cliente después de procesar"""

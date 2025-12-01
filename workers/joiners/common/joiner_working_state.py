@@ -78,6 +78,9 @@ class JoinerMainWorkingState(WorkingState):
             del self.data[client_id]
         if client_id in self.joiner_results:
             del self.joiner_results[client_id]
+        if client_id in self.client_end_messages_received:
+            self.client_end_messages_received.remove(client_id)
+        
 
     def reset(self):
         self.data.clear()

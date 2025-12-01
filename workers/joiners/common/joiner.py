@@ -1,7 +1,7 @@
 
 from utils.processing.process_table import TableProcessRow
 from utils.processing.process_batch_reader import ProcessBatchReader
-from utils.eof_protocol.end_messages import MessageEnd
+from utils.eof_protocol.end_messages import MessageEnd, MessageForceEnd
 from middleware.middleware_interface import MessageMiddlewareMessageError
 import logging
 import threading
@@ -166,6 +166,15 @@ class Joiner:
             for data in results:
 
                 try:
+                    if data.startswith(b"FORCE_END;"):
+                        force_end = MessageForceEnd.decode(data)
+                        client_id = force_end.client_id()
+                        logging.info(f"action: received_force_end_message | type:{self.joiner_type} | client_id:{client_id}")
+                        
+                        with self.lock:
+                            self.working_state_main.clean_client_data(client_id)
+                            logging.debug(f"action: force_end_processing_complete | type:{self.joiner_type} | client_id:{client_id}")
+                        
                     if data.startswith(b"END;"):
                         end_message = MessageEnd.decode(data)
                         client_id = end_message.client_id()
@@ -333,6 +342,9 @@ class Joiner:
     
     def send_end_query_msg(self, client_id):
         raise NotImplementedError("Subclasses must implement send_end_query_msg method")
+    
+    def send_force_end_msg(self, client_id):
+        raise NotImplementedError("Subclasses must implement send_force_end_msg method")
     
     def is_ready_to_join_for_client(self, client_id):
         """Check if we have received all necessary data and end messages for this client"""
