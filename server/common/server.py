@@ -367,6 +367,13 @@ class Server:
             ResultTableType.QUERY_3: False,
             ResultTableType.QUERY_4: False,
         }
+        ids_received = {
+            ResultTableType.QUERY_1: set(),
+            ResultTableType.QUERY_2_1: set(),
+            ResultTableType.QUERY_2_2: set(),
+            ResultTableType.QUERY_3: set(),
+            ResultTableType.QUERY_4: set(),
+        }
         results_for_client = []
         number_of_chunks_received = {
             ResultTableType.QUERY_1: 0,
@@ -430,7 +437,11 @@ class Server:
                     else:
                         result_chunk = ResultBatchReader.from_bytes(msg)
                         query = result_chunk.query_type()
+                        if result_chunk.message_id in ids_received[query]:
+                            logging.debug(f"action: duplicate_result_chunk_ignored | client_id:{client_id} | message_id:{result_chunk.message_id} | query:{query.name}")
+                            continue
                         number_of_chunks_received[query] += 1
+                        ids_received[query].add(result_chunk.message_id)
                         chunks_received[query].append(result_chunk)
                         logging.debug(f"action: result_receiver | client_id:{client_id} | rows:{len(result_chunk.rows)} | query:{query.name}")
 

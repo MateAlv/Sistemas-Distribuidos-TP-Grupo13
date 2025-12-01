@@ -336,7 +336,7 @@ class Filter:
 
                 else:
                     converted_rows = [ Query1ResultRow(tx.transaction_id, tx.final_amount) for tx in filtered_rows]
-                    queue.send(ResultChunk(ResultChunkHeader(client_id, ResultTableType.QUERY_1), converted_rows).serialize())
+                    queue.send(ResultChunk(ResultChunkHeader(client_id, ResultTableType.QUERY_1, message_id=chunk.header.message_id), converted_rows).serialize())
 
             logging.info(f"action: rows_sent | type:{self.filter_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()} | rows_out:{len(filtered_rows)}")
             # Se commitea el envío del chunk procesado
