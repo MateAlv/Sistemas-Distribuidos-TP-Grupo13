@@ -5,15 +5,15 @@ import json
 import os
 import uuid
 import logging
-from utils.communication.socket_utils import ensure_socket, recv_exact, sendall
-from utils.repetition_checker_protocol.repetition_checker_protocol import RepetitionCheckerMessage, RepetitionCheckerMessageHeader, HEADER_SIZE
-from utils.repetition_checker_protocol.repetition_checker_payload import PROCESSING, BEING_PROCESSED_BY, PROCESSED, PROCESSED_ACK, ProcessingMessage, BeingProcessedByMessage, ProcessedMessage, ProcessedAckMessage
+from utils.communication.socket_utils import recv_exact, sendall
+from utils.repetition_checker_protocol.repetition_checker_protocol import RepetitionCheckerMessage, RepetitionCheckerMessageHeader
+from utils.repetition_checker_protocol.repetition_checker_payload import BEING_PROCESSED_BY, PROCESSED_ACK, ProcessingMessage, BeingProcessedByMessage, ProcessedMessage, ProcessedAckMessage
 from pathlib import Path
 
 
 class RepetitionChecker:
     def __init__(self, port:int, data_dir="./data"):
-        self.host = "0.0.0.1"
+        self.host = "0.0.0.0"
         self.port = port
         self.data_dir = Path(data_dir)
 
@@ -93,7 +93,7 @@ class RepetitionChecker:
             processor_id = None
 
             logging.info(f"[CONN] Cliente conectado: {peer}")
-            header_bytes = recv_exact(sock, HEADER_SIZE)
+            header_bytes = recv_exact(sock, RepetitionCheckerMessageHeader.HEADER_SIZE)
             header = RepetitionCheckerMessageHeader.deserialize(header_bytes)
             payload_bytes = recv_exact(sock, header.size)
             message = RepetitionCheckerMessage.deserialize(header, payload_bytes)
@@ -134,7 +134,7 @@ class RepetitionChecker:
                     sendall(sock, being_processed_message.serialize())
 
             logging.info(f"Esperando confirmación de procesamiento para mensaje {processing_uuid} del cliente {peer}.")
-            header_bytes = recv_exact(sock, HEADER_SIZE)
+            header_bytes = recv_exact(sock, RepetitionCheckerMessageHeader.HEADER_SIZE)
             header = RepetitionCheckerMessageHeader.deserialize(header_bytes)
             payload_bytes = recv_exact(sock, header.size)
             message = RepetitionCheckerMessage.deserialize(header, payload_bytes)

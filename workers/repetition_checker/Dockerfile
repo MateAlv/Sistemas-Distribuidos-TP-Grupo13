@@ -5,6 +5,7 @@ WORKDIR /workers/
 # Copiar y instalar dependencias primero (para mejor caching)
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+RUN apt-get update && apt-get install -y curl
 
 # Copiar el código fuente después
 COPY workers/repetition_checker/ ./repetition_checker/
