@@ -64,6 +64,9 @@ class Maximizer:
         self.partial_shards_lookup = {}
         self.expected_partial_maximizers = self.expected_inputs
         self.expected_shard_slugs = set()
+        # Para absolutos: número esperado de shards (se usa en lugar de expected_inputs)
+        self.expected_shards = int(os.getenv("AGGREGATOR_SHARDS", self.expected_inputs))
+        self.received_shards = defaultdict(set)  # client_id -> set(shard_ids)
         # Stage name and shard for centralized barrier
         if self.maximizer_type == "MAX":
             self.stage = STAGE_MAX_ABSOLUTE if self.is_absolute_max() else STAGE_MAX_PARTIALS
@@ -72,38 +75,20 @@ class Maximizer:
         self.shard_id = self.shard_slug if self.shard_slug else DEFAULT_SHARD
         
         if self.maximizer_type == "MAX":
-            if self.is_absolute_max():
-                # Máximo absoluto - recibe de maximizers parciales
-                self.data_sender = MessageMiddlewareQueue("rabbitmq", "to_transaction_items_to_join")
-                self.data_receiver = MessageMiddlewareQueue("rabbitmq", "to_absolute_max")
-                self.middleware_exchange_sender = MessageMiddlewareExchange("rabbitmq", "end_exchange_maximizer_PRODUCTS", [""], exchange_type="fanout")
-                self.middleware_exchange_receiver = None 
-            else:
-                # Maximizers parciales - envían al absolute max
-                self.data_sender = MessageMiddlewareQueue("rabbitmq", "to_absolute_max")
-                self.middleware_exchange_sender = None  # No envía END directamente al joiner
-                
-                queue_name = queue_name_for("MAX", self.shard_id)
-                self.data_receiver = MessageMiddlewareQueue("rabbitmq", queue_name)
-                self.middleware_exchange_receiver = MessageMiddlewareExchange("rabbitmq", "end_exchange_aggregator_PRODUCTS", [""], exchange_type="fanout")
+            # Máximo absoluto - recibe de aggregators shardeados
+            self.data_sender = MessageMiddlewareQueue("rabbitmq", "to_transaction_items_to_join")
+            self.data_receiver = MessageMiddlewareQueue("rabbitmq", "to_absolute_max")
+            self.middleware_exchange_sender = MessageMiddlewareExchange("rabbitmq", "end_exchange_maximizer_PRODUCTS", [""], exchange_type="fanout")
+            self.middleware_exchange_receiver = None 
                     
         elif self.maximizer_type == "TOP3":
             # Para TOP3 clientes por store (Query 4)
             
-            if self.is_absolute_top3():
-                # TOP3 absoluto - recibe de TOP3 parciales
-                self.data_sender = MessageMiddlewareQueue("rabbitmq", "to_purchases_joiner")
-                self.data_receiver = MessageMiddlewareQueue("rabbitmq", "to_top3_absolute")
-                self.middleware_exchange_sender = MessageMiddlewareExchange("rabbitmq", "end_exchange_maximizer_TOP3", [""], exchange_type="fanout")
-                self.middleware_exchange_receiver = None  # No necesita escuchar END de nadie
-            else:
-                # TOP3 parciales - envían al absoluto
-                self.data_sender = MessageMiddlewareQueue("rabbitmq", "to_top3_absolute")
-                self.middleware_exchange_sender = None
-                self.middleware_exchange_receiver = None
-                
-                queue_name = queue_name_for("TOP3", self.shard_id)
-                self.data_receiver = MessageMiddlewareQueue("rabbitmq", queue_name)
+            # TOP3 absoluto - recibe de aggregators shardeados
+            self.data_sender = MessageMiddlewareQueue("rabbitmq", "to_purchases_joiner")
+            self.data_receiver = MessageMiddlewareQueue("rabbitmq", "to_top3_absolute")
+            self.middleware_exchange_sender = MessageMiddlewareExchange("rabbitmq", "end_exchange_maximizer_TOP3", [""], exchange_type="fanout")
+            self.middleware_exchange_receiver = None  # No necesita escuchar END de nadie
         else:
             raise ValueError(f"Tipo de maximizer inválido: {self.maximizer_type}")
 
@@ -113,7 +98,7 @@ class Maximizer:
             COORDINATION_EXCHANGE,
             f"maximizer_{self.maximizer_type}_{slugify_shard_id(self.shard_id)}",
             "topic",
-            routing_keys=[f"coordination.barrier.{self.stage}.{self.shard_id}"],
+            routing_keys=[f"coordination.barrier.{self.stage}.{DEFAULT_SHARD}"],
         )
 
         self._recover_state()
@@ -329,37 +314,32 @@ class Maximizer:
             logging.debug(f"action: ignoring_data_after_end_processed | type:{self.maximizer_type} | range:{self.maximizer_range} | client_id:{client_id}")
             return
 
-        if self.maximizer_type == "TOP3" and not self.is_absolute_top3():
-            logging.info(
-                f"action: top3_chunk_processing_started | range:{self.maximizer_range} | client_id:{client_id} "
-                f"| rows:{len(chunk.rows)}"
-            )
-
         logging.info(f"action: maximize | type:{self.maximizer_type} | range:{self.maximizer_range} | client_id:{client_id} | file_type:{table_type} | rows_in:{len(chunk.rows)}")
         self.apply(client_id, chunk)
 
         self._check_crash_point("CRASH_AFTER_PROCESS_BEFORE_COMMIT")
 
         if self.maximizer_type == "MAX" and self.is_absolute_max():
-            ranges_seen = self.working_state.get_partial_ranges_seen(client_id)
             for row in chunk.rows:
                 shard_slug = self._extract_shard_from_row(row)
                 if shard_slug:
-                    self.working_state.add_partial_range_seen(client_id, shard_slug)
-
-            received_labels = sorted(self.partial_shards_lookup.get(slug, slug) for slug in ranges_seen)
+                    self.received_shards[client_id].add(shard_slug)
             logging.info(
-                f"action: absolute_max_tracking | client_id:{client_id} | partial_maximizers_seen:{len(ranges_seen)}/{self.expected_partial_maximizers} | received_shards:{received_labels}"
+                f"action: absolute_max_tracking | client_id:{client_id} | shards_seen:{len(self.received_shards[client_id])}/{self.expected_shards} | shards:{sorted(self.received_shards[client_id])}"
             )
-
-            ready = False
-            if self.expected_shard_slugs:
-                ready = self.expected_shard_slugs.issubset(ranges_seen)
-            elif self.expected_partial_maximizers > 0:
-                ready = len(ranges_seen) >= self.expected_partial_maximizers
-
-            if ready:
-                logging.info(f"action: absolute_max_ready | client_id:{client_id} | all_partial_data_received")
+            if len(self.received_shards[client_id]) >= self.expected_shards:
+                logging.info(f"action: absolute_max_ready | client_id:{client_id} | all_shards_received")
+                self.process_client_end(client_id, table_type)
+        elif self.maximizer_type == "TOP3" and self.is_absolute_top3():
+            for row in chunk.rows:
+                shard_slug = self._extract_shard_from_row(row)
+                if shard_slug:
+                    self.received_shards[client_id].add(shard_slug)
+            logging.info(
+                f"action: absolute_top3_tracking | client_id:{client_id} | shards_seen:{len(self.received_shards[client_id])}/{self.expected_shards} | shards:{sorted(self.received_shards[client_id])}"
+            )
+            if len(self.received_shards[client_id]) >= self.expected_shards:
+                logging.info(f"action: absolute_top3_ready | client_id:{client_id} | all_shards_received")
                 self.process_client_end(client_id, table_type)
 
         self.working_state.mark_processed(chunk.message_id())
@@ -378,13 +358,13 @@ class Maximizer:
                     "id": sender_id,
                     "client_id": client_id,
                     "stage": self.stage,
-                    "shard": self.shard_id,
+                    "shard": DEFAULT_SHARD,
                     # For barrier gating, expected = chunks we produced
                     "expected": count,
                     "chunks": count,
                     "sender": sender_id,
                 }
-                rk = f"coordination.barrier.{self.stage}.{self.shard_id}"
+                rk = f"coordination.barrier.{self.stage}.{DEFAULT_SHARD}"
                 self.middleware_coordination.send(json.dumps(payload).encode("utf-8"), routing_key=rk)
                 logging.debug(f"action: coordination_end_sent | stage:{self.stage} | cli_id:{client_id} | chunks:{count}")
             except Exception as e:
@@ -396,7 +376,7 @@ class Maximizer:
                     "id": sender_id,
                     "client_id": client_id,
                     "stage": self.stage,
-                    "shard": self.shard_id,
+                    "shard": DEFAULT_SHARD,
                     "expected": count,
                     "chunks": count,
                     "processed": count,
@@ -429,12 +409,25 @@ class Maximizer:
         return False
 
     def _extract_shard_from_row(self, row) -> Optional[str]:
+        # Try transaction_id marker
         transaction_id = getattr(row, "transaction_id", None)
-        if not transaction_id:
-            return None
-        match = re.search(r"partial_max_(?:selling|profit)_shard_([a-z0-9_]+)", transaction_id)
-        if match:
-            return match.group(1)
+        if transaction_id:
+            match = re.search(r"agg_shard_([a-z0-9_]+)", str(transaction_id))
+            if match:
+                return match.group(1)
+            match = re.search(r"partial_max_(?:selling|profit)_shard_([a-z0-9_]+)", str(transaction_id))
+            if match:
+                return match.group(1)
+        # Try store_name marker (used for purchases rows)
+        store_name = getattr(row, "store_name", None)
+        if store_name:
+            match = re.search(r"agg_shard_([a-z0-9_]+)", str(store_name))
+            if match:
+                return match.group(1)
+        # Try explicit shard field
+        shard_field = getattr(row, "shard", None)
+        if shard_field:
+            return str(shard_field)
         return None
     
     def shutdown(self, signum=None, frame=None):

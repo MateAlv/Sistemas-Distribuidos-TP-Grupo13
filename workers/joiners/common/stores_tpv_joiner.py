@@ -1,4 +1,6 @@
 import logging
+import os
+from collections import defaultdict
 
 from middleware.middleware_interface import MessageMiddlewareQueue
 from utils.eof_protocol.end_messages import MessageQueryEnd
@@ -12,8 +14,12 @@ from .joiner import Joiner
 class StoresTpvJoiner(Joiner):
 
     def define_queues(self):
-        self.data_receiver = MessageMiddlewareQueue("rabbitmq", "to_join_with_stores_tvp")
+        # Recibe TPV agregados desde max_tpv (o directamente de aggs) en la cola global
+        self.data_receiver = MessageMiddlewareQueue("rabbitmq", "to_absolute_tpv")
         self.data_join_receiver = MessageMiddlewareQueue("rabbitmq", "stores_for_tpv_joiner")
+        # Esperamos barreras de todos los shards de agg_tpv
+        self.expected_shards = int(os.getenv("AGGREGATOR_TPV", "1"))
+        self.received_shards = defaultdict(set)
 
     def save_data_join_fields(self, row, client_id):
         self.working_state_join.add_join_data(client_id, row.store_id, row.store_name)
@@ -61,13 +67,16 @@ class StoresTpvJoiner(Joiner):
 
     def publish_results(self, client_id):
         joiner_results = self.working_state_main.get_results(client_id)
-        query3_results = []
+        # Merge TPV across shards by store and year_half
+        acc = {}
         for row in joiner_results:
-            store_id = row["store_id"]
-            store_name = row["store_name"]
-            tpv = row["tpv"]
-            year_half = row["year_half"]
-            query3_result = Query3ResultRow(store_id, store_name, tpv, year_half)
+            key = (row["store_id"], row["store_name"], row["year_half"])
+            acc.setdefault(key, 0)
+            acc[key] += row["tpv"]
+
+        query3_results = []
+        for (store_id, store_name, year_half), total_tpv in acc.items():
+            query3_result = Query3ResultRow(store_id, store_name, total_tpv, year_half)
             query3_results.append(query3_result)
 
         if query3_results:

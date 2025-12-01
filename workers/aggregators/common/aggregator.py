@@ -124,8 +124,8 @@ class Aggregator:
             except (ValueError, IndexError):
                 shard_to_use = shard_by_id(self.shard_configs, self.shard_id)
             self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", f"to_agg_products_shard_{shard_to_use.shard_id}")
-            for shard in self.shard_configs:
-                self.middleware_queue_sender[shard.queue_name] = MessageMiddlewareQueue("rabbitmq", shard.queue_name)
+            # Send aggregated partials to the absolute maximizer
+            self.middleware_queue_sender["to_absolute_max"] = MessageMiddlewareQueue("rabbitmq", "to_absolute_max")
 
         elif self.aggregator_type == "PURCHASES":
             self.stage = STAGE_AGG_PURCHASES
@@ -145,14 +145,15 @@ class Aggregator:
             except (ValueError, IndexError):
                 shard_to_use = shard_by_id(self.shard_configs, self.shard_id)
             self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", f"to_agg_purchases_shard_{shard_to_use.shard_id}")
-            for shard in self.shard_configs:
-                self.middleware_queue_sender[shard.queue_name] = MessageMiddlewareQueue("rabbitmq", shard.queue_name)
+            # Send aggregated partials to the absolute TOP3 maximizer
+            self.middleware_queue_sender["to_top3_absolute"] = MessageMiddlewareQueue("rabbitmq", "to_top3_absolute")
 
         elif self.aggregator_type == "TPV":
             if self.shard_id is None:
                 raise ShardingConfigError("AGGREGATOR_SHARD_ID must be set for TPV aggregator")
             self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", f"to_agg_tpv_shard_{self.shard_id}")
-            self.middleware_queue_sender["to_join_with_stores_tvp"] = MessageMiddlewareQueue("rabbitmq", "to_join_with_stores_tvp")
+            # Send aggregated partials to TPV absolute (to be consumed by max/joiner)
+            self.middleware_queue_sender["to_absolute_tpv"] = MessageMiddlewareQueue("rabbitmq", "to_absolute_tpv")
             self.stage = STAGE_AGG_TPV
         else:
             raise ValueError(f"Tipo de agregador inválido: {self.aggregator_type}")
@@ -931,20 +932,12 @@ class Aggregator:
         from utils.processing.process_chunk import ProcessChunkHeader
 
         header = ProcessChunkHeader(client_id=client_id, table_type=TableType.TRANSACTION_ITEMS)
-        rows_by_queue = defaultdict(list)
-
+        rows = []
         for (item_id, year, month), totals in data.items():
-            shard = self.id_to_shard.get(item_id)
-            if shard is None:
-                logging.warning(
-                    f"action: publish_final_products_missing_shard | client_id:{client_id} | item_id:{item_id}"
-                )
-                continue
-
             created_at = DateTime(datetime.date(year, month, 1), datetime.time(0, 0))
-            rows_by_queue[shard.queue_name].append(
+            rows.append(
                 TransactionItemsProcessRow(
-                    "",
+                    f"agg_shard_{self.shard_id or 'global'}",
                     item_id,
                     totals["quantity"],
                     totals["subtotal"],
@@ -952,12 +945,14 @@ class Aggregator:
                 )
             )
 
-        for queue_name, rows in rows_by_queue.items():
-            chunk = ProcessChunk(header, rows).serialize()
-            self.middleware_queue_sender[queue_name].send(chunk)
-            logging.info(
-                f"action: publish_final_products | client_id:{client_id} | queue:{queue_name} | rows:{len(rows)}"
-            )
+        if not rows:
+            return
+
+        chunk = ProcessChunk(header, rows).serialize()
+        self.middleware_queue_sender["to_absolute_max"].send(chunk)
+        logging.info(
+            f"action: publish_final_products | client_id:{client_id} | queue:to_absolute_max | rows:{len(rows)}"
+        )
 
     def _publish_final_purchases(self, client_id):
         data = self.working_state.global_accumulator[client_id].get("purchases")
@@ -968,40 +963,31 @@ class Aggregator:
 
         placeholder_date = datetime.date(2024, 1, 1)
 
-        rows_by_queue = defaultdict(list)
-
+        rows = []
         for store_id, users in data.items():
-            shard = self.id_to_shard.get(store_id)
-            if shard is None:
-                logging.warning(
-                    f"action: publish_final_purchases_missing_shard | client_id:{client_id} | store_id:{store_id}"
-                )
-                continue
             for user_id, count in users.items():
-                rows_by_queue[shard.queue_name].append(
+                rows.append(
                     PurchasesPerUserStoreRow(
                         store_id=store_id,
-                        store_name="",
+                        store_name=f"agg_shard_{self.shard_id or 'global'}",
                         user_id=user_id,
                         user_birthdate=placeholder_date,
                         purchases_made=count,
                     )
                 )
 
-        for queue_name, rows in rows_by_queue.items():
-            header = ProcessChunkHeader(
-                client_id=client_id, table_type=TableType.PURCHASES_PER_USER_STORE
-            )
-            chunk = ProcessChunk(header, rows)
-            chunk_data = chunk.serialize()
-            logging.info(
-                f"action: publish_final_purchases_chunk | client_id:{client_id} | queue:{queue_name} "
-                f"| rows:{len(rows)} | bytes:{len(chunk_data)}"
-            )
-            self.middleware_queue_sender[queue_name].send(chunk_data)
-            logging.info(
-                f"action: publish_final_purchases | client_id:{client_id} | queue:{queue_name} | rows:{len(rows)}"
-            )
+        if not rows:
+            return
+
+        header = ProcessChunkHeader(
+            client_id=client_id, table_type=TableType.PURCHASES_PER_USER_STORE
+        )
+        chunk = ProcessChunk(header, rows)
+        chunk_data = chunk.serialize()
+        self.middleware_queue_sender["to_top3_absolute"].send(chunk_data)
+        logging.info(
+            f"action: publish_final_purchases | client_id:{client_id} | queue:to_top3_absolute | rows:{len(rows)}"
+        )
 
     def _publish_final_tpv(self, client_id):
         data = self.working_state.global_accumulator[client_id].get("tpv")
@@ -1017,7 +1003,7 @@ class Aggregator:
 
         header = ProcessChunkHeader(client_id=client_id, table_type=TableType.TPV)
         chunk = ProcessChunk(header, rows)
-        self.middleware_queue_sender["to_join_with_stores_tvp"].send(chunk.serialize())
+        self.middleware_queue_sender["to_absolute_tpv"].send(chunk.serialize())
         logging.info(
             f"action: publish_final_tpv | client_id:{client_id} | rows:{len(rows)}"
         )

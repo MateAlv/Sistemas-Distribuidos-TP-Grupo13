@@ -310,11 +310,17 @@ def define_maximizer(meta: dict, compose: dict, nodo: str, worker_id: int, max_s
             expected_inputs = nodes.get("AGGREGATOR_PURCHASES", 1)
     elif role == "ABSOLUTE":
         if max_type == "MAX":
-             expected_inputs = nodes.get("MAXIMIZER_MAX_PARTIAL", 1)
+             expected_inputs = nodes.get("AGGREGATOR_PRODUCTS", 1)
         elif max_type == "TOP3":
-             expected_inputs = nodes.get("MAXIMIZER_TOP3_PARTIAL", 1)
+             expected_inputs = nodes.get("AGGREGATOR_PURCHASES", 1)
     
     env.append(f"EXPECTED_INPUTS={expected_inputs}")
+    # Aggregator shards count for absolutes to gate shards received
+    if role == "ABSOLUTE":
+        if max_type == "MAX":
+            env.append(f"AGGREGATOR_SHARDS={nodes.get('AGGREGATOR_PRODUCTS', 1)}")
+        elif max_type == "TOP3":
+            env.append(f"AGGREGATOR_SHARDS={nodes.get('AGGREGATOR_PURCHASES', 1)}")
 
     if role == "PARTIAL":
         if max_type == "MAX":
@@ -411,6 +417,9 @@ def define_joiner(meta: dict, compose: dict, nodo: str, worker_id: int, nodes: d
             f"JOINER_TYPE={get_joiner_type(nodo)}",
             f"WORKER_ID={worker_id}",
             f"CONTAINER_NAME={service_name}",
+            f"AGGREGATOR_TPV={nodes.get('AGGREGATOR_TPV', 1)}",
+            # Para joiner TPV, alinear expected_inputs con shards de agg_tpv
+            f"EXPECTED_INPUTS={nodes.get('AGGREGATOR_TPV', 1) if nodo == 'JOINER_STORES_TPV' else 1}",
         ],
         "volumes": [
             "./data/persistence:/data/persistence",
