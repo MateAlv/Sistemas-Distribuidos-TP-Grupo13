@@ -5,7 +5,7 @@ from utils.processing.process_chunk import ProcessChunk
 from utils.results.result_chunk import ResultChunkHeader, ResultChunk
 from utils.processing.process_batch_reader import ProcessBatchReader
 from utils.eof_protocol.end_messages import MessageEnd, MessageQueryEnd
-from utils.protocol import COORDINATION_EXCHANGE, MSG_WORKER_END, MSG_WORKER_STATS, MSG_BARRIER_FORWARD, STAGE_FILTER_YEAR, STAGE_FILTER_HOUR, STAGE_FILTER_AMOUNT
+from utils.protocol import COORDINATION_EXCHANGE, MSG_WORKER_END, MSG_WORKER_STATS, MSG_BARRIER_FORWARD, DEFAULT_SHARD, STAGE_FILTER_YEAR, STAGE_FILTER_HOUR, STAGE_FILTER_AMOUNT
 from utils.file_utils.table_type import TableType, ResultTableType
 from middleware.middleware_interface import MessageMiddlewareQueue, MessageMiddlewareExchange, TIMEOUT, \
     MessageMiddlewareMessageError
