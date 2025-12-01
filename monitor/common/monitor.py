@@ -387,15 +387,16 @@ class MonitorNode:
                 tracker['stats_processed'] = max(tracker.get('stats_processed', 0), data.get('processed', data.get('chunks', 0)))
             # Persist? (future) – could be written to disk; keeping in-memory for now.
         except Exception as e:
-            logging.error(f\"Barrier handle error: {e} | data:{data}\")
+            logging.error(f"Barrier handle error: {e} | data:{data}")
 
-    def _forward_barrier(self, client_id, stage, tracker):
+    def _forward_barrier(self, client_id, stage, shard, tracker):
         try:
             # Build a BARRIER_FORWARD message
             msg = {
                 'type': MSG_BARRIER_FORWARD,
                 'client_id': client_id,
                 'stage': stage,
+                'shard': shard,
                 'timestamp': time.time(),
                 'total_chunks': tracker['total_chunks'],
                 'senders': list(tracker['sender_ids']),
@@ -405,12 +406,14 @@ class MonitorNode:
             channel.exchange_declare(exchange=COORDINATION_EXCHANGE, exchange_type='topic', durable=True)
             channel.basic_publish(
                 exchange=COORDINATION_EXCHANGE,
-                routing_key=COORDINATION_ROUTING_KEY,
+                routing_key=f"{COORDINATION_ROUTING_KEY}.{stage}.{shard}",
                 body=json.dumps(msg)
             )
             connection.close()
             tracker['forwarded'] = True
             logging.info(
-                f\"Barrier forward | client:{client_id} | stage:{stage} | total_chunks:{tracker['total_chunks']} | \"\n+                f\"ends:{tracker['received_end']}/{tracker.get('expected')} | stats:{tracker.get('stats_received',0)}/{tracker.get('stats_expected_chunks')}\"\n+                f\" | senders:{tracker['sender_ids']}\")\n*** End Patch
+                f"Barrier forward | client:{client_id} | stage:{stage} | shard:{shard} | total_chunks:{tracker['total_chunks']} | "
+                f"ends:{tracker['received_end']}/{tracker.get('expected')} | stats:{tracker.get('stats_received',0)}/{tracker.get('stats_expected_chunks')}"
+                f" | senders:{tracker['sender_ids']}")
         except Exception as e:
-            logging.error(f\"Barrier forward error: {e} | client:{client_id} | stage:{stage}\")
+            logging.error(f"Barrier forward error: {e} | client:{client_id} | stage:{stage} | shard:{shard}")

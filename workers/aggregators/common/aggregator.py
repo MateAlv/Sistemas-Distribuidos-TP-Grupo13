@@ -84,13 +84,6 @@ class Aggregator:
             f"{self.aggregator_type}_{self.aggregator_id}_data",
             "fanout",
         )
-        self.middleware_coordination = MessageMiddlewareExchange(
-            "rabbitmq",
-            COORDINATION_EXCHANGE,
-            [""],
-            "topic",
-            routing_keys=[f"coordination.barrier.{self.stage}.{DEFAULT_SHARD}"],
-        )
         try:
             self.middleware_stats_exchange.purge()
             self.middleware_data_exchange.purge()
@@ -141,6 +134,15 @@ class Aggregator:
             self.stage = STAGE_AGG_TPV
         else:
             raise ValueError(f"Tipo de agregador inválido: {self.aggregator_type}")
+
+        # Coordination publisher with shard-aware routing (agg is non-sharded -> global)
+        self.middleware_coordination = MessageMiddlewareExchange(
+            "rabbitmq",
+            COORDINATION_EXCHANGE,
+            [""],
+            "topic",
+            routing_keys=[f"coordination.barrier.{self.stage}.{DEFAULT_SHARD}"],
+        )
 
 
     def shutdown(self, signum=None, frame=None):
