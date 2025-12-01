@@ -62,6 +62,9 @@ class Server:
     """
 
     def __init__(self, port: int, listen_backlog: int, max_number_of_chunks_in_batch: int, monitor=None) -> None:
+
+        logging.getLogger('pika').setLevel(logging.CRITICAL)
+        
         self.port = int(port)
         self.listen_backlog = int(listen_backlog)
         self.host = DEFAULT_BIND_IP
@@ -94,15 +97,6 @@ class Server:
                 logging.debug("action: save_dir_ready | dir: %s", SAVE_DIR)
             except Exception as e:
                 logging.warning("action: save_dir_create_fail | dir: %s | error: %r", SAVE_DIR, e)
-
-        # Coordination publisher/consumer (server is non-sharded)
-        self.middleware_coordination = MessageMiddlewareExchange(
-            "rabbitmq",
-            COORDINATION_EXCHANGE,
-            "server",
-            "topic",
-            routing_keys=[f"coordination.barrier.{STAGE_SERVER_RESULTS}.{DEFAULT_SHARD}"],
-        )
 
     # ---------------------------------------------------------------------
 
@@ -166,6 +160,7 @@ class Server:
         middleware_queue_senders["to_join_menu_items"] = MessageMiddlewareQueue("rabbitmq", "to_join_menu_items")
         middleware_queue_senders["to_top3"] = MessageMiddlewareQueue("rabbitmq", "to_top3")
         middleware_queue_receiver = None
+        middleware_coordination = None
         
         try:
             sock.settimeout(DEFAULT_IO_TIMEOUT)
@@ -173,6 +168,15 @@ class Server:
 
             # -------- Handshake obligatorio --------
             client_id = self._do_handshake(sock)
+            
+            # Initialize coordination middleware with unique ID per client thread
+            middleware_coordination = MessageMiddlewareExchange(
+                "rabbitmq",
+                COORDINATION_EXCHANGE,
+                f"server_{client_id}",
+                "topic",
+                routing_keys=[f"coordination.barrier.{STAGE_SERVER_RESULTS}.{DEFAULT_SHARD}"],
+            )
 
             # -------- Recepción de archivos --------
             files_received = 0
@@ -235,15 +239,15 @@ class Server:
                             "sender": "server",
                         }
                         rk = f"coordination.server.{STAGE_SERVER_RESULTS}.{DEFAULT_SHARD}"
-                        self.middleware_coordination.send(json.dumps(payload_end).encode("utf-8"), routing_key=rk)
-                        self.middleware_coordination.send(json.dumps(payload_stats).encode("utf-8"), routing_key=rk)
+                        middleware_coordination.send(json.dumps(payload_end).encode("utf-8"), routing_key=rk)
+                        middleware_coordination.send(json.dumps(payload_stats).encode("utf-8"), routing_key=rk)
                         logging.debug("action: coordination_end_stats_sent | stage:server | cli_id:%s | chunks:%s", client_id, total_chunks)
                     except Exception as e:
                         logging.error("action: coordination_end_send_error | stage:server | cli_id:%s | error:%s", client_id, e)
                     
                     if client_id is not None:
                         logging.debug("action: waiting_for_results | peer:%s | client_id:%s", peer, client_id)
-                        self._listen_and_send_results(sock, client_id, peer, middleware_queue_receiver)
+                        self._listen_and_send_results(sock, client_id, peer, middleware_queue_receiver, middleware_coordination)
                     break
                 
                 else:
@@ -269,6 +273,12 @@ class Server:
                     middleware_queue_receiver.delete()
                 except Exception as e:
                     logging.warning("action: queue_delete_error | peer:%s | queue:%s | error:%r", peer, "to_merge_data", e)
+
+            if middleware_coordination is not None:
+                try:
+                    middleware_coordination.close()
+                except Exception as e:
+                    logging.warning("action: coordination_close_error | peer:%s | error:%r", peer, e)
 
             current_thread = threading.current_thread()
             with self.clients_lock:
@@ -396,7 +406,7 @@ class Server:
 
     # ---------------------------------------------------------------------
 
-    def _listen_and_send_results(self, sock: socket.socket, client_id: int, peer: str, middleware_queue) -> None:
+    def _listen_and_send_results(self, sock: socket.socket, client_id: int, peer: str, middleware_queue, middleware_coordination) -> None:
         """
         Escucha resultados de la cola to_merge_data para este cliente específico.
         Envía resultados en lotes y detecta fin automáticamente.
@@ -405,7 +415,7 @@ class Server:
         coord_results = []
         def coord_callback(msg): coord_results.append(msg)
         def coord_stop():
-            self.middleware_coordination.stop_consuming()
+            middleware_coordination.stop_consuming()
         
         maximum_chunks = self._max_number_of_chunks_in_batch()
         all_data_received = False
@@ -447,8 +457,8 @@ class Server:
 
         while not all_data_received:
             try:
-                self.middleware_coordination.connection.call_later(TIMEOUT, coord_stop)
-                self.middleware_coordination.start_consuming(coord_callback)
+                middleware_coordination.connection.call_later(TIMEOUT, coord_stop)
+                middleware_coordination.start_consuming(coord_callback)
             except Exception as e:
                 logging.error(f"action: server_coordination_consume_error | error:{e}")
             middleware_queue.connection.call_later(TIMEOUT, stop)
@@ -547,11 +557,7 @@ class Server:
                 fd = self._server_socket.fileno()
                 self._server_socket.close()
                 logging.debug("action: fd_close | result: success | kind: listen_socket | fd:%s", fd)
-            try:
-                self.middleware_coordination.close()
-            except Exception:
-                pass
-                
+            
             # Esperar a que terminen los threads de cliente
             with self.clients_lock:
                 active_threads = list(self.client_threads.values())

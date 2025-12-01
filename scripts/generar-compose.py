@@ -133,7 +133,13 @@ def define_server(compose: dict, client_amount: int):
             "./server/config.ini:/config.ini:ro",
         ],
         "networks": ["testing_net"],
-        "depends_on": {"rabbitmq": {"condition": "service_healthy"}}
+        "depends_on": {"rabbitmq": {"condition": "service_healthy"}},
+        "healthcheck": {
+            "test": FlowList(["CMD-SHELL", "python3 -c \"import socket; s=socket.socket(); s.connect(('localhost', 12345)); s.close()\""]),
+            "interval": "3s",
+            "timeout": "5s",
+            "retries": 5,
+        }
     }
 
 def define_network(compose: dict):
@@ -177,8 +183,13 @@ def define_filter(meta: dict, compose: dict, nodo: str, worker_id: int):
         ],
         "networks": ["testing_net"],
         "depends_on": {
-            "server": {"condition": "service_started"},
-            "rabbitmq": {"condition": "service_healthy"},
+            "server": {"condition": "service_healthy"},
+        },
+        "healthcheck": {
+            "test": FlowList(["CMD-SHELL", "kill -0 1"]),
+            "interval": "5s",
+            "timeout": "5s",
+            "retries": 3,
         }
     }
     return service_name
@@ -209,8 +220,13 @@ def define_aggregator(meta: dict, compose: dict, nodo: str, worker_id: int):
         ],
         "networks": ["testing_net"],
         "depends_on": {
-            "server": {"condition": "service_started"},
-            "rabbitmq": {"condition": "service_healthy"},
+            "server": {"condition": "service_healthy"},
+        },
+        "healthcheck": {
+            "test": FlowList(["CMD-SHELL", "kill -0 1"]),
+            "interval": "5s",
+            "timeout": "5s",
+            "retries": 3,
         }
     }
 
@@ -317,8 +333,13 @@ def define_maximizer(meta: dict, compose: dict, nodo: str, worker_id: int, max_s
         ],
         "networks": ["testing_net"],
         "depends_on": {
-            "server": {"condition": "service_started"},
-            "rabbitmq": {"condition": "service_healthy"},
+            "server": {"condition": "service_healthy"},
+        },
+        "healthcheck": {
+            "test": FlowList(["CMD-SHELL", "kill -0 1"]),
+            "interval": "5s",
+            "timeout": "5s",
+            "retries": 3,
         }
     }
     return service_name
@@ -359,8 +380,13 @@ def define_joiner(meta: dict, compose: dict, nodo: str, worker_id: int, nodes: d
         ],
         "networks": ["testing_net"],
         "depends_on": {
-            "server": {"condition": "service_started"},
-            "rabbitmq": {"condition": "service_healthy"},
+            "server": {"condition": "service_healthy"},
+        },
+        "healthcheck": {
+            "test": FlowList(["CMD-SHELL", "kill -0 1"]),
+            "interval": "5s",
+            "timeout": "5s",
+            "retries": 3,
         }
     }
 
@@ -385,9 +411,14 @@ def define_joiner(meta: dict, compose: dict, nodo: str, worker_id: int, nodes: d
 def is_client(nodo: str):
     return nodo == "CLIENT"
 
-def define_client(meta: dict, compose: dict, nodo: str, index: int):
+def define_client(meta: dict, compose: dict, nodo: str, index: int, monitor_services: list):
     service_name = f"{nodo.lower()}-{index}"
     output_path = meta.get("output_path", "../.results")
+    
+    depends_on = {}
+    for mon in monitor_services:
+        depends_on[mon] = {"condition": "service_healthy"}
+
     compose["services"][service_name] = {
         "build": {
             "context": ".",             # project root
@@ -408,12 +439,14 @@ def define_client(meta: dict, compose: dict, nodo: str, index: int):
             "./client/config.ini:/config.ini:ro",
         ],
         "networks": ["testing_net"],
-        "depends_on": {
-            "server": {"condition": "service_started"},
-        }
+        "depends_on": depends_on
     }
 
-def define_monitor(meta: dict, compose: dict, count: int):
+def define_monitor(meta: dict, compose: dict, count: int, worker_services: list):
+    depends_on = {}
+    for worker in worker_services:
+        depends_on[worker] = {"condition": "service_healthy"}
+        
     for i in range(1, count + 1):
         service_name = f"monitor_{i}"
         compose["services"][service_name] = {
@@ -433,8 +466,12 @@ def define_monitor(meta: dict, compose: dict, count: int):
                 f"./{meta['config_path']}:/monitor/config/config.ini:ro",
             ],
             "networks": ["testing_net"],
-            "depends_on": {
-                "rabbitmq": {"condition": "service_healthy"},
+            "depends_on": depends_on,
+            "healthcheck": {
+                "test": FlowList(["CMD-SHELL", "kill -0 1"]),
+                "interval": "5s",
+                "timeout": "5s",
+                "retries": 3,
             }
         }
 
@@ -523,6 +560,10 @@ def generate_compose(meta: dict, nodes: dict, services: dict = None):
     
     # Contadores independientes para cada tipo de worker
     worker_counters = {}
+    worker_services = []
+    
+    monitor_count = nodes.get("MONITORS", 3) # Default to 3 monitors
+    monitor_services = [f"monitor_{i}" for i in range(1, monitor_count + 1)]
     
     for nodo, cantidad in nodes.items():
         if cantidad == 0:
@@ -530,7 +571,7 @@ def generate_compose(meta: dict, nodes: dict, services: dict = None):
         
         if is_client(nodo):
             for i in range(1, cantidad + 1):
-                define_client(meta, compose, nodo, i)
+                define_client(meta, compose, nodo, i, monitor_services)
             client_amount = cantidad
         else: 
             # Inicializar contador para este tipo de worker si no existe
@@ -552,6 +593,8 @@ def generate_compose(meta: dict, nodes: dict, services: dict = None):
                 else:
                     raise ValueError(f"Tipo de nodo inválido: {nodo}")
                 
+                worker_services.append(service_name)
+                
                 # Para scaling, necesitamos el nombre base del servicio
                 base_service_name = f"{nodo.lower()}_service"
                 if base_service_name not in services:
@@ -561,8 +604,7 @@ def generate_compose(meta: dict, nodes: dict, services: dict = None):
         raise ValueError("Debe haber al menos un cliente.")
     define_server(compose, client_amount) 
     
-    monitor_count = nodes.get("MONITORS", 3) # Default to 3 monitors
-    define_monitor(meta, compose, monitor_count)
+    define_monitor(meta, compose, monitor_count, worker_services)
     services["monitor"] = monitor_count
 
     if meta.get("chaos_enabled", "false").lower() == "true":

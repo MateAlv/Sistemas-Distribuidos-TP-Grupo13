@@ -120,25 +120,36 @@ class Filter:
                 return
             self.middleware_end_exchange.stop_consuming()
 
+        def coord_stop():
+            if not self.middleware_coordination.connection or not self.middleware_coordination.connection.is_open:
+                return
+            self.middleware_coordination.stop_consuming()
+
         while self.__running:
 
 
             try:
+                logging.debug("action: start_consuming_stats")
                 self.stats_timer = self.middleware_end_exchange.connection.call_later(TIMEOUT, stats_stop)
                 self.middleware_end_exchange.start_consuming(stats_callback)
+                logging.debug("action: stop_consuming_stats")
             except (OSError, RuntimeError, MessageMiddlewareMessageError) as e:
                 logging.error(f"Error en consumo: {e}")
 
             try:
+                logging.debug("action: start_consuming_receiver")
                 self.consume_timer = self.middleware_queue_receiver.connection.call_later(TIMEOUT, stop)
                 self.middleware_queue_receiver.start_consuming(callback)
+                logging.debug("action: stop_consuming_receiver")
             except (OSError, RuntimeError, MessageMiddlewareMessageError) as e:
                  logging.error(f"Error en consumo: {e}")
 
             # Consume coordination barrier forwards
             try:
-                self.coord_timer = self.middleware_coordination.connection.call_later(TIMEOUT, stop)
+                logging.debug("action: start_consuming_coordination")
+                self.coord_timer = self.middleware_coordination.connection.call_later(TIMEOUT, coord_stop)
                 self.middleware_coordination.start_consuming(coord_callback)
+                logging.debug("action: stop_consuming_coordination")
             except (OSError, RuntimeError, MessageMiddlewareMessageError) as e:
                 logging.error(f"Error en consumo coordination: {e}")
 
