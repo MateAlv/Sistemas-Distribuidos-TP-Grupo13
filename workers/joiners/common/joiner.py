@@ -252,17 +252,25 @@ class Joiner:
                                         "client_id": client_id,
                                         "stage": self.stage,
                                         "shard": DEFAULT_SHARD,
-                                        "expected": self.expected_inputs,
+                                        "expected": 1,  # one joiner instance
                                         "chunks": 1,
                                         "sender": str(self.id) if hasattr(self, "id") else self.joiner_type,
                                     }
-                                    rk = f"coordination.joiner.{self.stage}."shard": DEFAULT_SHARD,
-                                        "expected": self.expected_inputs,
+                                    stats_payload = {
+                                        "type": MSG_WORKER_STATS,
+                                        "id": str(self.id) if hasattr(self, "id") else self.joiner_type,
+                                        "client_id": client_id,
+                                        "stage": self.stage,
+                                        "shard": DEFAULT_SHARD,
+                                        "expected": 1,
                                         "chunks": 1,
+                                        "processed": 1,
                                         "sender": str(self.id) if hasattr(self, "id") else self.joiner_type,
                                     }
-                                    rk = f"coordination.joiner.{self.stage}.{DEFAULT_SHARD}"
+                                    rk = f"coordination.barrier.{self.stage}.{DEFAULT_SHARD}"
                                     self.middleware_coordination.send(json.dumps(payload).encode("utf-8"), routing_key=rk)
+                                    self.middleware_coordination.send(json.dumps(stats_payload).encode("utf-8"), routing_key=rk)
+                                    
                                     logging.debug(f"action: coordination_end_sent | stage:{self.stage} | cli_id:{client_id}")
                                 except Exception as e:
                                     logging.error(f"action: coordination_end_send_error | stage:{self.stage} | cli_id:{client_id} | error:{e}")

@@ -378,7 +378,7 @@ class Maximizer:
                     "chunks": count,
                     "sender": sender_id,
                 }
-                rk = f"coordination.maximizer.{self.stage}.{self.shard_id}"
+                rk = f"coordination.barrier.{self.stage}.{self.shard_id}"
                 self.middleware_coordination.send(json.dumps(payload).encode("utf-8"), routing_key=rk)
                 logging.debug(f"action: coordination_end_sent | stage:{self.stage} | cli_id:{client_id} | chunks:{count}")
             except Exception as e:

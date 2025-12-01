@@ -288,7 +288,7 @@ class Filter:
                     "not_sent": own_not_sent,
                     "sender": str(self.id),
                 }
-                rk = f"coordination.filter.{self.stage}.{DEFAULT_SHARD}"
+                rk = f"coordination.barrier.{self.stage}.{DEFAULT_SHARD}"
                 self.middleware_coordination.send(json.dumps(payload).encode("utf-8"), routing_key=rk)
                 logging.debug(f"action: coordination_stats_sent | stage:{self.stage} | cli_id:{client_id} | received:{own_received} | not_sent:{own_not_sent}")
             except Exception as e:
@@ -326,7 +326,7 @@ class Filter:
                 "chunks": total_expected - total_not_sent,
                 "sender": str(self.id),
             }
-            rk = f"coordination.filter.{self.stage}.{DEFAULT_SHARD}"
+            rk = f"coordination.barrier.{self.stage}.{DEFAULT_SHARD}"
             self.middleware_coordination.send(json.dumps(payload).encode("utf-8"), routing_key=rk)
             logging.debug(f"action: coordination_end_sent | stage:{self.stage} | cli_id:{client_id} | chunks:{total_expected-total_not_sent}")
         except Exception as e:

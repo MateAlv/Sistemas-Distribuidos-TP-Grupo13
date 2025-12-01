@@ -94,7 +94,7 @@ class Server:
             except Exception as e:
                 logging.warning("action: save_dir_create_fail | dir: %s | error: %r", SAVE_DIR, e)
 
-        # Coordination publisher (server is non-sharded)
+        # Coordination publisher/consumer (server is non-sharded)
         self.middleware_coordination = MessageMiddlewareExchange(
             "rabbitmq",
             COORDINATION_EXCHANGE,
@@ -209,21 +209,34 @@ class Server:
                             middleware_queue_senders["to_join_menu_items"].send(message)
                         
                     sendall(sock, self.header_id_to_bytes(H_ID_OK))
-                    # Publish coordination END for server ingestion stage
+                    # Publish coordination END + STATS for server ingestion stage
                     try:
-                        payload = {
+                        total_chunks = sum(number_of_chunks_per_file.values())
+                        payload_end = {
                             "type": MSG_WORKER_END,
                             "id": "server",
                             "client_id": client_id,
                             "stage": STAGE_SERVER_RESULTS,
                             "shard": DEFAULT_SHARD,
                             "expected": 1,
-                            "chunks": sum(number_of_chunks_per_file.values()),
+                            "chunks": total_chunks,
+                            "sender": "server",
+                        }
+                        payload_stats = {
+                            "type": MSG_WORKER_STATS,
+                            "id": "server",
+                            "client_id": client_id,
+                            "stage": STAGE_SERVER_RESULTS,
+                            "shard": DEFAULT_SHARD,
+                            "expected": total_chunks,
+                            "chunks": total_chunks,
+                            "processed": total_chunks,
                             "sender": "server",
                         }
                         rk = f"coordination.server.{STAGE_SERVER_RESULTS}.{DEFAULT_SHARD}"
-                        self.middleware_coordination.send(json.dumps(payload).encode("utf-8"), routing_key=rk)
-                        logging.debug("action: coordination_end_sent | stage:server | cli_id:%s | chunks:%s", client_id, sum(number_of_chunks_per_file.values()))
+                        self.middleware_coordination.send(json.dumps(payload_end).encode("utf-8"), routing_key=rk)
+                        self.middleware_coordination.send(json.dumps(payload_stats).encode("utf-8"), routing_key=rk)
+                        logging.debug("action: coordination_end_stats_sent | stage:server | cli_id:%s | chunks:%s", client_id, total_chunks)
                     except Exception as e:
                         logging.error("action: coordination_end_send_error | stage:server | cli_id:%s | error:%s", client_id, e)
                     
@@ -387,6 +400,11 @@ class Server:
         Escucha resultados de la cola to_merge_data para este cliente específico.
         Envía resultados en lotes y detecta fin automáticamente.
         """
+        # Additionally, listen for monitor BARRIER_FORWARD for server_results
+        coord_results = []
+        def coord_callback(msg): coord_results.append(msg)
+        def coord_stop():
+            self.middleware_coordination.stop_consuming()
         
         maximum_chunks = self._max_number_of_chunks_in_batch()
         all_data_received = False
@@ -427,6 +445,11 @@ class Server:
             middleware_queue.stop_consuming()
 
         while not all_data_received:
+            try:
+                self.middleware_coordination.connection.call_later(TIMEOUT, coord_stop)
+                self.middleware_coordination.start_consuming(coord_callback)
+            except Exception as e:
+                logging.error(f"action: server_coordination_consume_error | error:{e}")
             middleware_queue.connection.call_later(TIMEOUT, stop)
             middleware_queue.start_consuming(callback)
 
@@ -472,6 +495,19 @@ class Server:
                 finally:
                     if msg in results_for_client:
                         results_for_client.remove(msg)
+
+            # Process barrier_forward signals
+            for raw_coord in list(coord_results):
+                try:
+                    data = json.loads(raw_coord)
+                    if data.get("type") == "BARRIER_FORWARD" and data.get("stage") == STAGE_SERVER_RESULTS and data.get("shard", DEFAULT_SHARD) == DEFAULT_SHARD:
+                        logging.info(f"action: barrier_forward_received_server | client_id:{client_id}")
+                        all_data_received = True
+                except Exception as e:
+                    logging.error(f"action: error_processing_server_barrier | error:{e}")
+                finally:
+                    if raw_coord in coord_results:
+                        coord_results.remove(raw_coord)
 
             all_data_received = all(all_data_received_per_query.values())
 

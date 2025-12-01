@@ -628,7 +628,7 @@ class Aggregator:
                 "processed": processed,
                 "sender": str(self.aggregator_id),
             }
-            rk = f"coordination.aggregator.{self.stage}.{DEFAULT_SHARD}"
+            rk = f"coordination.barrier.{self.stage}.{DEFAULT_SHARD}"
             self.middleware_coordination.send(json.dumps(payload).encode("utf-8"), routing_key=rk)
             logging.debug(f"action: coordination_stats_sent | stage:{self.stage} | cli_id:{client_id} | received:{received} | processed:{processed}")
         except Exception as e:
@@ -745,7 +745,7 @@ class Aggregator:
                     "chunks": my_processed,
                     "sender": str(self.aggregator_id),
                 }
-                rk = f"coordination.aggregator.{self.stage}.{DEFAULT_SHARD}"
+                rk = f"coordination.barrier.{self.stage}.{DEFAULT_SHARD}"
                 self.middleware_coordination.send(json.dumps(payload).encode("utf-8"), routing_key=rk)
                 logging.debug(f"action: coordination_end_sent | stage:{self.stage} | cli_id:{client_id} | chunks:{my_processed}")
             except Exception as e:
