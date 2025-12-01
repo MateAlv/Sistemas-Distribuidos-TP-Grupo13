@@ -40,13 +40,13 @@ class Filter:
 
         self.middleware_end_exchange = MessageMiddlewareExchange("rabbitmq", 
                                                                  f"end_exchange_filter_{self.filter_type}", 
-                                                                 [f"{self.id}"], 
+                                                                 f"{self.id}", 
                                                                  "fanout")
         # Coordination publisher (fire-and-forget)
         self.middleware_coordination = MessageMiddlewareExchange(
             "rabbitmq",
             COORDINATION_EXCHANGE,
-            [""],
+            f"filter_{self.filter_type}_{self.id}",
             "topic",
             routing_keys=[f"coordination.barrier.{self.stage}.{DEFAULT_SHARD}"],
         )

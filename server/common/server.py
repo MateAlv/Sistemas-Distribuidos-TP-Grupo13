@@ -98,7 +98,7 @@ class Server:
         self.middleware_coordination = MessageMiddlewareExchange(
             "rabbitmq",
             COORDINATION_EXCHANGE,
-            [""],
+            "server",
             "topic",
             routing_keys=[f"coordination.barrier.{STAGE_SERVER_RESULTS}.{DEFAULT_SHARD}"],
         )

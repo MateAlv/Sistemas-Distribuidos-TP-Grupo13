@@ -106,7 +106,7 @@ class Maximizer:
         self.middleware_coordination = MessageMiddlewareExchange(
             "rabbitmq",
             COORDINATION_EXCHANGE,
-            [""],
+            f"maximizer_{self.maximizer_type}_{slugify_shard_id(self.shard_id)}",
             "topic",
             routing_keys=[f"coordination.barrier.{self.stage}.{self.shard_id}"],
         )

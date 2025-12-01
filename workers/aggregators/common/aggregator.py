@@ -139,7 +139,7 @@ class Aggregator:
         self.middleware_coordination = MessageMiddlewareExchange(
             "rabbitmq",
             COORDINATION_EXCHANGE,
-            [""],
+            f"aggregator_{self.aggregator_type}_{self.aggregator_id}",
             "topic",
             routing_keys=[f"coordination.barrier.{self.stage}.{DEFAULT_SHARD}"],
         )
