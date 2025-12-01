@@ -59,6 +59,10 @@ class Maximizer:
 
         self.persistence = PersistenceService(f"/data/persistence/maximizer_{self.maximizer_type}_{self.maximizer_range}")
         self.working_state = MaximizerWorkingState()
+        
+        self.partial_shards_lookup = {}
+        self.expected_partial_maximizers = self.expected_inputs
+        self.expected_shard_slugs = set()
         # Stage name and shard for centralized barrier
         if self.maximizer_type == "MAX":
             self.stage = STAGE_MAX_ABSOLUTE if self.is_absolute_max() else STAGE_MAX_PARTIALS

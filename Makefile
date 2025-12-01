@@ -54,6 +54,7 @@ up:
 test:
 	# Run the docker-compose setup
 	make clean-results
+	-docker compose -f ${DOCKER} down -v --remove-orphans
 	-docker run --rm -v $(PWD)/data/persistence:/persistence alpine sh -c 'rm -rf /persistence/*'
 	python3  $(COMPOSE_SCRIPT) --config=config/config-test.ini
 	@echo "Running tests... Logs redirected to logs.txt"
