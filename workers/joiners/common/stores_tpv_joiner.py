@@ -42,6 +42,19 @@ class StoresTpvJoiner(Joiner):
         logging.info(f"action: saved_stores_join_data | type:{self.joiner_type} | client_id:{client_id} | stores_loaded:{self.working_state_join.get_join_data_count(client_id)}")
         return True
 
+    def save_data(self, chunk) -> bool:
+        """
+        Guarda los datos para la tabla que debe joinearse.
+        """
+        client_id = chunk.client_id()
+        rows = chunk.rows
+        logging.debug(
+            f"action: tpv_chunk_received | type:{self.joiner_type} | cli_id:{client_id} | rows:{len(rows)} | shards_seen:{len(self.received_shards.get(client_id, set()))}/{self.expected_shards}"
+        )
+        self.working_state_main.add_data(client_id, rows)
+        self.working_state_main.add_chunk(client_id, chunk)
+        return True
+
     def join_result(self, row: TableProcessRow, client_id):
         store_name = self.working_state_join.get_join_data(client_id, row.store_id)
         if store_name is None:
