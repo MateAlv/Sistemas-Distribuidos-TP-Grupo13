@@ -472,7 +472,7 @@ class Server:
                         total_chunks = query_end_message.total_chunks()
                         expected_total_chunks[query] = total_chunks
 
-                        if number_of_chunks_received[query] == total_chunks:
+                        if number_of_chunks_received[query] >= total_chunks:
                             all_data_received_per_query[query] = True
                             logging.debug(
                                 "action: all_data_received_for_query | client_id:%s | query:%s",
@@ -494,7 +494,7 @@ class Server:
                             chunks_received[query] = []
                             logging.debug(f"action: result_sent | client_id:{client_id} | rows:{len(result_chunk.rows)} | query:{query.name}")
 
-                        if expected_total_chunks[query] is not None and number_of_chunks_received[query] == expected_total_chunks[query]:
+                        if expected_total_chunks[query] is not None and number_of_chunks_received[query] >= expected_total_chunks[query]:
                             all_data_received_per_query[query] = True
                             logging.debug(f"action: all_data_received_for_query | client_id:{client_id} | query:{query.name}")
                             if chunks_received[query]:
