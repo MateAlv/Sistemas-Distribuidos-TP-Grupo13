@@ -184,29 +184,13 @@ class Filter:
                 stats_msg = stats_results.popleft()
                 try:
                     if stats_msg.startswith(b"STATS_END"):
-                        stats_end = FilterStatsEndMessage.decode(stats_msg)
-                        if stats_end.filter_id == self.id:
-                            continue
-                        logging.debug(f"action: stats_end_received | type:{self.filter_type} | filter_id:{stats_end.filter_id} | cli_id:{stats_end.client_id} | table_type:{stats_end.table_type}")
-                        self.working_state.delete_client_stats_data(stats_end)
+                        # Ignore peer STATS_END to avoid mixing replicas
+                        continue
                     else:
                         stats = FilterStatsMessage.decode(stats_msg)
-                        if stats.filter_id == self.id:
+                        # Ignore peer stats to avoid mixing replicas
+                        if stats.filter_id != self.id:
                             continue
-                        logging.debug(f"action: stats_received | type:{self.filter_type} | filter_id:{stats.filter_id} | cli_id:{stats.client_id} | file_type:{stats.table_type} | chunks_received:{stats.chunks_received} | chunks_not_sent:{stats.chunks_not_sent}")
-
-                        # Get OWN stats to send (not the sum of all filters)
-                        own_received = self.working_state.get_own_chunks_received(stats.client_id, stats.table_type, self.id)
-                        own_not_sent = self.working_state.get_own_chunks_not_sent(stats.client_id, stats.table_type, self.id)
-
-                        # Si no se han enviado las estadísticas o si los valores cambiaron, enviarlas
-                        if self.working_state.should_send_stats(stats.client_id, stats.table_type, own_received, own_not_sent):
-                            stats_msg = FilterStatsMessage(self.id, stats.client_id, stats.table_type, stats.total_expected, own_received, own_not_sent)
-                            self.middleware_end_exchange.send(stats_msg.encode())
-                            # Se registra que ya se enviaron las estadísticas con estos valores
-                            self.working_state.mark_stats_sent(stats.client_id, stats.table_type, own_received, own_not_sent)
-
-                        self.working_state.end_received(stats.client_id, stats.table_type)
 
                         self.working_state.update_stats_received(stats.client_id, stats.table_type, stats)
 
@@ -263,9 +247,9 @@ class Filter:
         try:
             self.global_processed_ids.add(msg_id_str)
             with open(self.global_dedup_path, "a", encoding="utf-8") as fh:
-                fh.write(f\"{msg_id_str}\\n\")
+                fh.write(f"{msg_id_str}\n")
         except Exception as e:
-            logging.warning(f\"action: global_dedup_save_failed | type:{self.filter_type} | message_id:{msg_id} | error:{e}\")
+            logging.warning(f"action: global_dedup_save_failed | type:{self.filter_type} | message_id:{msg_id} | error:{e}")
         self.persistence_service.commit_working_state(self.working_state.to_bytes(), msg_id)
 
         if self.working_state.end_is_received(client_id, table_type):

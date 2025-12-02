@@ -155,7 +155,9 @@ class Server:
         """
         peer = f"{addr[0]}:{addr[1]}"
         client_id = None
+        # Tracks files received (for END) and chunks sent per shard (for accurate expected)
         number_of_chunks_per_file = {}
+        chunks_sent_per_shard = defaultdict(int)  # key: (client_id, table_type, shard_id)
         middleware_queue_senders = {}
         # Sharded filter queues (year stage)
         shard_counters = defaultdict(int)
@@ -195,7 +197,7 @@ class Server:
 
                 if header == H_ID_DATA:
                     # Recibe y procesa chunk
-                    self._handle_file_chunks(sock, peer, middleware_queue_senders, number_of_chunks_per_file, client_id, shard_counters)
+                    self._handle_file_chunks(sock, peer, middleware_queue_senders, number_of_chunks_per_file, chunks_sent_per_shard, client_id, shard_counters)
                     if middleware_queue_receiver is None and client_id is not None:
                         middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", f"to_merge_data_{client_id}")
                     files_received += 1
@@ -207,22 +209,24 @@ class Server:
                     logging.debug("action: recv_finished | peer:%s | client_id:%s | files:%d", 
                                peer, client_id, files_received)
                     for table_type, count in number_of_chunks_per_file.items():
-                        message = MessageEnd(client_id, table_type=table_type, count=count).encode()
-                        logging.debug("action: sending_end_message | peer:%s | client_id:%s | table_type:%s | count:%d", 
-                                   peer, client_id, table_type.name, count)
-                        if table_type == TableType.TRANSACTIONS or table_type == TableType.TRANSACTION_ITEMS:
-                            # Broadcast END a todos los shards de year para que propaguen su propio total
-                            for sid in range(1, self.filter_year_shards + 1):
+                        # Use chunks actually sent per client/table/shard (if available) instead of file count
+                        # Broadcast END a todos los shards de year para que propaguen su propio total
+                        for sid in range(1, self.filter_year_shards + 1):
+                            chunk_total = chunks_sent_per_shard.get((client_id, table_type, sid), count)
+                            message = MessageEnd(client_id, table_type=table_type, count=chunk_total).encode()
+                            logging.debug("action: sending_end_message | peer:%s | client_id:%s | table_type:%s | shard:%s | count:%d", 
+                                       peer, client_id, table_type.name, sid, chunk_total)
+                            if table_type == TableType.TRANSACTIONS or table_type == TableType.TRANSACTION_ITEMS:
                                 queue_name = f"to_filter_year_shard_{sid}"
                                 middleware_queue_senders[queue_name].send(message)
-                        elif table_type == TableType.STORES:
-                            middleware_queue_senders["to_join_stores_tpv"].send(message)
-                            middleware_queue_senders["to_join_stores_top3"].send(message)
-                            middleware_queue_senders["to_top3"].send(message)
-                        elif table_type == TableType.USERS:
-                            middleware_queue_senders["to_join_users"].send(message)
-                        elif table_type == TableType.MENU_ITEMS:
-                            middleware_queue_senders["to_join_menu_items"].send(message)
+                            elif table_type == TableType.STORES:
+                                middleware_queue_senders["to_join_stores_tpv"].send(message)
+                                middleware_queue_senders["to_join_stores_top3"].send(message)
+                                middleware_queue_senders["to_top3"].send(message)
+                            elif table_type == TableType.USERS:
+                                middleware_queue_senders["to_join_users"].send(message)
+                            elif table_type == TableType.MENU_ITEMS:
+                                middleware_queue_senders["to_join_menu_items"].send(message)
                         
                     sendall(sock, self.header_id_to_bytes(H_ID_OK))
                     # Publish coordination END + STATS for server ingestion stage
@@ -340,7 +344,7 @@ class Server:
         sock.settimeout(DEFAULT_IO_TIMEOUT)
         return client_id
 
-    def _handle_file_chunks(self, sock: socket.socket, peer: str, middleware_queue_senders: dict, number_of_chunks_per_file: dict, client_id: int, shard_counters: dict) :
+    def _handle_file_chunks(self, sock: socket.socket, peer: str, middleware_queue_senders: dict, number_of_chunks_per_file: dict, chunks_sent_per_shard: dict, client_id: int, shard_counters: dict) :
         """
         Recibe y procesa un FileChunk del cliente.
         Retorna el client_id.
@@ -372,6 +376,7 @@ class Server:
                 logging.debug("action: send_to_filter_year_shard | peer:%s | cli_id:%s | file:%s | table:%s | shard:%s | msg_id:%s",
                              peer, client_id, chunk.path(), table_type, shard_id, process_chunk.message_id())
                 middleware_queue_senders[queue_name].send(process_chunk.serialize())
+                chunks_sent_per_shard[(client_id, table_type, shard_id)] = chunks_sent_per_shard.get((client_id, table_type, shard_id), 0) + 1
 
             elif table_type == TableType.STORES:
                 logging.debug("action: send_to_join_stores_tpv | peer:%s | cli_id:%s | file:%s | table:%s",
