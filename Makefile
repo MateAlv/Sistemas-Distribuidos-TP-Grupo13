@@ -66,6 +66,16 @@ test:
 	fi
 .PHONY: test
 
+test-compilation:
+	python3 -m py_compile server/main.py \
+		workers/filter/main.py \
+		workers/aggregators/main.py \
+		workers/maximizers/main.py \
+		workers/joiners/main.py \
+		monitor/main.py \
+		client/main.py
+.PHONY: test-compilation
+
 test-small:
 	# Clean up previous run
 	-docker compose -f ${DOCKER} down -v --remove-orphans

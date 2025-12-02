@@ -134,21 +134,11 @@ class Maximizer:
         sender_id = self.shard_slug if self.shard_slug else self.maximizer_range
 
         if self.maximizer_type == "MAX":
-            if self.is_absolute_max():
-                chunks_sent = self.publish_absolute_max_results(client_id)
-                self._send_end_message(client_id, TableType.TRANSACTION_ITEMS, "joiner", chunks_sent, sender_id or "absolute")
-            else:
-                chunks_sent = self.publish_partial_max_results(client_id)
-                self._send_end_message(client_id, TableType.TRANSACTION_ITEMS, "absolute", chunks_sent, sender_id or "partial")
-                logging.info(f"action: partial_maximizer_finished | range:{self.maximizer_range} | client_id:{client_id}")
+            chunks_sent = self.publish_absolute_max_results(client_id)
+            self._send_end_message(client_id, TableType.TRANSACTION_ITEMS, "joiner", chunks_sent, sender_id or "absolute")
         elif self.maximizer_type == "TOP3":
-            if self.is_absolute_top3():
-                chunks_sent = self.publish_absolute_top3_results(client_id)
-                self._send_end_message(client_id, TableType.PURCHASES_PER_USER_STORE, "joiner", chunks_sent, sender_id or "absolute")
-            else:
-                chunks_sent = self.publish_partial_top3_results(client_id)
-                self._send_end_message(client_id, TableType.PURCHASES_PER_USER_STORE, "absolute", chunks_sent, sender_id or "partial")
-                logging.info(f"action: partial_top3_finished | range:{self.maximizer_range} | client_id:{client_id}")
+            chunks_sent = self.publish_absolute_top3_results(client_id)
+            self._send_end_message(client_id, TableType.PURCHASES_PER_USER_STORE, "joiner", chunks_sent, sender_id or "absolute")
 
         logging.info(f"action: maximizer_finished | type:{self.maximizer_type} | range:{self.maximizer_range} | client_id:{client_id}")
         self.delete_client_data(client_id)

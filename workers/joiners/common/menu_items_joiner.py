@@ -80,3 +80,11 @@ class MenuItemsJoiner(Joiner):
 
         client_queue.close()
         logging.info(f"action: sent_result_message | type:{self.joiner_type} | client_id:{client_id}")
+
+    def run(self):
+        from .joiner import Joiner
+        Joiner.run(self)
+
+    def shutdown(self, signum=None, frame=None):
+        # Delegate to base shutdown for consistent signal handling
+        super().shutdown(signum, frame)

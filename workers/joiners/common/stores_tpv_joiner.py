@@ -104,6 +104,15 @@ class StoresTpvJoiner(Joiner):
         else:
             logging.info(f"action: no_results_to_send | type:{self.joiner_type} | client_id:{client_id}")
 
+    def run(self):
+        # Call base run explicitly (avoids super edge-cases in some runtimes)
+        from .joiner import Joiner
+        Joiner.run(self)
+
+    def shutdown(self, signum=None, frame=None):
+        # Delegate to base shutdown for consistent signal handling
+        super().shutdown(signum, frame)
+
     def send_end_query_msg(self, client_id):
         end_query_msg_3 = MessageQueryEnd(client_id, ResultTableType.QUERY_3, 1)
         client_queue = MessageMiddlewareQueue("rabbitmq", f"to_merge_data_{client_id}")

@@ -82,7 +82,7 @@ class Filter:
                      )
 
         logging.info("Verificando recuperación de procesamiento previo")
-        self.persistence_service = PersistenceService()
+        self.persistence_service = PersistenceService(f"/data/persistence/filter_{self.filter_type}_{self.id}")
 
     def handle_processing_recovery(self):
 
@@ -327,12 +327,47 @@ class Filter:
     def _send_end_message(self, client_id, table_type, total_expected, total_not_sent):
         logging.info(f"action: sending_end_message | type:{self.filter_type} | cli_id:{client_id} | file_type:{table_type.name} | total_chunks:{total_expected-total_not_sent}")
         
+        # 1. Send to static queues (next filters)
         for queue_name, queue in self.middleware_queue_sender.items():
+            if "shard" in queue_name: continue # Skip dynamic shard queues for now
             if self._should_skip_queue(table_type, queue_name, client_id):
                 continue
             logging.info(f"action: sending_end_to_queue | type:{self.filter_type} | queue:{queue_name} | total_chunks:{total_expected-total_not_sent}")
             msg_to_send = self._end_message_to_send(client_id, table_type, total_expected, total_not_sent)
             queue.send(msg_to_send.encode())
+
+        # 2. Send to dynamic shard queues (Aggregators) - Ensure ALL shards get END
+        if self.filter_type == "year":
+            if table_type == TableType.TRANSACTION_ITEMS:
+                # Q2: Products
+                for i in range(1, self.products_shards + 1):
+                    queue_name = f"to_agg_products_shard_{i}"
+                    if queue_name not in self.middleware_queue_sender:
+                        self.middleware_queue_sender[queue_name] = MessageMiddlewareQueue("rabbitmq", queue_name)
+                    logging.info(f"action: sending_end_to_shard | type:{self.filter_type} | queue:{queue_name} | total_chunks:{total_expected-total_not_sent}")
+                    msg_to_send = self._end_message_to_send(client_id, table_type, total_expected, total_not_sent)
+                    self.middleware_queue_sender[queue_name].send(msg_to_send.encode())
+            elif table_type == TableType.TRANSACTIONS:
+                # Q4: Purchases
+                for i in range(1, self.purchases_shards + 1):
+                    queue_name = f"to_agg_purchases_shard_{i}"
+                    if queue_name not in self.middleware_queue_sender:
+                        self.middleware_queue_sender[queue_name] = MessageMiddlewareQueue("rabbitmq", queue_name)
+                    logging.info(f"action: sending_end_to_shard | type:{self.filter_type} | queue:{queue_name} | total_chunks:{total_expected-total_not_sent}")
+                    msg_to_send = self._end_message_to_send(client_id, table_type, total_expected, total_not_sent)
+                    self.middleware_queue_sender[queue_name].send(msg_to_send.encode())
+
+        elif self.filter_type == "hour":
+            if table_type == TableType.TRANSACTIONS:
+                # Q3: TPV
+                for i in range(1, self.tpv_shards + 1):
+                    queue_name = f"to_agg_tpv_shard_{i}"
+                    if queue_name not in self.middleware_queue_sender:
+                        self.middleware_queue_sender[queue_name] = MessageMiddlewareQueue("rabbitmq", queue_name)
+                    logging.info(f"action: sending_end_to_shard | type:{self.filter_type} | queue:{queue_name} | total_chunks:{total_expected-total_not_sent}")
+                    msg_to_send = self._end_message_to_send(client_id, table_type, total_expected, total_not_sent)
+                    self.middleware_queue_sender[queue_name].send(msg_to_send.encode())
+
         # Publish to coordination for centralized barrier
         try:
             payload = {

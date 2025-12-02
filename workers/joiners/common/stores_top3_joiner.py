@@ -110,3 +110,11 @@ class StoresTop3Joiner(Joiner):
                 raise publish_error
         else:
             logging.info(f"action: no_results_to_send | type:{self.joiner_type} | client_id:{client_id}")
+
+    def run(self):
+        from .joiner import Joiner
+        Joiner.run(self)
+
+    def shutdown(self, signum=None, frame=None):
+        # Delegate to base shutdown to ensure signal handling exists
+        super().shutdown(signum, frame)
