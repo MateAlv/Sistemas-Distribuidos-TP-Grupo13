@@ -37,7 +37,9 @@ class TestFaultToleranceMaximizer(unittest.TestCase):
         max_worker.persistence = self.MockPersistence.return_value
         max_worker.persistence.recover_working_state.return_value = None
         max_worker.persistence.recover_last_processing_chunk.return_value = None
-        max_worker.processed_ids = set()
+        max_worker.working_state = MagicMock()
+        max_worker.working_state.is_processed.return_value = False
+        max_worker.working_state.is_client_end_processed.return_value = False
         
         with patch.dict(os.environ, {"CRASH_POINT": "CRASH_BEFORE_PROCESS"}):
             with self.assertRaises(SystemExit):
@@ -56,7 +58,9 @@ class TestFaultToleranceMaximizer(unittest.TestCase):
     def test_crash_after_process_before_commit(self):
         max_worker = Maximizer("MAX", "absolute", None, ["shard1"])
         max_worker.persistence = self.MockPersistence.return_value
-        max_worker.processed_ids = set()
+        max_worker.working_state = MagicMock()
+        max_worker.working_state.is_processed.return_value = False
+        max_worker.working_state.is_client_end_processed.return_value = False
         
         with patch.dict(os.environ, {"CRASH_POINT": "CRASH_AFTER_PROCESS_BEFORE_COMMIT"}):
             with self.assertRaises(SystemExit):
@@ -68,7 +72,8 @@ class TestFaultToleranceMaximizer(unittest.TestCase):
                     mock_chunk.rows = []
                     mock_reader.return_value = mock_chunk
                     
-                    max_worker._handle_data_chunk(dummy_msg)
+                    with patch('workers.maximizers.common.maximizer.pickle.dumps', return_value=b"pickled_state"):
+                        max_worker._handle_data_chunk(dummy_msg)
 
         max_worker.persistence.commit_working_state.assert_not_called()
 
@@ -78,9 +83,10 @@ class TestFaultToleranceMaximizer(unittest.TestCase):
         """
         max_worker = Maximizer("MAX", "absolute", None, ["shard1"])
         max_worker.persistence = self.MockPersistence.return_value
+        max_worker.working_state = MagicMock()
         
         # Simulate that the message was already counted
-        max_worker.processed_ids = {b"1234"}
+        max_worker.working_state.is_processed.return_value = True
         
         dummy_msg = b"dummy_chunk"
         with patch('workers.maximizers.common.maximizer.ProcessBatchReader.from_bytes') as mock_reader:

@@ -1,6 +1,8 @@
 #!/bin/bash
 
-DATA_PATH=./data
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
+PROJECT_ROOT="$SCRIPT_DIR/.."
+DATA_PATH="$PROJECT_ROOT/data"
 DATASET_ZIP_PATH=$DATA_PATH/data-test
 RESULTS_ZIP_PATH=$DATA_PATH/results
 # Dataset completo
@@ -14,22 +16,34 @@ DATA_REDUCED_PATH=$DATA_PATH/.data-reduced
 RESULTS_DATA_REDUCED_PATH=$DATA_PATH/.results-data-reduced
 # Dataset de pruebas internas de la librería
 DATA_TEST_PATH=$DATA_PATH/.data-test
+mkdir -p $DATA_PATH
 
 # Download dataset from Kaggle
-curl -L -o ./g-coffee-shop-transaction-202307-to-202506.zip\
+# Download dataset from Kaggle
+curl -L -o "$DATA_PATH/g-coffee-shop-transaction-202307-to-202506.zip"\
   https://www.kaggle.com/api/v1/datasets/download/geraldooizx/g-coffee-shop-transaction-202307-to-202506
 
 # Unzip dataset
-unzip ./g-coffee-shop-transaction-202307-to-202506.zip -d $KAGGLE_PATH
+unzip -o "$DATA_PATH/g-coffee-shop-transaction-202307-to-202506.zip" -d $KAGGLE_PATH
 
 # Remove unnecessary files and folders to reduce dataset size
-rm ./g-coffee-shop-transaction-202307-to-202506.zip
+rm "$DATA_PATH/g-coffee-shop-transaction-202307-to-202506.zip"
 rm -rf $KAGGLE_PATH/payment_methods
 rm -rf $KAGGLE_PATH/vouchers
+
+rm -rf $KAGGLE_PATH/1.stores
 mv $KAGGLE_PATH/stores $KAGGLE_PATH/1.stores
+
+rm -rf $KAGGLE_PATH/2.menu_items
 mv $KAGGLE_PATH/menu_items $KAGGLE_PATH/2.menu_items
+
+rm -rf $KAGGLE_PATH/3.users
 mv $KAGGLE_PATH/users $KAGGLE_PATH/3.users
+
+rm -rf $KAGGLE_PATH/4.transactions
 mv $KAGGLE_PATH/transactions $KAGGLE_PATH/4.transactions
+
+rm -rf $KAGGLE_PATH/5.transaction_items
 mv $KAGGLE_PATH/transaction_items $KAGGLE_PATH/5.transaction_items
 
 # Create reduced dataset with only January 2024 and January 2025 data
@@ -52,6 +66,7 @@ cp -r $KAGGLE_PATH/3.users/ $KAGGLE_REDUCED_PATH/3.users/
 
 # Unzip test data
 unzip -o $DATASET_ZIP_PATH.zip -d $DATA_PATH
+rm -rf $DATA_REDUCED_PATH
 mv $DATA_PATH/.data-test $DATA_REDUCED_PATH
 
 # Create internal test dataset copying only stores and menu_items

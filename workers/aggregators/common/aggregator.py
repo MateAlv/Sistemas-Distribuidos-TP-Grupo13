@@ -1,9 +1,11 @@
 import datetime
+import time
 import logging
 from collections import defaultdict, deque
 from types import SimpleNamespace
 import sys
 import os
+import json
 
 from utils.processing.process_table import (
     TransactionItemsProcessRow,
@@ -16,6 +18,16 @@ from utils.processing.process_chunk import ProcessChunk
 from utils.processing.process_batch_reader import ProcessBatchReader
 from utils.file_utils.file_table import DateTime
 from utils.eof_protocol.end_messages import MessageEnd
+from utils.protocol import (
+    COORDINATION_EXCHANGE,
+    MSG_WORKER_END,
+    MSG_WORKER_STATS,
+    MSG_BARRIER_FORWARD,
+    DEFAULT_SHARD,
+    STAGE_AGG_PRODUCTS,
+    STAGE_AGG_TPV,
+    STAGE_AGG_PURCHASES,
+)
 from utils.file_utils.table_type import TableType
 from middleware.middleware_interface import (
     MessageMiddlewareQueue,
@@ -37,6 +49,7 @@ from .aggregator_stats_messages import (
 import pickle
 import uuid
 from utils.tolerance.persistence_service import PersistenceService
+from .aggregator_working_state import AggregatorWorkingState
 
 
 def default_product_value():
@@ -55,21 +68,10 @@ class Aggregator:
         self.aggregator_type = agg_type
         self.aggregator_id = agg_id
         self.middleware_queue_sender = {}
+        self.barrier_forwarded = set()
 
-        # Estado distribuido entre hermanos
-        self.end_message_received = {}
-        self.chunks_received_per_client = {}
-        self.chunks_processed_per_client = {}
-        self.accumulated_chunks_per_client = {}
-        self.chunks_to_receive = {}
-        self.already_sent_stats = {}
-
-        self.chunk_timer = None
-        self.data_timer = None
-        self.stats_timer = None
-
-        # Acumuladores globales
-        self.global_accumulator = {}
+        # Estado distribuido encapsulado
+        self.working_state = AggregatorWorkingState()
 
         # Exchanges para coordinación
         self.middleware_stats_exchange = MessageMiddlewareExchange(
@@ -93,15 +95,18 @@ class Aggregator:
             )
 
         self.shard_configs: list[ShardConfig] = []
-        self.shard_configs: list[ShardConfig] = []
         self.id_to_shard: dict[int, ShardConfig] = {}
+        self.shard_id = os.getenv("AGGREGATOR_SHARD_ID", None)
+        self.shard_count = int(os.getenv("AGGREGATOR_SHARDS", "1"))
 
         self.persistence = PersistenceService(f"/data/persistence/aggregator_{self.aggregator_type}_{self.aggregator_id}")
-        self.processed_ids = set()
+        self.persistence = PersistenceService(f"/data/persistence/aggregator_{self.aggregator_type}_{self.aggregator_id}")
         self._recover_state()
 
+
+
         if self.aggregator_type == "PRODUCTS":
-            self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", "to_agg_1+2")
+            self.stage = STAGE_AGG_PRODUCTS
             try:
                 self.shard_configs = load_shards_from_env("MAX_SHARDS", worker_kind="MAX")
             except ShardingConfigError as exc:
@@ -109,11 +114,21 @@ class Aggregator:
                     f"Invalid MAX shards configuration: {exc}"
                 ) from exc
             self.id_to_shard = build_id_lookup(self.shard_configs)
-            for shard in self.shard_configs:
-                self.middleware_queue_sender[shard.queue_name] = MessageMiddlewareQueue("rabbitmq", shard.queue_name)
+            # If shard_id is numeric index, map to shard_configs order; otherwise treat as name
+            shard_to_use = None
+            if self.shard_id is None:
+                raise ShardingConfigError("AGGREGATOR_SHARD_ID must be set for PRODUCTS aggregator")
+            try:
+                shard_idx = int(self.shard_id) - 1
+                shard_to_use = self.shard_configs[shard_idx]
+            except (ValueError, IndexError):
+                shard_to_use = shard_by_id(self.shard_configs, self.shard_id)
+            self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", f"to_agg_products_shard_{self.aggregator_id}")
+            # Send aggregated partials to the absolute maximizer
+            self.middleware_queue_sender["to_absolute_max"] = MessageMiddlewareQueue("rabbitmq", "to_absolute_max")
 
         elif self.aggregator_type == "PURCHASES":
-            self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", "to_agg_4")
+            self.stage = STAGE_AGG_PURCHASES
             try:
                 self.shard_configs = load_shards_from_env("TOP3_SHARDS", worker_kind="TOP3")
             except ShardingConfigError as exc:
@@ -121,14 +136,36 @@ class Aggregator:
                     f"Invalid TOP3 shards configuration: {exc}"
                 ) from exc
             self.id_to_shard = build_id_lookup(self.shard_configs)
-            for shard in self.shard_configs:
-                self.middleware_queue_sender[shard.queue_name] = MessageMiddlewareQueue("rabbitmq", shard.queue_name)
+            shard_to_use = None
+            if self.shard_id is None:
+                raise ShardingConfigError("AGGREGATOR_SHARD_ID must be set for PURCHASES aggregator")
+            try:
+                shard_idx = int(self.shard_id) - 1
+                shard_to_use = self.shard_configs[shard_idx]
+            except (ValueError, IndexError):
+                shard_to_use = shard_by_id(self.shard_configs, self.shard_id)
+            self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", f"to_agg_purchases_shard_{self.aggregator_id}")
+            # Send aggregated partials to the absolute TOP3 maximizer
+            self.middleware_queue_sender["to_top3_absolute"] = MessageMiddlewareQueue("rabbitmq", "to_top3_absolute")
 
         elif self.aggregator_type == "TPV":
-            self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", "to_agg_3")
-            self.middleware_queue_sender["to_join_with_stores_tvp"] = MessageMiddlewareQueue("rabbitmq", "to_join_with_stores_tvp")
+            if self.shard_id is None:
+                raise ShardingConfigError("AGGREGATOR_SHARD_ID must be set for TPV aggregator")
+            self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", f"to_agg_tpv_shard_{self.shard_id}")
+            # Send aggregated partials to TPV absolute (to be consumed by max/joiner)
+            self.middleware_queue_sender["to_absolute_tpv"] = MessageMiddlewareQueue("rabbitmq", "to_absolute_tpv")
+            self.stage = STAGE_AGG_TPV
         else:
             raise ValueError(f"Tipo de agregador inválido: {self.aggregator_type}")
+
+        # Coordination publisher with shard-aware routing (agg is non-sharded -> global)
+        self.middleware_coordination = MessageMiddlewareExchange(
+            "rabbitmq",
+            COORDINATION_EXCHANGE,
+            f"aggregator_{self.aggregator_type}_{self.aggregator_id}",
+            "topic",
+            routing_keys=[f"coordination.barrier.{self.stage}.{self.shard_id or DEFAULT_SHARD}"],
+        )
 
 
     def shutdown(self, signum=None, frame=None):
@@ -183,22 +220,18 @@ class Aggregator:
             except (OSError, RuntimeError, AttributeError, ValueError):
                 pass
 
+        try:
+            self.middleware_coordination.close()
+        except (OSError, RuntimeError, AttributeError, ValueError):
+            pass
+
         # Limpiar estructuras internas
-        for attr in [
-            "end_message_received",
-            "chunks_received_per_client",
-            "chunks_processed_per_client",
-            "accumulated_chunks_per_client",
-            "chunks_to_receive",
-            "already_sent_stats",
-            "global_accumulator",
-        ]:
-            collection = getattr(self, attr, None)
-            if isinstance(collection, (dict, list, set)) and hasattr(collection, "clear"):
-                try:
-                    collection.clear()
-                except (OSError, RuntimeError, AttributeError, ValueError):
-                    pass
+        # Limpiar estado
+        try:
+            # Re-initialize state instead of clearing individual dicts
+            self.working_state = AggregatorWorkingState()
+        except (OSError, RuntimeError, AttributeError, ValueError):
+            pass
 
         logging.info(
             f"Aggregator {self.aggregator_type} (ID: {self.aggregator_id}) cerrado correctamente."
@@ -212,6 +245,7 @@ class Aggregator:
         data_results = deque()
         stats_results = deque()
         data_chunks = deque()
+        coord_results = deque()
 
         def data_callback(msg):
             data_results.append(msg)
@@ -221,6 +255,8 @@ class Aggregator:
 
         def chunk_callback(msg):
             data_chunks.append(msg)
+        def coord_callback(msg):
+            coord_results.append(msg)
 
         def data_stop():
             self.middleware_data_exchange.stop_consuming()
@@ -230,6 +266,8 @@ class Aggregator:
 
         def chunk_stop():
             self.middleware_queue_receiver.stop_consuming()
+        def coord_stop():
+            self.middleware_coordination.stop_consuming()
 
         # Recover last processing chunk if exists
         last_chunk = self.persistence.recover_last_processing_chunk()
@@ -244,6 +282,7 @@ class Aggregator:
                 logging.error(f"Error recovering last chunk: {e}")
 
         while self._running:
+            self._send_periodic_stats()
             try:
                 self.chunk_timer = self.middleware_queue_receiver.connection.call_later(TIMEOUT, chunk_stop)
                 self.middleware_queue_receiver.start_consuming(chunk_callback)
@@ -268,6 +307,15 @@ class Aggregator:
                     f"action: stats_consume_error | type:{self.aggregator_type} | agg_id:{self.aggregator_id} | error:{e}"
                 )
 
+            # Consume coordination barrier forwards
+            try:
+                coord_timer = self.middleware_coordination.connection.call_later(TIMEOUT, coord_stop)
+                self.middleware_coordination.start_consuming(coord_callback)
+            except Exception as e:
+                logging.error(
+                    f"action: coordination_consume_error | type:{self.aggregator_type} | agg_id:{self.aggregator_id} | error:{e}"
+                )
+
             while data_results:
     
                 raw_data = data_results.popleft()
@@ -277,6 +325,10 @@ class Aggregator:
     
                 raw_stats = stats_results.popleft()
                 self._process_stats_message(raw_stats)
+
+            while coord_results:
+                raw_coord = coord_results.popleft()
+                self._process_coord_message(raw_coord)
 
             while data_chunks:
     
@@ -311,14 +363,14 @@ class Aggregator:
             f"| client_id:{data.client_id} | table_type:{data.table_type}"
         )
 
-        if data.message_id in self.processed_ids:
+        if self.working_state.is_processed(data.message_id):
             logging.info(f"action: duplicate_data_message_ignored | message_id:{data.message_id}")
             return
 
         self._apply_remote_aggregation(data)
-        self._increment_accumulated_chunks(data.client_id, data.table_type, data.aggregator_id)
+        self.working_state.increment_accumulated_chunks(data.client_id, data.table_type, data.aggregator_id)
 
-        self.processed_ids.add(data.message_id)
+        self.working_state.mark_processed(data.message_id)
         self._save_state(data.message_id)
 
         if self._can_send_end_message(data.client_id, data.table_type):
@@ -340,44 +392,71 @@ class Aggregator:
             logging.error(f"action: error_decoding_stats_message | error:{e}")
             return
 
-        logging.info(
-            f"action: stats_received | type:{self.aggregator_type} | agg_id:{stats.aggregator_id} "
-            f"| cli_id:{stats.client_id} | file_type:{stats.table_type} "
-            f"| chunks_received:{stats.chunks_received} | chunks_processed:{stats.chunks_processed}"
-        )
-
-        if stats.message_id in self.processed_ids:
-            logging.info(f"action: duplicate_stats_message_ignored | message_id:{stats.message_id}")
+        if stats.aggregator_id == self.aggregator_id:
             return
 
-        self._set_aggregator_value(
-            self.chunks_received_per_client,
+        if self.working_state.is_processed(stats.message_id):
+            logging.debug(f"action: duplicate_stats_message_ignored | message_id:{stats.message_id}")
+            return
+
+        self.working_state.update_chunks_received(
             stats.client_id,
             stats.table_type,
             stats.aggregator_id,
             stats.chunks_received,
         )
-        self._set_aggregator_value(
-            self.chunks_processed_per_client,
+        self.working_state.update_chunks_processed(
             stats.client_id,
             stats.table_type,
             stats.aggregator_id,
             stats.chunks_processed,
         )
-        self._ensure_dict_entry(self.end_message_received, stats.client_id, stats.table_type, default=False)
-        self._ensure_dict_entry(self.chunks_to_receive, stats.client_id, stats.table_type)
 
-        self.end_message_received[stats.client_id][stats.table_type] = True
-        self.chunks_to_receive[stats.client_id][stats.table_type] = stats.total_expected
-
-        self.processed_ids.add(stats.message_id)
+        self.working_state.mark_processed(stats.message_id)
         self._save_state(stats.message_id)
 
-        # Enviar mis propios stats si ya procesé algo
-        self._maybe_send_stats(stats.client_id, stats.table_type)
+        # Si aún no conocemos el total global esperado, tomarlo de los stats recibidos
+        if self.working_state.get_global_total_expected(stats.client_id, stats.table_type) is None:
+            self.working_state.set_global_total_expected(stats.client_id, stats.table_type, stats.total_expected)
+            logging.info(f"action: learned_global_total | client_id:{stats.client_id} | total:{stats.total_expected}")
 
         if self._can_send_end_message(stats.client_id, stats.table_type):
+            logging.info(f"action: termination_condition_met_after_stats | client_id:{stats.client_id}")
             self._send_end_message(stats.client_id, stats.table_type)
+
+    def _process_coord_message(self, raw_msg: bytes):
+        try:
+                data = json.loads(raw_msg)
+                if data.get("type") != MSG_BARRIER_FORWARD:
+                    return
+                stage = data.get("stage")
+                if stage != self.stage:
+                    return
+                shard = data.get("shard", DEFAULT_SHARD)
+                # Ignore barrier forwards for other shards
+                if str(shard) != str(self.shard_id or DEFAULT_SHARD):
+                    return
+                client_id = data.get("client_id")
+                key = (client_id, stage, shard)
+                if key in self.barrier_forwarded:
+                    return
+                total_chunks = data.get("total_chunks", 0)
+                # Map stage to table_type
+                if self.aggregator_type == "PRODUCTS":
+                    table_type = TableType.TRANSACTION_ITEMS
+                elif self.aggregator_type in ["PURCHASES", "TPV"]:
+                    table_type = TableType.TRANSACTIONS
+                else:
+                    return
+                self.working_state.set_global_total_expected(client_id, table_type, total_chunks)
+                self.working_state.set_chunks_to_receive(client_id, table_type, total_chunks)
+                self.working_state.mark_end_message_received(client_id, table_type)
+                self._maybe_send_stats(client_id, table_type, force=True)
+                self._send_end_message(client_id, table_type)
+                self.barrier_forwarded.add(key)
+                logging.info(f"action: barrier_forward_consumed | type:{self.aggregator_type} | cli_id:{client_id} | shard:{shard} | total_chunks:{total_chunks}")
+        except Exception as e:
+            logging.error(f"action: barrier_forward_error | type:{self.aggregator_type} | error:{e}")
 
     def _handle_end_message(self, raw_msg: bytes):
         try:
@@ -395,25 +474,34 @@ class Aggregator:
             f"| file_type:{table_type} | total_chunks_expected:{total_expected}"
         )
 
-        self._ensure_dict_entry(self.end_message_received, client_id, table_type, default=False)
-        self._ensure_dict_entry(self.chunks_to_receive, client_id, table_type)
-        self.end_message_received[client_id][table_type] = True
-        self.chunks_to_receive[client_id][table_type] = total_expected
+        self.working_state.mark_end_message_received(client_id, table_type)
+        self.working_state.set_global_total_expected(client_id, table_type, total_expected)
+        
+        # Broadcast this global total to peers so they also know when to terminate
+        # We can use a new message type or reuse AggregatorStatsMessage with a special flag/value?
+        # Better to add a field to AggregatorStatsMessage or use a dedicated message.
+        # For now, let's assume AggregatorStatsMessage has 'total_expected'. 
+        # When we receive END, we update our 'total_expected' and broadcast it in our next stats update.
+        # The _maybe_send_stats uses get_chunks_to_receive which we just updated.
+        
+        self.working_state.set_chunks_to_receive(client_id, table_type, total_expected)
+        self.working_state.set_global_total_expected(client_id, table_type, total_expected)
 
         self._save_state(uuid.uuid4())
 
-        self._maybe_send_stats(client_id, table_type)
+        self._maybe_send_stats(client_id, table_type, force=True)
 
         if self._can_send_end_message(client_id, table_type):
             self._send_end_message(client_id, table_type)
 
     def _handle_data_chunk(self, raw_msg: bytes):
+        logging.info(f"DEBUG: _handle_data_chunk called | len:{len(raw_msg)}")
         self._check_crash_point("CRASH_BEFORE_PROCESS")
         chunk = ProcessBatchReader.from_bytes(raw_msg)
         client_id = chunk.client_id()
         table_type = chunk.table_type()
 
-        if chunk.message_id() in self.processed_ids:
+        if self.working_state.is_processed(chunk.message_id()):
             logging.info(f"action: duplicate_chunk_ignored | message_id:{chunk.message_id()}")
             return
 
@@ -424,8 +512,7 @@ class Aggregator:
             f"| file_type:{table_type} | rows_in:{len(chunk.rows)}"
         )
 
-        self._increment_aggregator_value(
-            self.chunks_received_per_client,
+        self.working_state.increment_chunks_received(
             client_id,
             table_type,
             self.aggregator_id,
@@ -454,37 +541,41 @@ class Aggregator:
                 payload = self._build_tpv_payload(aggregated_chunk)
                 has_output = True
 
-        if has_output:
-            self._increment_aggregator_value(
-                self.chunks_processed_per_client,
-                client_id,
-                table_type,
-                self.aggregator_id,
-                1,
+        if not has_output:
+            logging.info(
+                f"action: aggregate_no_output | type:{self.aggregator_type} | cli_id:{client_id} "
+                f"| file_type:{table_type} | rows_in:{len(chunk.rows)}"
             )
-            self._increment_accumulated_chunks(client_id, table_type, self.aggregator_id)
 
-            self._check_crash_point("CRASH_AFTER_PROCESS_BEFORE_COMMIT")
+        self.working_state.increment_chunks_processed(
+            client_id,
+            table_type,
+            self.aggregator_id,
+            1,
+        )
+        self.working_state.increment_accumulated_chunks(client_id, table_type, self.aggregator_id)
 
-            if payload:
-                try:
-                    data_msg = AggregatorDataMessage(
-                        self.aggregator_type,
-                        self.aggregator_id,
-                        client_id,
-                        table_type,
-                        payload,
-                    )
-                    logging.debug(
-                        f"action: aggregator_data_sent | type:{self.aggregator_type} | agg_id:{self.aggregator_id} "
-                        f"| client_id:{client_id} | table_type:{table_type} | payload_size:{len(payload)}"
-                    )
-                    self.middleware_data_exchange.send(data_msg.encode())
-                    self.persistence.commit_send_ack(client_id, chunk.message_id())
-                except Exception as e:
-                    logging.error(f"action: error_sending_data_message | error:{e}")
+        self._check_crash_point("CRASH_AFTER_PROCESS_BEFORE_COMMIT")
 
-        self.processed_ids.add(chunk.message_id())
+        if payload:
+            try:
+                data_msg = AggregatorDataMessage(
+                    self.aggregator_type,
+                    self.aggregator_id,
+                    client_id,
+                    table_type,
+                    payload,
+                )
+                logging.debug(
+                    f"action: aggregator_data_sent | type:{self.aggregator_type} | agg_id:{self.aggregator_id} "
+                    f"| client_id:{client_id} | table_type:{table_type} | payload_size:{len(payload)}"
+                )
+                self.middleware_data_exchange.send(data_msg.encode())
+                self.persistence.commit_send_ack(client_id, chunk.message_id())
+            except Exception as e:
+                logging.error(f"action: error_sending_data_message | error:{e}")
+
+        self.working_state.mark_processed(chunk.message_id())
         self._save_state(chunk.message_id())
 
         self._maybe_send_stats(client_id, table_type)
@@ -496,85 +587,25 @@ class Aggregator:
         state_data = self.persistence.recover_working_state()
         if state_data:
             try:
-                state = pickle.loads(state_data)
-                self.end_message_received = state.get("end_message_received", {})
-                self.chunks_received_per_client = state.get("chunks_received_per_client", {})
-                self.chunks_processed_per_client = state.get("chunks_processed_per_client", {})
-                self.accumulated_chunks_per_client = state.get("accumulated_chunks_per_client", {})
-                self.chunks_to_receive = state.get("chunks_to_receive", {})
-                self.already_sent_stats = state.get("already_sent_stats", {})
-                self.global_accumulator = state.get("global_accumulator", {})
-                self.processed_ids = state.get("processed_ids", set())
+                self.working_state = AggregatorWorkingState.from_bytes(state_data)
                 logging.info(f"State recovered for aggregator {self.aggregator_type}_{self.aggregator_id}")
             except Exception as e:
                 logging.error(f"Error recovering state: {e}")
 
     def _save_state(self, last_processed_id):
-        state = {
-            "end_message_received": self.end_message_received,
-            "chunks_received_per_client": self.chunks_received_per_client,
-            "chunks_processed_per_client": self.chunks_processed_per_client,
-            "accumulated_chunks_per_client": self.accumulated_chunks_per_client,
-            "chunks_to_receive": self.chunks_to_receive,
-            "already_sent_stats": self.already_sent_stats,
-            "global_accumulator": self.global_accumulator,
-            "processed_ids": self.processed_ids,
-        }
-        state_data = pickle.dumps(state)
-        self.persistence.commit_working_state(state_data, last_processed_id)
+        self.persistence.commit_working_state(self.working_state.to_bytes(), last_processed_id)
 
 
-    def _ensure_dict_entry(self, dictionary, client_id, table_type, default=0):
-        if client_id not in dictionary:
-            dictionary[client_id] = {}
-        if table_type not in dictionary[client_id]:
-            dictionary[client_id][table_type] = default
+    # Helper methods removed as they are now in WorkingState
 
-    def _ensure_client_table_entry(self, dictionary, client_id, table_type):
-        if client_id not in dictionary:
-            dictionary[client_id] = {}
-        if table_type not in dictionary[client_id]:
-            dictionary[client_id][table_type] = {}
-
-    def _get_aggregator_value(self, dictionary, client_id, table_type, aggregator_id):
-        return dictionary.get(client_id, {}).get(table_type, {}).get(aggregator_id, 0)
-
-    def _set_aggregator_value(self, dictionary, client_id, table_type, aggregator_id, value):
-        self._ensure_client_table_entry(dictionary, client_id, table_type)
-        dictionary[client_id][table_type][aggregator_id] = value
-
-    def _increment_aggregator_value(self, dictionary, client_id, table_type, aggregator_id, delta):
-        current = self._get_aggregator_value(dictionary, client_id, table_type, aggregator_id)
-        self._set_aggregator_value(dictionary, client_id, table_type, aggregator_id, current + delta)
-
-    def _sum_counts(self, dictionary, client_id, table_type):
-        return sum(dictionary.get(client_id, {}).get(table_type, {}).values())
-
-    def _increment_accumulated_chunks(self, client_id, table_type, aggregator_id):
-        self._increment_aggregator_value(
-            self.accumulated_chunks_per_client,
-            client_id,
-            table_type,
-            aggregator_id,
-            1,
-        )
-
-    def _maybe_send_stats(self, client_id, table_type):
-        if client_id not in self.chunks_to_receive or table_type not in self.chunks_to_receive[client_id]:
+    def _maybe_send_stats(self, client_id, table_type, force=False):
+        total_expected = self.working_state.get_chunks_to_receive(client_id, table_type)
+        if total_expected is None:
             return
 
-        total_expected = self.chunks_to_receive[client_id][table_type]
-        received = self._get_aggregator_value(
-            self.chunks_received_per_client, client_id, table_type, self.aggregator_id
-        )
-        processed = self._get_aggregator_value(
-            self.chunks_processed_per_client, client_id, table_type, self.aggregator_id
-        )
-
-        last_sent = self.already_sent_stats.get((client_id, table_type))
-        if last_sent == (received, processed):
-            return
-
+        received = self.working_state.get_received_for_aggregator(client_id, table_type, self.aggregator_id)
+        processed = self.working_state.get_processed_for_aggregator(client_id, table_type, self.aggregator_id)
+    
         stats_msg = AggregatorStatsMessage(
             self.aggregator_id,
             client_id,
@@ -583,54 +614,90 @@ class Aggregator:
             received,
             processed,
         )
-        logging.debug(
-            f"action: aggregator_stats_sent | type:{self.aggregator_type} | agg_id:{self.aggregator_id} "
-            f"| client_id:{client_id} | table_type:{table_type} | received:{received} | processed:{processed} | expected:{total_expected}"
-        )
-        self.middleware_stats_exchange.send(stats_msg.encode())
-        self.already_sent_stats[(client_id, table_type)] = (received, processed)
+        # Evitar spam: solo loggear en DEBUG cuando hay cambios o force
+        if force or not self.working_state.was_stats_sent(client_id, table_type, (received, processed, total_expected)):
+            logging.debug(
+                f"action: aggregator_stats_sent | type:{self.aggregator_type} | agg_id:{self.aggregator_id} "
+                f"| client_id:{client_id} | table_type:{table_type} | received:{received} | processed:{processed} | expected:{total_expected}"
+            )
+            self.middleware_stats_exchange.send(stats_msg.encode())
+            self.working_state.mark_stats_sent(client_id, table_type, (received, processed, total_expected))
+            self.working_state.set_last_stats_sent_time(client_id, table_type, time.time())
+            
+            # Publish coordination stats (throttled by was_stats_sent logic implicitly via this block)
+            try:
+                payload = {
+                    "type": MSG_WORKER_STATS,
+                    "id": str(self.aggregator_id),
+                    "client_id": client_id,
+                    "stage": self.stage,
+                    "shard": self.shard_id or DEFAULT_SHARD,
+                    "expected": total_expected,
+                    "chunks": received,
+                    "processed": processed,
+                    "sender": str(self.aggregator_id),
+                }
+                rk = f"coordination.barrier.{self.stage}.{self.shard_id or DEFAULT_SHARD}"
+                self.middleware_coordination.send(json.dumps(payload).encode("utf-8"), routing_key=rk)
+                logging.debug(f"action: coordination_stats_sent | stage:{self.stage} | cli_id:{client_id} | received:{received} | processed:{processed}")
+            except Exception as e:
+                logging.error(f"action: coordination_stats_send_error | stage:{self.stage} | cli_id:{client_id} | error:{e}")
 
-    def _leader_id(self, client_id, table_type):
-        aggregators = self.chunks_received_per_client.get(client_id, {}).get(table_type, {}).keys()
-        return min(aggregators) if aggregators else self.aggregator_id
+    def _send_periodic_stats(self):
+        active = self.working_state.get_active_clients_and_tables()
+        for client_id, table_type in active:
+            last_sent = self.working_state.get_last_stats_sent_time(client_id, table_type)
+            if time.time() - last_sent > 5:
+                 self._maybe_send_stats(client_id, table_type, force=True)
+
+
 
     def _can_send_end_message(self, client_id, table_type):
-        if client_id not in self.chunks_to_receive or table_type not in self.chunks_to_receive[client_id]:
+        # Symmetric Termination Logic
+        
+        # 1. Check if we have received the global total expected (from upstream)
+        global_total = self.working_state.get_global_total_expected(client_id, table_type)
+        if global_total is None:
             return False
 
-        total_expected = self.chunks_to_receive[client_id][table_type]
-        total_received = self._sum_counts(self.chunks_received_per_client, client_id, table_type)
-        if total_received < total_expected:
-            logging.debug(
-                f"action: can_send_end_waiting_more_chunks | type:{self.aggregator_type} | client_id:{client_id} "
-                f"| table_type:{table_type} | expected:{total_expected} | received:{total_received}"
-            )
-            return False
+        # 2. Check if we have processed everything we received locally
+        received = self.working_state.get_received_for_aggregator(client_id, table_type, self.aggregator_id)
+        processed = self.working_state.get_processed_for_aggregator(client_id, table_type, self.aggregator_id)
+        
+        if processed < received:
+             logging.debug(f"action: waiting_local_processing | type:{self.aggregator_type} | client_id:{client_id} | processed:{processed} | received:{received}")
+             return False
 
-        total_processed = self._sum_counts(self.chunks_processed_per_client, client_id, table_type)
-        total_accumulated = self._sum_counts(self.accumulated_chunks_per_client, client_id, table_type)
-        if total_processed != total_accumulated:
-            logging.debug(
-                f"action: can_send_end_waiting_accumulation | type:{self.aggregator_type} | client_id:{client_id} "
-                f"| table_type:{table_type} | processed:{total_processed} | accumulated:{total_accumulated}"
-            )
-            return False
+        # 3. Check if all peers have processed their part
+        # Sum of processed chunks from all aggregators (including self)
+        total_processed_global = self.working_state.get_total_processed_global(client_id, table_type)
+        
+        if total_processed_global < global_total:
+             logging.debug(f"action: waiting_global_processing | type:{self.aggregator_type} | client_id:{client_id} | global_processed:{total_processed_global} | global_expected:{global_total}")
+             return False
+             
+        # 4. Check accumulation consistency (processed vs accumulated)
+        total_accumulated = self.working_state.get_total_accumulated(client_id, table_type)
+        # Note: total_accumulated tracks what THIS aggregator has accumulated. 
+        # But get_total_processed_global tracks what ALL aggregators have processed.
+        # We should check if OUR processed matches OUR accumulated.
+        
+        # Actually, get_total_accumulated in working_state sums up accumulation counts from all aggregators if they send it?
+        # Let's check working_state.increment_accumulated_chunks. It seems it tracks per aggregator.
+        # So get_total_accumulated returns sum of accumulated chunks for all aggregators.
+        
+        if total_processed_global != total_accumulated:
+             logging.debug(f"action: waiting_accumulation_consistency | type:{self.aggregator_type} | client_id:{client_id} | global_processed:{total_processed_global} | global_accumulated:{total_accumulated}")
+             return False
 
-        leader_id = self._leader_id(client_id, table_type)
-        if self.aggregator_id != leader_id:
-            logging.debug(
-                f"action: can_send_end_not_leader | type:{self.aggregator_type} | client_id:{client_id} "
-                f"| table_type:{table_type} | leader:{leader_id} | self:{self.aggregator_id}"
-            )
-            return False
-
+        logging.info(f"action: symmetric_termination_condition_met | type:{self.aggregator_type} | client_id:{client_id} | global_total:{global_total}")
         return True
 
     def _send_end_message(self, client_id, table_type):
-        total_processed = self._sum_counts(self.chunks_processed_per_client, client_id, table_type)
+        total_processed = self.working_state.get_total_processed(client_id, table_type)
         logging.info(
             f"action: sending_end_message | type:{self.aggregator_type} | cli_id:{client_id} "
-            f"| file_type:{table_type.name} | total_chunks:{total_processed} | expected_chunks:{self.chunks_to_receive[client_id][table_type]}"
+            f"| file_type:{table_type.name} | total_chunks:{total_processed} | expected_chunks:{self.working_state.get_chunks_to_receive(client_id, table_type)}"
         )
 
         logging.debug(
@@ -638,13 +705,65 @@ class Aggregator:
         )
         self.publish_final_results(client_id, table_type)
 
+        # Send END message with OUR ID
         try:
-            end_msg = MessageEnd(client_id, table_type, total_processed)
+            # We send the count of chunks WE processed/generated. 
+            # Actually, for the next stage (Maximizer/Joiner), they need to know how many items to expect.
+            # If we are sending results (e.g. Products), we send chunks of results.
+            # The count in MessageEnd should be the number of RESULT chunks we sent?
+            # Or the number of input chunks we processed?
+            
+            # The protocol usually expects "total_items" or "total_chunks".
+            # If downstream waits for "total_expected", and we send "total_processed", it might be confusing if they sum it up.
+            # But wait, the Maximizer will sum up "count" from all aggregators.
+            # So we should send the number of items/chunks WE produced for the next stage.
+            
+            # However, `publish_final_results` sends data but doesn't return the count easily here.
+            # But wait, `publish_final_results` sends ONE chunk per queue usually, or multiple.
+            # Let's look at `publish_final_products`: it iterates and sends chunks.
+            
+            # For simplicity in this refactor, let's assume we send 1 END message per aggregator.
+            # The count in MessageEnd is used by the receiver.
+            # If the receiver sums them up, it gets a total.
+            # What does the receiver use this total for?
+            # Maximizer uses it to know if it received all data? No, it uses it to know "total_expected".
+            
+            # If we change the logic so Maximizer waits for N end messages, the "count" field becomes "payload size" or "items produced".
+            # Let's send 0 for now if it's not strictly used for verification, OR send the number of result chunks we sent.
+            # Given we don't track result chunks sent count easily here without modifying publish_final_results, 
+            # and the previous logic sent "total_processed" (input chunks), let's stick to sending "total_processed" 
+            # BUT downstream must know this is "input chunks processed by this aggregator" if they want to verify.
+            
+            # Actually, the previous logic sent `total_processed` which was the GLOBAL total processed (since it was leader).
+            # Now each aggregator sends its OWN processed count.
+            # So Sum(OwnProcessed) = GlobalTotalProcessed = GlobalTotalExpected.
+            # This maintains consistency!
+            
+            my_processed = self.working_state.get_processed_for_aggregator(client_id, table_type, self.aggregator_id)
+            end_msg = MessageEnd(client_id, table_type, my_processed, str(self.aggregator_id))
+            
             for queue in self.middleware_queue_sender.values():
                 queue.send(end_msg.encode())
             logging.info(
-                f"action: sent_end_to_next_stage | type:{self.aggregator_type} | cli_id:{client_id}"
+                f"action: sent_end_to_next_stage | type:{self.aggregator_type} | cli_id:{client_id} | my_processed:{my_processed}"
             )
+            # Publish coordination END
+            try:
+                payload = {
+                    "type": MSG_WORKER_END,
+                    "id": str(self.aggregator_id),
+                    "client_id": client_id,
+                    "stage": self.stage,
+                    "shard": self.shard_id or DEFAULT_SHARD,
+                    "expected": self.working_state.get_chunks_to_receive(client_id, table_type),
+                    "chunks": my_processed,
+                    "sender": str(self.aggregator_id),
+                }
+                rk = f"coordination.barrier.{self.stage}.{self.shard_id or DEFAULT_SHARD}"
+                self.middleware_coordination.send(json.dumps(payload).encode("utf-8"), routing_key=rk)
+                logging.debug(f"action: coordination_end_sent | stage:{self.stage} | cli_id:{client_id} | chunks:{my_processed}")
+            except Exception as e:
+                logging.error(f"action: coordination_end_send_error | stage:{self.stage} | cli_id:{client_id} | error:{e}")
         except Exception as e:
             logging.error(f"action: error_sending_end_message | error:{e}")
 
@@ -655,38 +774,13 @@ class Aggregator:
     def delete_client_data(self, stats_end: AggregatorStatsEndMessage):
         client_id = stats_end.client_id
         table_type = stats_end.table_type
-
-        for dictionary in [
-            self.end_message_received,
-            self.chunks_received_per_client,
-            self.chunks_processed_per_client,
-            self.accumulated_chunks_per_client,
-            self.chunks_to_receive,
-        ]:
-            if client_id in dictionary and table_type in dictionary[client_id]:
-                del dictionary[client_id][table_type]
-                if not dictionary[client_id]:
-                    del dictionary[client_id]
-
-        if (client_id, table_type) in self.already_sent_stats:
-            del self.already_sent_stats[(client_id, table_type)]
-
         accumulator_key = self._accumulator_key()
-        if (
-            client_id in self.global_accumulator
-            and accumulator_key in self.global_accumulator[client_id]
-        ):
-            del self.global_accumulator[client_id][accumulator_key]
-            if not self.global_accumulator[client_id]:
-                del self.global_accumulator[client_id]
+        
+        self.working_state.delete_client_data(client_id, table_type, accumulator_key)
 
         logging.info(
             f"action: cleanup_state | client_id:{client_id} | table_type:{table_type} | aggregator_id:{self.aggregator_id}"
         )
-
-    def _ensure_global_entry(self, client_id):
-        if client_id not in self.global_accumulator:
-            self.global_accumulator[client_id] = {}
 
     def _check_crash_point(self, point_name):
         if os.environ.get("CRASH_POINT") == point_name:
@@ -703,11 +797,7 @@ class Aggregator:
         return "unknown"
 
     def accumulate_products(self, client_id, rows):
-        self._ensure_global_entry(client_id)
-        data = self.global_accumulator[client_id].setdefault(
-            "products",
-            defaultdict(default_product_value),
-        )
+        data = self.working_state.get_product_accumulator(client_id)
 
         for row in rows:
             created_at = getattr(row, "created_at", None)
@@ -723,10 +813,7 @@ class Aggregator:
             data[key]["subtotal"] += float(row.subtotal)
 
     def accumulate_purchases(self, client_id, aggregated_chunk: ProcessChunk):
-        self._ensure_global_entry(client_id)
-        data = self.global_accumulator[client_id].setdefault(
-            "purchases", defaultdict(default_purchase_value)
-        )
+        data = self.working_state.get_purchase_accumulator(client_id)
 
         for row in aggregated_chunk.rows:
             store_id = int(row.store_id)
@@ -735,8 +822,7 @@ class Aggregator:
             data[store_id][user_id] += count
 
     def accumulate_tpv(self, client_id, aggregated_chunk: ProcessChunk):
-        self._ensure_global_entry(client_id)
-        data = self.global_accumulator[client_id].setdefault("tpv", defaultdict(float))
+        data = self.working_state.get_tpv_accumulator(client_id)
 
         for row in aggregated_chunk.rows:
             if isinstance(row, TPVProcessRow):
@@ -821,7 +907,7 @@ class Aggregator:
                 self.accumulate_tpv(client_id, SimpleNamespace(rows=rows))
 
     def publish_final_results(self, client_id, table_type):
-        if client_id not in self.global_accumulator:
+        if client_id not in self.working_state.global_accumulator:
             logging.warning(
                 f"action: publish_final_results | client_id:{client_id} | warning: no_accumulated_data"
             )
@@ -843,27 +929,19 @@ class Aggregator:
             )
 
     def _publish_final_products(self, client_id):
-        data = self.global_accumulator[client_id].get("products")
+        data = self.working_state.global_accumulator[client_id].get("products")
         if not data:
             return
 
         from utils.processing.process_chunk import ProcessChunkHeader
 
         header = ProcessChunkHeader(client_id=client_id, table_type=TableType.TRANSACTION_ITEMS)
-        rows_by_queue = defaultdict(list)
-
+        rows = []
         for (item_id, year, month), totals in data.items():
-            shard = self.id_to_shard.get(item_id)
-            if shard is None:
-                logging.warning(
-                    f"action: publish_final_products_missing_shard | client_id:{client_id} | item_id:{item_id}"
-                )
-                continue
-
             created_at = DateTime(datetime.date(year, month, 1), datetime.time(0, 0))
-            rows_by_queue[shard.queue_name].append(
+            rows.append(
                 TransactionItemsProcessRow(
-                    "",
+                    f"agg_shard_{self.shard_id or 'global'}",
                     item_id,
                     totals["quantity"],
                     totals["subtotal"],
@@ -871,15 +949,17 @@ class Aggregator:
                 )
             )
 
-        for queue_name, rows in rows_by_queue.items():
-            chunk = ProcessChunk(header, rows).serialize()
-            self.middleware_queue_sender[queue_name].send(chunk)
-            logging.info(
-                f"action: publish_final_products | client_id:{client_id} | queue:{queue_name} | rows:{len(rows)}"
-            )
+        if not rows:
+            return
+
+        chunk = ProcessChunk(header, rows).serialize()
+        self.middleware_queue_sender["to_absolute_max"].send(chunk)
+        logging.info(
+            f"action: publish_final_products | client_id:{client_id} | queue:to_absolute_max | rows:{len(rows)}"
+        )
 
     def _publish_final_purchases(self, client_id):
-        data = self.global_accumulator[client_id].get("purchases")
+        data = self.working_state.global_accumulator[client_id].get("purchases")
         if not data:
             return
 
@@ -887,43 +967,34 @@ class Aggregator:
 
         placeholder_date = datetime.date(2024, 1, 1)
 
-        rows_by_queue = defaultdict(list)
-
+        rows = []
         for store_id, users in data.items():
-            shard = self.id_to_shard.get(store_id)
-            if shard is None:
-                logging.warning(
-                    f"action: publish_final_purchases_missing_shard | client_id:{client_id} | store_id:{store_id}"
-                )
-                continue
             for user_id, count in users.items():
-                rows_by_queue[shard.queue_name].append(
+                rows.append(
                     PurchasesPerUserStoreRow(
                         store_id=store_id,
-                        store_name="",
+                        store_name=f"agg_shard_{self.shard_id or 'global'}",
                         user_id=user_id,
                         user_birthdate=placeholder_date,
                         purchases_made=count,
                     )
                 )
 
-        for queue_name, rows in rows_by_queue.items():
-            header = ProcessChunkHeader(
-                client_id=client_id, table_type=TableType.PURCHASES_PER_USER_STORE
-            )
-            chunk = ProcessChunk(header, rows)
-            chunk_data = chunk.serialize()
-            logging.info(
-                f"action: publish_final_purchases_chunk | client_id:{client_id} | queue:{queue_name} "
-                f"| rows:{len(rows)} | bytes:{len(chunk_data)}"
-            )
-            self.middleware_queue_sender[queue_name].send(chunk_data)
-            logging.info(
-                f"action: publish_final_purchases | client_id:{client_id} | queue:{queue_name} | rows:{len(rows)}"
-            )
+        if not rows:
+            return
+
+        header = ProcessChunkHeader(
+            client_id=client_id, table_type=TableType.PURCHASES_PER_USER_STORE
+        )
+        chunk = ProcessChunk(header, rows)
+        chunk_data = chunk.serialize()
+        self.middleware_queue_sender["to_top3_absolute"].send(chunk_data)
+        logging.info(
+            f"action: publish_final_purchases | client_id:{client_id} | queue:to_top3_absolute | rows:{len(rows)}"
+        )
 
     def _publish_final_tpv(self, client_id):
-        data = self.global_accumulator[client_id].get("tpv")
+        data = self.working_state.global_accumulator[client_id].get("tpv")
         if not data:
             return
 
@@ -936,7 +1007,7 @@ class Aggregator:
 
         header = ProcessChunkHeader(client_id=client_id, table_type=TableType.TPV)
         chunk = ProcessChunk(header, rows)
-        self.middleware_queue_sender["to_join_with_stores_tvp"].send(chunk.serialize())
+        self.middleware_queue_sender["to_absolute_tpv"].send(chunk.serialize())
         logging.info(
             f"action: publish_final_tpv | client_id:{client_id} | rows:{len(rows)}"
         )
@@ -978,11 +1049,6 @@ class Aggregator:
                 created_at=created_at,
             )
 
-            if self.id_to_shard and item_id not in self.id_to_shard:
-                logging.warning(
-                    f"action: apply_products_missing_shard | client_id:{chunk.header.client_id} | item_id:{item_id}"
-                )
-                continue
 
             rows.append(new_row)
 

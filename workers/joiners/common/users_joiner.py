@@ -22,7 +22,7 @@ class UsersJoiner(Joiner):
     def save_data_join_fields(self, row, client_id):
         # Guarda mapping user_id -> birthdate
         if hasattr(row, 'user_id') and hasattr(row, 'birthdate'):
-            self.joiner_data[client_id][row.user_id] = row.birthdate
+            self.working_state_join.add_join_data(client_id, row.user_id, row.birthdate)
             logging.debug(f"action: save_user_data | user_id:{row.user_id} | birthdate:{row.birthdate}")
 
     def save_data_join(self, chunk) -> bool:
@@ -32,18 +32,14 @@ class UsersJoiner(Joiner):
         client_id = chunk.client_id()
         rows = chunk.rows
 
-        # Inicializar diccionario para este cliente si no existe
-        if client_id not in self.joiner_data:
-            self.joiner_data[client_id] = {}
-
         # Guardar mapping user_id → birthdate
         for row in rows:
             if hasattr(row, 'user_id') and hasattr(row, 'birthdate'):
-                self.joiner_data[client_id][row.user_id] = row.birthdate
+                self.working_state_join.add_join_data(client_id, row.user_id, row.birthdate)
             else:
                 logging.warning(f"action: invalid_users_join_row | type:{self.joiner_type} | row_type:{type(row)} | missing_fields | has_user_id:{hasattr(row, 'user_id')} | has_birthdate:{hasattr(row, 'birthdate')}")
 
-        logging.info(f"action: saved_users_join_data | type:{self.joiner_type} | client_id:{client_id} | users_loaded:{len(self.joiner_data[client_id])}")
+        logging.info(f"action: saved_users_join_data | type:{self.joiner_type} | client_id:{client_id} | users_loaded:{self.working_state_join.get_join_data_count(client_id)}")
         return True
 
     def send_end_query_msg(self, client_id):
@@ -61,11 +57,11 @@ class UsersJoiner(Joiner):
         # Procesar PurchasesPerUserStoreRow del StoresTop3Joiner
         if isinstance(row, PurchasesPerUserStoreRow):
             user_id = row.user_id
-            birthdate = self.joiner_data[client_id].get(user_id, None)
+            birthdate = self.working_state_join.get_join_data(client_id, user_id)
 
             if birthdate is None:
                 logging.warning(f"action: user_not_found | user_id:{user_id} | using_placeholder")
-                birthdate = "UNKNOWN"
+                birthdate = None
 
             # Crear resultado final para Query 4
             result = Query4ResultRow(
@@ -84,7 +80,7 @@ class UsersJoiner(Joiner):
 
     def publish_results(self, client_id):
         # Envía resultados finales de Query 4
-        joiner_results = self.joiner_results.get(client_id, [])
+        joiner_results = self.working_state_main.get_results(client_id)
 
         # Filtrar resultados None
         query4_results = [result for result in joiner_results if result is not None]
@@ -102,3 +98,13 @@ class UsersJoiner(Joiner):
             logging.info(f"action: sent_query4_results | type:{self.joiner_type} | client_id:{client_id} | results:{len(query4_results)}")
         else:
             logging.info(f"action: no_query4_results_to_send | type:{self.joiner_type} | client_id:{client_id}")
+
+    def run(self):
+        logging.info(f"Joiner iniciado. Tipo: {self.joiner_type}")
+        self.handle_processing_recovery()
+        self.data_handler_thread.start()
+        self.join_data_handler_thread.start()
+
+    def shutdown(self, signum=None, frame=None):
+        # Delegate to base shutdown for consistent signal handling
+        super().shutdown(signum, frame)

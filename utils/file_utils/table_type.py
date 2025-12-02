@@ -10,7 +10,7 @@ class TableType(Enum):
     USERS = 5
     PURCHASES_PER_USER_STORE = 6
     TPV = 7  # Para datos agregados de TPV por store y semestre
-    
+
     def from_path(path: str):
         """
         Clase para determinar el tipo de tabla basado en el nombre del último archivo en el path.
@@ -32,6 +32,16 @@ class TableType(Enum):
             return TableType.USERS
 
         raise ValueError(f"No se pudo determinar el tipo de tabla para el path: {path}")
+
+    def to_json(self):
+        """Return primitive JSON-safe value (int or str)."""
+        return self.value  # or self.name
+
+    @staticmethod
+    def from_json(value):
+        """Reconstruct enum from primitive."""
+        return TableType(value)  # or TableType[value]
+
 # =========================================
 
 class ResultTableType(Enum):

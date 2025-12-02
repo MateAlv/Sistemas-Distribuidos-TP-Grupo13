@@ -47,16 +47,64 @@ build:
 
 up:
 	make clean-results
+	-docker compose -f ${DOCKER} down -v --remove-orphans
+	-docker run --rm -v $(PWD)/data/persistence:/persistence alpine sh -c 'rm -rf /persistence/*'
 	python3  $(COMPOSE_SCRIPT) --config=${CONFIG}
 	docker compose -f ${DOCKER} up -d --build
 .PHONY: docker-compose-up
 
+
 test:
 	# Run the docker-compose setup
 	make clean-results
+	-docker compose -f ${DOCKER} down -v --remove-orphans
+	-docker run --rm -v $(PWD)/data/persistence:/persistence alpine sh -c 'rm -rf /persistence/*'
 	python3  $(COMPOSE_SCRIPT) --config=config/config-test.ini
-	docker compose -f ${DOCKER} up --build
+	@echo "Running tests... Logs redirected to logs.txt"
+	@bash -c ' \
+		docker compose -f ${DOCKER} up --build > logs.txt 2>&1 & \
+		PID=$$!; \
+		while kill -0 $$PID 2>/dev/null; do \
+			LINES=$$(wc -l < logs.txt 2>/dev/null || echo 0); \
+			if [ $$LINES -gt 100000 ]; then \
+				echo "Log limit exceeded ($$LINES lines). Stopping test..."; \
+				kill $$PID; \
+				docker compose -f ${DOCKER} stop; \
+				exit 1; \
+			fi; \
+			sleep 2; \
+		done; \
+		wait $$PID; \
+		EXIT_CODE=$$?; \
+		if [ $$EXIT_CODE -eq 0 ]; then \
+			echo "Test passed"; \
+		else \
+			echo "Test failed. Check logs.txt"; \
+			exit $$EXIT_CODE; \
+		fi \
+	'
 .PHONY: test
+
+test-compilation:
+	python3 -m py_compile server/main.py \
+		workers/filter/main.py \
+		workers/aggregators/main.py \
+		workers/maximizers/main.py \
+		workers/joiners/main.py \
+		monitor/main.py \
+		client/main.py
+.PHONY: test-compilation
+
+test-small:
+	# Clean up previous run
+	-docker compose -f ${DOCKER} down -v --remove-orphans
+	-docker run --rm -v $(PWD)/data/persistence:/persistence -v $(PWD)/.results:/results alpine sh -c 'rm -rf /persistence/* /results/*'
+	# Generate small dataset
+	python3 scripts/create_small_dataset.py
+	# Run the docker-compose setup
+	python3 $(COMPOSE_SCRIPT) --config=config/config-small.ini
+	docker compose -f ${DOCKER} up --build
+.PHONY: test-small
 
 down:
 	docker compose -f ${DOCKER} stop -t 1
@@ -69,15 +117,16 @@ rebuild:
 	docker compose -f ${DOCKER} build --no-cache
 	docker compose -f ${DOCKER} up -d
 
+	docker compose -f ${DOCKER} up -d
+.PHONY: rebuild
+
 logs:
 	> logs.txt
 	docker compose -f ${DOCKER} logs -f > logs.txt 
 .PHONY: docker-compose-logs
 
 clean-results:
-	rm -rf .results/client-1/*
-	rm -rf .results/client-2/*
-	rm -rf .results/client-3/*
+	find .results -name "*.csv" -type f -delete
 .PHONY: clean-results
 
 hard-down:

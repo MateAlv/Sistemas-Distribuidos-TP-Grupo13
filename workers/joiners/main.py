@@ -64,18 +64,20 @@ def main():
     monitor = HeartbeatSender()
     monitor.start()
 
+    expected_inputs = int(os.getenv("EXPECTED_INPUTS", 1))
+
     if joiner_type == ITEMS_JOINER:
         logging.info("Iniciando Joiner de Items...")
-        joiner = MenuItemsJoiner(joiner_type, monitor)
+        joiner = MenuItemsJoiner(joiner_type, expected_inputs, monitor)
     elif joiner_type == STORES_TPV_JOINER:
         logging.info("Iniciando Joiner de Stores TPV...")
-        joiner = StoresTpvJoiner(joiner_type, monitor)
+        joiner = StoresTpvJoiner(joiner_type, expected_inputs, monitor)
     elif joiner_type == STORES_TOP3_JOINER:
         logging.info("Iniciando Joiner de Stores Top3...")
-        joiner = StoresTop3Joiner(joiner_type, monitor)
+        joiner = StoresTop3Joiner(joiner_type, expected_inputs, monitor)
     elif joiner_type == USERS_JOINER:
         logging.info("Iniciando Joiner de Users...")
-        joiner = UsersJoiner(joiner_type, monitor)
+        joiner = UsersJoiner(joiner_type, expected_inputs, monitor)
 
     signal.signal(signal.SIGTERM, joiner.shutdown)
         

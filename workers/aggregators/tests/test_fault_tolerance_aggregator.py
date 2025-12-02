@@ -79,8 +79,9 @@ class TestFaultToleranceAggregator(unittest.TestCase):
         """
         agg = Aggregator("PRODUCTS", 1)
         agg.persistence = self.MockPersistence.return_value
-        agg.processed_ids = set()
-
+        agg.working_state = MagicMock()
+        agg.working_state.is_processed.return_value = False
+        
         with patch.dict(os.environ, {"CRASH_POINT": "CRASH_AFTER_PROCESS_BEFORE_COMMIT"}):
             with self.assertRaises(SystemExit):
                  dummy_msg = b"dummy_chunk"
@@ -96,7 +97,8 @@ class TestFaultToleranceAggregator(unittest.TestCase):
                     
                     mock_reader.return_value = mock_chunk
                     
-                    agg._handle_data_chunk(dummy_msg)
+                    with patch('workers.aggregators.common.aggregator.pickle.dumps', return_value=b"pickled_state"):
+                        agg._handle_data_chunk(dummy_msg)
         
         # Verify state commit was attempted (or not, depending on where exactly we crash)
         # If we crash BEFORE commit, it should not be called.
@@ -108,9 +110,10 @@ class TestFaultToleranceAggregator(unittest.TestCase):
         """
         agg = Aggregator("PRODUCTS", 1)
         agg.persistence = self.MockPersistence.return_value
+        agg.working_state = MagicMock()
         
         # Simulate that the message was already counted
-        agg.processed_ids = {b"1234"}
+        agg.working_state.is_processed.return_value = True
         
         dummy_msg = b"dummy_chunk"
         with patch('workers.aggregators.common.aggregator.ProcessBatchReader.from_bytes') as mock_reader:
@@ -121,10 +124,6 @@ class TestFaultToleranceAggregator(unittest.TestCase):
             agg._handle_data_chunk(dummy_msg)
             
         # Should NOT update state again
-        # (Assuming _handle_data_chunk checks process_has_been_counted)
-        # Since implementation isn't there, this test expects the call to be skipped
-        # We can't verify internal state update easily without real implementation, 
-        # but we can verify commit_working_state wasn't called for a new update
         agg.persistence.commit_working_state.assert_not_called()
 
 if __name__ == '__main__':

@@ -16,7 +16,9 @@ def ensure_directory_exists(directory: str):
 
 def atomic_file_upsert(file_path: str, data: bytes):
     """Writes data to a file atomically using a temporary file."""
-    temp_dir = "./"
+    temp_dir = os.path.dirname(file_path)
+    if not os.path.exists(temp_dir):
+        os.makedirs(temp_dir)
 
     # Use a temporary file in the same directory as the target file to ensure atomicity
     with tempfile.NamedTemporaryFile("wb", dir=temp_dir, delete=False) as temp_file:

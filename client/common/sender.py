@@ -83,15 +83,21 @@ class Sender:
         
         logging.debug("send_handshake_request | id=%s", client_id)
         hello = self.header_id_to_bytes(H_ID_HANDSHAKE)
-        sendall(self._sock, hello)
-        logging.debug("handshake_sent | id=%s | size=%d", client_id, len(hello))
+        try:
+            id_byte = int(client_id).to_bytes(1, byteorder='big')
+        except ValueError:
+            logging.warning(f"Client ID {client_id} is not a valid byte, sending 0")
+            id_byte = (0).to_bytes(1, byteorder='big')
+             
+        sendall(self._sock, hello + id_byte)
+        logging.debug("handshake_sent | id=%s | size=%d", client_id, len(hello) + 1)
+        
         header = self._recv_header_id(self._sock)
         logging.debug("handshake_recv | id=%s", client_id)
         
-        
         if header != H_ID_OK:
             raise RuntimeError(f"Handshake inválido, esperaba {H_ID_OK}, recibí {header!r}")
-        
+            
         logging.debug("handshake_ok | id=%s", client_id)
     
     # -------- Envío de batches --------
