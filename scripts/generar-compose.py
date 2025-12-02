@@ -147,7 +147,7 @@ def define_rabbitmq(compose: dict):
         "networks": ["testing_net"]
     }
 
-def define_server(compose: dict, client_amount: int):
+def define_server(compose: dict, client_amount: int, nodes: dict):
     compose["services"]["server"] = {
         "container_name": "server",
         "build": {
@@ -159,6 +159,10 @@ def define_server(compose: dict, client_amount: int):
             "PYTHONUNBUFFERED=1",
             f"CLI_CLIENTS={client_amount}",
             "CONTAINER_NAME=server",
+            # Shard counts for filters (used to route incoming chunks)
+            f"FILTER_YEAR_SHARDS={nodes.get('FILTER_YEAR', 1)}",
+            f"FILTER_HOUR_SHARDS={nodes.get('FILTER_HOUR', 1)}",
+            f"FILTER_AMOUNT_SHARDS={nodes.get('FILTER_AMOUNT', 1)}",
         ],
         "volumes": [
             "./server/config.ini:/config.ini:ro",
@@ -194,6 +198,8 @@ def define_filter(meta: dict, compose: dict, nodo: str, worker_id: int, nodes: d
     service_name = f"{base_service_name}-{worker_id}" if worker_id > 1 else base_service_name
     config_path = get_filter_config_path(nodo)
     filter_type = nodo.split("_")[1].lower()
+    # Sharding for filters: one replica per shard_id
+    shard_count = int(nodes.get(nodo, 1))
     
     compose["services"][service_name] = {
         "build": {
@@ -207,6 +213,8 @@ def define_filter(meta: dict, compose: dict, nodo: str, worker_id: int, nodes: d
             f"LOGGING_LEVEL={meta['logging_level']}",
             f"WORKER_ID={worker_id}",
             f"CONTAINER_NAME={service_name}",
+            f"FILTER_SHARD_ID={worker_id}",
+            f"FILTER_SHARDS={shard_count}",
             # Shard counts for downstream routing
             f"PRODUCTS_SHARDS={nodes.get('AGGREGATOR_PRODUCTS', 1)}",
             f"PURCHASES_SHARDS={nodes.get('AGGREGATOR_PURCHASES', 1)}",
@@ -631,7 +639,7 @@ def generate_compose(meta: dict, nodes: dict, services: dict = None):
                 services[base_service_name] += 1
     if client_amount == 0:
         raise ValueError("Debe haber al menos un cliente.")
-    define_server(compose, client_amount) 
+    define_server(compose, client_amount, nodes) 
     
     define_monitor(meta, compose, monitor_count, worker_services)
     services["monitor"] = monitor_count

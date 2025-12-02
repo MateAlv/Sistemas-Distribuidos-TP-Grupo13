@@ -38,6 +38,9 @@ class Filter:
         self.id = cfg["id"]
         self.cfg = cfg
         self.filter_type = cfg["filter_type"]
+        # Shard config
+        self.shard_id = os.getenv("FILTER_SHARD_ID", "1")
+        self.shard_count = int(os.getenv("FILTER_SHARDS", "1"))
         # Stage name for centralized barrier
         if self.filter_type == "year":
             self.stage = STAGE_FILTER_YEAR
@@ -60,6 +63,16 @@ class Filter:
         # Track how many chunks we actually sent to each shard so END carries correct per-shard expected count
         # Key: (stage, client_id, table_type, shard_id) -> chunks_sent
         self.shard_chunks_sent = defaultdict(int)
+        # Global dedup across replicas per filter type
+        self.global_dedup_path = f"/data/persistence/filter_{self.filter_type}_global_processed"
+        self.global_processed_ids = set()
+        try:
+            if os.path.exists(self.global_dedup_path):
+                with open(self.global_dedup_path, "r", encoding="utf-8") as fh:
+                    for line in fh:
+                        self.global_processed_ids.add(line.strip())
+        except Exception as e:
+            logging.warning(f"action: global_dedup_load_failed | type:{self.filter_type} | error:{e}")
 
         self.middleware_end_exchange = MessageMiddlewareExchange("rabbitmq", 
                                                                  f"end_exchange_filter_{self.filter_type}", 
@@ -71,7 +84,7 @@ class Filter:
             COORDINATION_EXCHANGE,
             f"filter_{self.filter_type}_{self.id}",
             "topic",
-            routing_keys=[f"coordination.barrier.{self.stage}.{DEFAULT_SHARD}"],
+            routing_keys=[f"coordination.barrier.{self.stage}.shard.{self.shard_id}"],
         )
         self.stats_timer = None
         self.consume_timer = None
@@ -79,13 +92,13 @@ class Filter:
         self.barrier_forwarded = set()
         
         if self.filter_type == "year":
-            self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", "to_filter_1")
-            self.middleware_queue_sender["to_filter_2"] = MessageMiddlewareQueue("rabbitmq", "to_filter_2")
+            self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", f"to_filter_year_shard_{self.shard_id}")
+            self.middleware_queue_sender["to_filter_hour"] = MessageMiddlewareQueue("rabbitmq", f"to_filter_hour_shard_{self.shard_id}")
         elif self.filter_type == "hour":
-            self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", "to_filter_2")
-            self.middleware_queue_sender["to_filter_3"] = MessageMiddlewareQueue("rabbitmq", "to_filter_3")
+            self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", f"to_filter_hour_shard_{self.shard_id}")
+            self.middleware_queue_sender["to_filter_amount"] = MessageMiddlewareQueue("rabbitmq", f"to_filter_amount_shard_{self.shard_id}")
         elif self.filter_type == "amount":
-            self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", "to_filter_3")
+            self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", f"to_filter_amount_shard_{self.shard_id}")
         else:
             raise ValueError(f"Tipo de filtro inválido: {self.filter_type}")
         
@@ -225,8 +238,14 @@ class Filter:
         table_type = chunk.table_type()
 
         # Idempotency check
-        if chunk.message_id() in self.working_state.processed_ids:
-            logging.info(f"action: duplicate_chunk_ignored | message_id:{chunk.message_id()}")
+        msg_id = chunk.message_id()
+        msg_id_str = str(msg_id)
+        if msg_id in self.working_state.processed_ids:
+            logging.info(f"action: duplicate_chunk_ignored | message_id:{msg_id}")
+            return
+        # Global dedup across replicas per filter type
+        if msg_id_str in self.global_processed_ids:
+            logging.info(f"action: global_duplicate_chunk_ignored | message_id:{msg_id}")
             return
 
         # Se commitea el chunk a procesar
@@ -240,8 +259,14 @@ class Filter:
             self.working_state.increase_not_sent_chunks(client_id, table_type, self.id, 1)
 
         # Se commitea el working state
-        self.working_state.processed_ids.add(chunk.message_id())
-        self.persistence_service.commit_working_state(self.working_state.to_bytes(), chunk.message_id())
+        self.working_state.processed_ids.add(msg_id)
+        try:
+            self.global_processed_ids.add(msg_id_str)
+            with open(self.global_dedup_path, "a", encoding="utf-8") as fh:
+                fh.write(f\"{msg_id_str}\\n\")
+        except Exception as e:
+            logging.warning(f\"action: global_dedup_save_failed | type:{self.filter_type} | message_id:{msg_id} | error:{e}\")
+        self.persistence_service.commit_working_state(self.working_state.to_bytes(), msg_id)
 
         if self.working_state.end_is_received(client_id, table_type):
             total_expected = self.working_state.get_total_chunks_to_receive(client_id, table_type)
@@ -313,8 +338,9 @@ class Filter:
                     "chunks": own_received,
                     "not_sent": own_not_sent,
                     "sender": str(self.id),
+                    "shard": self.shard_id,
                 }
-                rk = f"coordination.barrier.{self.stage}.{DEFAULT_SHARD}"
+                rk = f"coordination.barrier.{self.stage}.shard.{self.shard_id}"
                 self.middleware_coordination.send(json.dumps(payload).encode("utf-8"), routing_key=rk)
                 logging.debug(f"action: coordination_stats_sent | stage:{self.stage} | cli_id:{client_id} | received:{own_received} | not_sent:{own_not_sent}")
             except Exception as e:
@@ -395,8 +421,9 @@ class Filter:
                 "expected": total_expected,
                 "chunks": total_expected - total_not_sent,
                 "sender": str(self.id),
+                "shard": self.shard_id,
             }
-            rk = f"coordination.barrier.{self.stage}.{DEFAULT_SHARD}"
+            rk = f"coordination.barrier.{self.stage}.shard.{self.shard_id}"
             self.middleware_coordination.send(json.dumps(payload).encode("utf-8"), routing_key=rk)
             logging.debug(f"action: coordination_end_sent | stage:{self.stage} | cli_id:{client_id} | chunks:{total_expected-total_not_sent}")
         except Exception as e:
@@ -421,6 +448,8 @@ class Filter:
             shard = data.get("shard", DEFAULT_SHARD)
             if stage != self.stage:
                 return
+            if str(shard) != str(self.shard_id):
+                return
             key = (client_id, stage, shard)
             if key in self.barrier_forwarded:
                 return
@@ -439,8 +468,10 @@ class Filter:
                     "chunks": own_received,
                     "not_sent": own_not_sent,
                     "sender": str(self.id),
+                    "shard": shard,
                 }
-                self.middleware_coordination.send(json.dumps(payload).encode("utf-8"), routing_key="coordination.filter")
+                rk = f"coordination.barrier.{self.stage}.shard.{shard}"
+                self.middleware_coordination.send(json.dumps(payload).encode("utf-8"), routing_key=rk)
             except Exception as e:
                 logging.error(f"action: coordination_stats_send_error | stage:{self.stage} | cli_id:{client_id} | error:{e}")
             # Forward END downstream
@@ -488,8 +519,8 @@ class Filter:
             # Dispatch according to filter type and destination
             if self.filter_type == "year":
                 if table_type == TableType.TRANSACTIONS:
-                    queue = self.middleware_queue_sender["to_filter_2"]
-                    logging.debug(f"action: sending_to_queue | type:{self.filter_type} | queue:{queue.queue_name} | rows:{len(filtered_rows)/len(chunk.rows):.2%} | cli_id:{chunk.client_id()}")
+                    queue = self.middleware_queue_sender["to_filter_hour"]
+                    logging.debug(f"action: sending_to_queue | type:{self.filter_type} | queue:{queue.queue_name} | rows:{len(filtered_rows)/len(chunk.rows):.2%} | cli_id:{chunk.client_id()} | shard:{self.shard_id}")
                     queue.send(ProcessChunk(chunk.header, filtered_rows).serialize())
 
                 if table_type == TableType.TRANSACTION_ITEMS:
@@ -513,8 +544,8 @@ class Filter:
 
             elif self.filter_type == "hour":
                 # Forward to amount filter for Q1
-                queue = self.middleware_queue_sender["to_filter_3"]
-                logging.debug(f"action: sending_to_queue | type:{self.filter_type} | queue:{queue.queue_name} | rows:{len(filtered_rows)/len(chunk.rows):.2%} | cli_id:{chunk.client_id()}")
+                queue = self.middleware_queue_sender["to_filter_amount"]
+                logging.debug(f"action: sending_to_queue | type:{self.filter_type} | queue:{queue.queue_name} | rows:{len(filtered_rows)/len(chunk.rows):.2%} | cli_id:{chunk.client_id()} | shard:{self.shard_id}")
                 queue.send(ProcessChunk(chunk.header, filtered_rows).serialize())
 
                 if table_type == TableType.TRANSACTIONS:

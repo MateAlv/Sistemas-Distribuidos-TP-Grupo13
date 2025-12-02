@@ -359,7 +359,7 @@ class MonitorNode:
             "SERVER_RESULTS": STAGE_SERVER_RESULTS,
         }
         # For sharded stages we expect 1 worker per shard; config values represent shard count, not workers-per-shard.
-        sharded_stages = {STAGE_AGG_PRODUCTS, STAGE_AGG_TPV, STAGE_AGG_PURCHASES}
+        sharded_stages = {STAGE_AGG_PRODUCTS, STAGE_AGG_TPV, STAGE_AGG_PURCHASES, STAGE_FILTER_YEAR, STAGE_FILTER_HOUR, STAGE_FILTER_AMOUNT}
         stage_expected = {}
         for cfg_key, stage in stage_map.items():
             if stage in sharded_stages:
