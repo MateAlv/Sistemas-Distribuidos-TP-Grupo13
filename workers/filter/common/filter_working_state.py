@@ -187,3 +187,9 @@ class FilterWorkingState(WorkingState):
                     obj.clear()
             except (OSError, RuntimeError, AttributeError):
                 pass
+
+    def is_processed(self, message_id):
+        return message_id in self.processed_ids
+
+    def mark_processed(self, message_id):
+        self.processed_ids.add(message_id)

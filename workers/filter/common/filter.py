@@ -149,27 +149,20 @@ class Filter:
 
 
             try:
-                logging.debug("action: start_consuming_stats")
                 self.stats_timer = self.middleware_end_exchange.connection.call_later(TIMEOUT, stats_stop)
                 self.middleware_end_exchange.start_consuming(stats_callback)
-                logging.debug("action: stop_consuming_stats")
             except (OSError, RuntimeError, MessageMiddlewareMessageError) as e:
                 logging.error(f"Error en consumo: {e}")
 
             try:
-                logging.debug("action: start_consuming_receiver")
                 self.consume_timer = self.middleware_queue_receiver.connection.call_later(TIMEOUT, stop)
                 self.middleware_queue_receiver.start_consuming(callback)
-                logging.debug("action: stop_consuming_receiver")
             except (OSError, RuntimeError, MessageMiddlewareMessageError) as e:
                  logging.error(f"Error en consumo: {e}")
 
-            # Consume coordination barrier forwards
             try:
-                logging.debug("action: start_consuming_coordination")
                 self.coord_timer = self.middleware_coordination.connection.call_later(TIMEOUT, coord_stop)
                 self.middleware_coordination.start_consuming(coord_callback)
-                logging.debug("action: stop_consuming_coordination")
             except (OSError, RuntimeError, MessageMiddlewareMessageError) as e:
                 logging.error(f"Error en consumo coordination: {e}")
 
@@ -347,6 +340,12 @@ class Filter:
             if "shard" in queue_name: continue # Skip dynamic shard queues for now
             if self._should_skip_queue(table_type, queue_name, client_id):
                 continue
+            if self.filter_type == "amount" and "to_merge_data" in queue_name:
+                msg = MessageQueryEnd(client_id, ResultTableType.QUERY_1, total_expected - total_not_sent)
+                queue.send(msg.encode())
+                logging.info(f"action: sent_query_end_q1 | client_id:{client_id} | count:{total_expected - total_not_sent}")
+                continue
+
             logging.info(f"action: sending_end_to_queue | type:{self.filter_type} | queue:{queue_name} | total_chunks:{total_expected-total_not_sent}")
             msg_to_send = self._end_message_to_send(client_id, table_type, total_expected, total_not_sent)
             queue.send(msg_to_send.encode())
@@ -471,6 +470,12 @@ class Filter:
     def process_chunk(self, chunk: ProcessChunk):
         client_id = chunk.client_id()
         message_id = chunk.message_id()
+
+        if self.working_state.is_processed(message_id):
+            logging.info(f"action: duplicate_chunk_ignored | message_id:{message_id}")
+            return
+
+        self.working_state.mark_processed(message_id)
 
         if self.filter_type == "amount" and f"to_merge_data_{client_id}" not in self.middleware_queue_sender:
             self.middleware_queue_sender[f"to_merge_data_{client_id}"] = MessageMiddlewareQueue("rabbitmq", f"to_merge_data_{client_id}")
