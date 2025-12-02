@@ -2,7 +2,7 @@ import logging
 import json
 import os
 import uuid
-from collections import deque
+from collections import deque, defaultdict
 from utils.processing.process_table import TableProcessRow
 from utils.processing.process_chunk import ProcessChunk
 from utils.results.result_chunk import ResultChunkHeader, ResultChunk
