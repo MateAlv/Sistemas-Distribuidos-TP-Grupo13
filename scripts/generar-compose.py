@@ -665,6 +665,7 @@ def main():
 
     services = {}
 
+    print(f"DEBUG: meta={meta}")
     compose, client_count = generate_compose(meta, nodes, services)
 
 

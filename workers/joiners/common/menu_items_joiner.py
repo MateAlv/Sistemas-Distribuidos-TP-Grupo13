@@ -97,17 +97,6 @@ class MenuItemsJoiner(Joiner):
         logging.info(f"action: saved_menu_items_join_data | type:{self.joiner_type} | client_id:{client_id} | items_loaded:{self.working_state_join.get_join_data_count(client_id)}")
         return True
 
-    def _process_client_if_ready(self, client_id: int):
-        # Wrapper to call base logic explicitly
-        from .joiner import Joiner
-        return Joiner._process_client_if_ready(self, client_id)
-
-    def run(self):
-        logging.info(f"Joiner iniciado. Tipo: {self.joiner_type}")
-        self.handle_processing_recovery()
-        self.data_handler_thread.start()
-        self.join_data_handler_thread.start()
-
     def shutdown(self, signum=None, frame=None):
         # Delegate to base shutdown for consistent signal handling
         super().shutdown(signum, frame)

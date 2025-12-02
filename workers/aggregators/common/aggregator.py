@@ -123,7 +123,7 @@ class Aggregator:
                 shard_to_use = self.shard_configs[shard_idx]
             except (ValueError, IndexError):
                 shard_to_use = shard_by_id(self.shard_configs, self.shard_id)
-            self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", f"to_agg_products_shard_{shard_to_use.shard_id}")
+            self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", f"to_agg_products_shard_{self.aggregator_id}")
             # Send aggregated partials to the absolute maximizer
             self.middleware_queue_sender["to_absolute_max"] = MessageMiddlewareQueue("rabbitmq", "to_absolute_max")
 
@@ -144,7 +144,7 @@ class Aggregator:
                 shard_to_use = self.shard_configs[shard_idx]
             except (ValueError, IndexError):
                 shard_to_use = shard_by_id(self.shard_configs, self.shard_id)
-            self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", f"to_agg_purchases_shard_{shard_to_use.shard_id}")
+            self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", f"to_agg_purchases_shard_{self.aggregator_id}")
             # Send aggregated partials to the absolute TOP3 maximizer
             self.middleware_queue_sender["to_top3_absolute"] = MessageMiddlewareQueue("rabbitmq", "to_top3_absolute")
 
@@ -492,6 +492,7 @@ class Aggregator:
             self._send_end_message(client_id, table_type)
 
     def _handle_data_chunk(self, raw_msg: bytes):
+        logging.info(f"DEBUG: _handle_data_chunk called | len:{len(raw_msg)}")
         self._check_crash_point("CRASH_BEFORE_PROCESS")
         chunk = ProcessBatchReader.from_bytes(raw_msg)
         client_id = chunk.client_id()
@@ -1045,11 +1046,6 @@ class Aggregator:
                 created_at=created_at,
             )
 
-            if self.id_to_shard and item_id not in self.id_to_shard:
-                logging.warning(
-                    f"action: apply_products_missing_shard | client_id:{chunk.header.client_id} | item_id:{item_id}"
-                )
-                continue
 
             rows.append(new_row)
 

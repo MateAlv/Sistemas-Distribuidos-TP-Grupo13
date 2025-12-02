@@ -111,10 +111,6 @@ class StoresTop3Joiner(Joiner):
         else:
             logging.info(f"action: no_results_to_send | type:{self.joiner_type} | client_id:{client_id}")
 
-    def _process_client_if_ready(self, client_id: int):
-        from .joiner import Joiner
-        return Joiner._process_client_if_ready(self, client_id)
-
     def run(self):
         logging.info(f"Joiner iniciado. Tipo: {self.joiner_type}")
         self.handle_processing_recovery()
