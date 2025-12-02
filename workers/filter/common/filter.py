@@ -7,7 +7,19 @@ from utils.processing.process_chunk import ProcessChunk
 from utils.results.result_chunk import ResultChunkHeader, ResultChunk
 from utils.processing.process_batch_reader import ProcessBatchReader
 from utils.eof_protocol.end_messages import MessageEnd, MessageQueryEnd
-from utils.protocol import COORDINATION_EXCHANGE, MSG_WORKER_END, MSG_WORKER_STATS, MSG_BARRIER_FORWARD, DEFAULT_SHARD, STAGE_FILTER_YEAR, STAGE_FILTER_HOUR, STAGE_FILTER_AMOUNT
+from utils.protocol import (
+    COORDINATION_EXCHANGE,
+    MSG_WORKER_END,
+    MSG_WORKER_STATS,
+    MSG_BARRIER_FORWARD,
+    DEFAULT_SHARD,
+    STAGE_FILTER_YEAR,
+    STAGE_FILTER_HOUR,
+    STAGE_FILTER_AMOUNT,
+    STAGE_AGG_PRODUCTS,
+    STAGE_AGG_PURCHASES,
+    STAGE_AGG_TPV,
+)
 from utils.file_utils.table_type import TableType, ResultTableType
 from middleware.middleware_interface import MessageMiddlewareQueue, MessageMiddlewareExchange, TIMEOUT, \
     MessageMiddlewareMessageError
@@ -45,6 +57,9 @@ class Filter:
         self.tpv_shards = int(os.getenv("TPV_SHARDS", "1"))
         # Track chunk index per destination/client/table to compute shard deterministically
         self.chunk_counters = defaultdict(int)
+        # Track how many chunks we actually sent to each shard so END carries correct per-shard expected count
+        # Key: (stage, client_id, table_type, shard_id) -> chunks_sent
+        self.shard_chunks_sent = defaultdict(int)
 
         self.middleware_end_exchange = MessageMiddlewareExchange("rabbitmq", 
                                                                  f"end_exchange_filter_{self.filter_type}", 
@@ -344,8 +359,9 @@ class Filter:
                     queue_name = f"to_agg_products_shard_{i}"
                     if queue_name not in self.middleware_queue_sender:
                         self.middleware_queue_sender[queue_name] = MessageMiddlewareQueue("rabbitmq", queue_name)
-                    logging.info(f"action: sending_end_to_shard | type:{self.filter_type} | queue:{queue_name} | total_chunks:{total_expected-total_not_sent}")
-                    msg_to_send = self._end_message_to_send(client_id, table_type, total_expected, total_not_sent)
+                    shard_total = self.shard_chunks_sent.get((STAGE_AGG_PRODUCTS, client_id, table_type, i), 0)
+                    logging.info(f"action: sending_end_to_shard | type:{self.filter_type} | queue:{queue_name} | total_chunks:{shard_total}")
+                    msg_to_send = self._end_message_to_send(client_id, table_type, shard_total, 0)
                     self.middleware_queue_sender[queue_name].send(msg_to_send.encode())
             elif table_type == TableType.TRANSACTIONS:
                 # Q4: Purchases
@@ -353,8 +369,9 @@ class Filter:
                     queue_name = f"to_agg_purchases_shard_{i}"
                     if queue_name not in self.middleware_queue_sender:
                         self.middleware_queue_sender[queue_name] = MessageMiddlewareQueue("rabbitmq", queue_name)
-                    logging.info(f"action: sending_end_to_shard | type:{self.filter_type} | queue:{queue_name} | total_chunks:{total_expected-total_not_sent}")
-                    msg_to_send = self._end_message_to_send(client_id, table_type, total_expected, total_not_sent)
+                    shard_total = self.shard_chunks_sent.get((STAGE_AGG_PURCHASES, client_id, table_type, i), 0)
+                    logging.info(f"action: sending_end_to_shard | type:{self.filter_type} | queue:{queue_name} | total_chunks:{shard_total}")
+                    msg_to_send = self._end_message_to_send(client_id, table_type, shard_total, 0)
                     self.middleware_queue_sender[queue_name].send(msg_to_send.encode())
 
         elif self.filter_type == "hour":
@@ -364,8 +381,9 @@ class Filter:
                     queue_name = f"to_agg_tpv_shard_{i}"
                     if queue_name not in self.middleware_queue_sender:
                         self.middleware_queue_sender[queue_name] = MessageMiddlewareQueue("rabbitmq", queue_name)
-                    logging.info(f"action: sending_end_to_shard | type:{self.filter_type} | queue:{queue_name} | total_chunks:{total_expected-total_not_sent}")
-                    msg_to_send = self._end_message_to_send(client_id, table_type, total_expected, total_not_sent)
+                    shard_total = self.shard_chunks_sent.get((STAGE_AGG_TPV, client_id, table_type, i), 0)
+                    logging.info(f"action: sending_end_to_shard | type:{self.filter_type} | queue:{queue_name} | total_chunks:{shard_total}")
+                    msg_to_send = self._end_message_to_send(client_id, table_type, shard_total, 0)
                     self.middleware_queue_sender[queue_name].send(msg_to_send.encode())
 
         # Publish to coordination for centralized barrier
@@ -477,6 +495,7 @@ class Filter:
                         self.middleware_queue_sender[queue_name] = MessageMiddlewareQueue("rabbitmq", queue_name)
                     logging.debug(f"action: sending_to_queue | type:{self.filter_type} | queue:{queue_name} | rows:{len(filtered_rows)/len(chunk.rows):.2%} | cli_id:{chunk.client_id()} | shard:{shard_id}")
                     self.middleware_queue_sender[queue_name].send(ProcessChunk(chunk.header, filtered_rows).serialize())
+                    self.shard_chunks_sent[(STAGE_AGG_PRODUCTS, client_id, table_type, shard_id)] += 1
                 elif table_type == TableType.TRANSACTIONS:
                     # Q4: route transactions to purchases aggregator shards
                     shard_id = self._next_shard("agg_purchases", client_id, table_type, self.purchases_shards)
@@ -485,6 +504,7 @@ class Filter:
                         self.middleware_queue_sender[queue_name] = MessageMiddlewareQueue("rabbitmq", queue_name)
                     logging.debug(f"action: sending_to_queue | type:{self.filter_type} | queue:{queue_name} | rows:{len(filtered_rows)/len(chunk.rows):.2%} | cli_id:{chunk.client_id()} | shard:{shard_id}")
                     self.middleware_queue_sender[queue_name].send(ProcessChunk(chunk.header, filtered_rows).serialize())
+                    self.shard_chunks_sent[(STAGE_AGG_PURCHASES, client_id, table_type, shard_id)] += 1
 
             elif self.filter_type == "hour":
                 # Forward to amount filter for Q1
@@ -500,6 +520,7 @@ class Filter:
                         self.middleware_queue_sender[queue_name] = MessageMiddlewareQueue("rabbitmq", queue_name)
                     logging.debug(f"action: sending_to_queue | type:{self.filter_type} | queue:{queue_name} | rows:{len(filtered_rows)/len(chunk.rows):.2%} | cli_id:{chunk.client_id()} | shard:{shard_id}")
                     self.middleware_queue_sender[queue_name].send(ProcessChunk(chunk.header, filtered_rows).serialize())
+                    self.shard_chunks_sent[(STAGE_AGG_TPV, client_id, table_type, shard_id)] += 1
 
             elif self.filter_type == "amount":
                 converted_rows = [Query1ResultRow(tx.transaction_id, tx.final_amount) for tx in filtered_rows]

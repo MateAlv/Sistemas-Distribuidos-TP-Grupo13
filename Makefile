@@ -64,7 +64,7 @@ test:
 		PID=$$!; \
 		while kill -0 $$PID 2>/dev/null; do \
 			LINES=$$(wc -l < logs.txt 2>/dev/null || echo 0); \
-			if [ $$LINES -gt 20000 ]; then \
+			if [ $$LINES -gt 100000 ]; then \
 				echo "Log limit exceeded ($$LINES lines). Stopping test..."; \
 				kill $$PID; \
 				docker compose -f ${DOCKER} stop; \

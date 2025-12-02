@@ -433,6 +433,9 @@ class Aggregator:
                 if stage != self.stage:
                     return
                 shard = data.get("shard", DEFAULT_SHARD)
+                # Ignore barrier forwards for other shards
+                if str(shard) != str(self.shard_id or DEFAULT_SHARD):
+                    return
                 client_id = data.get("client_id")
                 key = (client_id, stage, shard)
                 if key in self.barrier_forwarded:
