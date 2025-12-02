@@ -1,5 +1,7 @@
 import logging
 import json
+import os
+import uuid
 from collections import deque
 from utils.processing.process_table import TableProcessRow
 from utils.processing.process_chunk import ProcessChunk
@@ -79,6 +81,8 @@ class Filter:
 
         logging.info("Verificando recuperación de procesamiento previo")
         self.persistence_service = PersistenceService()
+        self.handle_processing_recovery()
+
 
     def handle_processing_recovery(self):
 
@@ -91,10 +95,10 @@ class Filter:
             table_type = last_processing_chunk.table_type()
             message_id = last_processing_chunk.message_id()
 
-            chunk_was_sent = self.process_chunk(last_processing_chunk)
+            filtered_rows = self.process_chunk(last_processing_chunk)
             # Se actualiza el working state según si el chunk fue enviado o no
             if self.persistence_service.process_has_been_counted(last_processing_chunk):
-                if chunk_was_sent:
+                if filtered_rows:
                     self.working_state.increase_received_chunks(client_id, table_type, self.id, 1)
                 else:
                     self.working_state.increase_not_sent_chunks(client_id, table_type, self.id, 1)
@@ -104,11 +108,30 @@ class Filter:
     def run(self):
         logging.info(f"Filtro iniciado. Tipo: {self.filter_type}, ID: {self.id}")
 
-        self.handle_processing_recovery()
-
         results = deque()
         stats_results = deque()
-        def callback(msg): results.append(msg)
+        def callback(msg):
+            if msg.startswith(b"END;"):
+                end_message = MessageEnd.decode(msg)
+                client_id = end_message.client_id()
+                table_type = end_message.table_type()
+                self.working_state.end_received(client_id, table_type)
+                self.persistence_service.commit_working_state(self.working_state.to_bytes(), uuid.uuid4())
+                # REVISAR LÓGICA DE PERSISTENCIA Y RECOVERY DE END
+            else:
+                # Crash point for testing: before commit_processing_chunk
+                if os.getenv("CRASH_POINT") == "CRASH_BEFORE_COMMIT_PROCESSING":
+                    raise SystemExit("Simulated crash before commit_processing_chunk")
+                
+                chunk = ProcessBatchReader.from_bytes(msg)
+                # Se commitea el chunk a procesar
+                self.persistence_service.commit_processing_chunk(chunk)
+                
+                # Crash point for testing: after commit_processing_chunk
+                if os.getenv("CRASH_POINT") == "CRASH_AFTER_COMMIT_PROCESSING":
+                    raise SystemExit("Simulated crash after commit_processing_chunk")
+            results.append(msg)
+            
         def stats_callback(msg): stats_results.append(msg)
         def coord_callback(msg): results.append((b"BARRIER", msg))
         def stop():
@@ -211,25 +234,33 @@ class Filter:
         chunk = ProcessBatchReader.from_bytes(msg)
         client_id = chunk.client_id()
         table_type = chunk.table_type()
+        message_id = chunk.message_id()
 
         # Idempotency check
         if chunk.message_id() in self.working_state.processed_ids:
             logging.info(f"action: duplicate_chunk_ignored | message_id:{chunk.message_id()}")
             return
 
-        # Se commitea el chunk a procesar
-        self.persistence_service.commit_processing_chunk(chunk)
-        # Se procesa el chunk
-        chunk_was_sent = self.process_chunk(chunk)
+        # 1. Apply filter - returns filtered rows
+        filtered_rows = self.process_chunk(chunk)
 
-        if chunk_was_sent:
+        # 2. Update working state (in-memory)
+        if filtered_rows:
             self.working_state.increase_received_chunks(client_id, table_type, self.id, 1)
         else:
             self.working_state.increase_not_sent_chunks(client_id, table_type, self.id, 1)
 
-        # Se commitea el working state
+        # 3. Commit working state
         self.working_state.processed_ids.add(chunk.message_id())
+        
+        # Crash point for testing: before commit_working_state
+        if os.getenv("CRASH_POINT") == "CRASH_BEFORE_COMMIT_WORKING_STATE":
+            raise SystemExit("Simulated crash before commit_working_state")
+        
         self.persistence_service.commit_working_state(self.working_state.to_bytes(), chunk.message_id())
+
+        # 4. Send to next stage (only if there are filtered rows)
+        self.send_filtered_rows(filtered_rows, chunk, client_id, table_type, message_id)
 
         if self.working_state.end_is_received(client_id, table_type):
             total_expected = self.working_state.get_total_chunks_to_receive(client_id, table_type)
@@ -255,6 +286,35 @@ class Filter:
             if self.working_state.can_send_end_message(client_id, table_type, total_expected, self.id):
                 self._send_end_message(client_id, table_type, total_expected, total_not_sent)
 
+    def send_filtered_rows(self, filtered_rows, chunk, client_id, table_type, message_id):
+        if filtered_rows:
+            for queue_name, queue in self.middleware_queue_sender.items():
+                if self._should_skip_queue(table_type, queue_name, client_id):
+                    continue
+                logging.debug(f"action: sending_to_queue | type:{self.filter_type} | queue:{queue_name} | rows:{len(filtered_rows)} | cli_id:{client_id}")
+                if self.filter_type != "amount":
+                    queue.send(ProcessChunk(chunk.header, filtered_rows).serialize())
+
+                else:
+                    converted_rows = [Query1ResultRow(tx.transaction_id, tx.final_amount) for tx in filtered_rows]
+                    queue.send(ResultChunk(ResultChunkHeader(client_id, ResultTableType.QUERY_1), converted_rows).serialize())
+
+            logging.info(f"action: rows_sent | type:{self.filter_type} | cli_id:{client_id} | file_type:{table_type} | rows_out:{len(filtered_rows)}")
+
+            # Crash point for testing: before commit_send_ack
+            if os.getenv("CRASH_POINT") == "CRASH_BEFORE_COMMIT_SEND_ACK":
+                raise SystemExit("Simulated crash before commit_send_ack")
+
+            # 5. Commit send acknowledgment
+            self.persistence_service.commit_send_ack(client_id, message_id)
+
+            # Crash point for testing: after commit_send_ack
+            if os.getenv("CRASH_POINT") == "CRASH_AFTER_COMMIT_SEND_ACK":
+                raise SystemExit("Simulated crash after commit_send_ack")
+        else:
+            logging.info(f"action: no_rows_to_send | type:{self.filter_type} | cli_id:{client_id} | file_type:{table_type}")
+
+
     def _handle_end_message(self, msg):
         end_message = MessageEnd.decode(msg)
         client_id = end_message.client_id()
@@ -272,7 +332,6 @@ class Filter:
 
         sender_id = end_message.sender_id()
 
-        self.working_state.end_received(client_id, table_type)
         logging.info(
             "action: end_message_received | type:%s | cli_id:%s | file_type:%s | sender_id:%s | chunks_received:%d | chunks_not_sent:%d | chunks_expected:%d",
             self.filter_type, client_id, table_type, sender_id,
@@ -412,6 +471,10 @@ class Filter:
         return False
 
     def process_chunk(self, chunk: ProcessChunk):
+        """
+        Applies the filter to the chunk and returns filtered rows.
+        Does NOT send the rows - that's handled by the caller after state commits.
+        """
         client_id = chunk.client_id()
         message_id = chunk.message_id()
 
@@ -422,26 +485,8 @@ class Filter:
         logging.debug(f"action: filter | type:{self.filter_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()} | rows_in:{len(chunk.rows)}")
         filtered_rows = [tx for tx in chunk.rows if self.apply(tx)]
         logging.debug(f"action: filter_result | type:{self.filter_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()} | rows_out:{len(filtered_rows)}")
-        if filtered_rows:
-            for queue_name, queue in self.middleware_queue_sender.items():
-                if self._should_skip_queue(table_type, queue_name, client_id):
-                    continue
-                logging.debug(f"action: sending_to_queue | type:{self.filter_type} | queue:{queue_name} | rows:{len(filtered_rows)/len(chunk.rows):.2%} | cli_id:{chunk.client_id()}")
-                if self.filter_type != "amount":
-                    queue.send(ProcessChunk(chunk.header, filtered_rows).serialize())
-
-                else:
-                    converted_rows = [ Query1ResultRow(tx.transaction_id, tx.final_amount) for tx in filtered_rows]
-                    queue.send(ResultChunk(ResultChunkHeader(client_id, ResultTableType.QUERY_1), converted_rows).serialize())
-
-            logging.info(f"action: rows_sent | type:{self.filter_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()} | rows_out:{len(filtered_rows)}")
-            # Se commitea el envío del chunk procesado
-            self.persistence_service.commit_send_ack(client_id, message_id)
-        else:
-            logging.info(f"action: no_rows_to_send | type:{self.filter_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()}")
-            return False
-
-        return True
+        
+        return filtered_rows
 
 
     def _should_skip_queue(self, table_type: TableType, queue_name: str, client_id: int) -> bool:
