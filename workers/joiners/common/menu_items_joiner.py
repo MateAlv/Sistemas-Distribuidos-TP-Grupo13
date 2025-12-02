@@ -81,9 +81,32 @@ class MenuItemsJoiner(Joiner):
         client_queue.close()
         logging.info(f"action: sent_result_message | type:{self.joiner_type} | client_id:{client_id}")
 
-    def run(self):
+    def save_data_join(self, chunk) -> bool:
+        """
+        Guarda los datos de join (tabla de menú de items) enviados por el server.
+        """
+        client_id = chunk.client_id()
+        rows = chunk.rows
+        for row in rows:
+            item_id = getattr(row, "item_id", None)
+            item_name = getattr(row, "item_name", None)
+            if item_id is None:
+                logging.warning(f"action: invalid_menu_item_row | client_id:{client_id} | row:{row}")
+                continue
+            self.working_state_join.add_join_data(client_id, item_id, item_name or "")
+        logging.info(f"action: saved_menu_items_join_data | type:{self.joiner_type} | client_id:{client_id} | items_loaded:{self.working_state_join.get_join_data_count(client_id)}")
+        return True
+
+    def _process_client_if_ready(self, client_id: int):
+        # Wrapper to call base logic explicitly
         from .joiner import Joiner
-        Joiner.run(self)
+        return Joiner._process_client_if_ready(self, client_id)
+
+    def run(self):
+        logging.info(f"Joiner iniciado. Tipo: {self.joiner_type}")
+        self.handle_processing_recovery()
+        self.data_handler_thread.start()
+        self.join_data_handler_thread.start()
 
     def shutdown(self, signum=None, frame=None):
         # Delegate to base shutdown for consistent signal handling

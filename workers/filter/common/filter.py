@@ -464,10 +464,10 @@ class Filter:
         if filtered_rows:
             # Dispatch according to filter type and destination
             if self.filter_type == "year":
-                # Always forward to next filter in Q1/Q3 path
-                queue = self.middleware_queue_sender["to_filter_2"]
-                logging.debug(f"action: sending_to_queue | type:{self.filter_type} | queue:{queue.queue_name} | rows:{len(filtered_rows)/len(chunk.rows):.2%} | cli_id:{chunk.client_id()}")
-                queue.send(ProcessChunk(chunk.header, filtered_rows).serialize())
+                if table_type == TableType.TRANSACTIONS:
+                    queue = self.middleware_queue_sender["to_filter_2"]
+                    logging.debug(f"action: sending_to_queue | type:{self.filter_type} | queue:{queue.queue_name} | rows:{len(filtered_rows)/len(chunk.rows):.2%} | cli_id:{chunk.client_id()}")
+                    queue.send(ProcessChunk(chunk.header, filtered_rows).serialize())
 
                 if table_type == TableType.TRANSACTION_ITEMS:
                     # Q2: route items to products aggregator shards

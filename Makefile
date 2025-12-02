@@ -51,6 +51,7 @@ up:
 	docker compose -f ${DOCKER} up -d --build
 .PHONY: docker-compose-up
 
+
 test:
 	# Run the docker-compose setup
 	make clean-results
@@ -58,12 +59,28 @@ test:
 	-docker run --rm -v $(PWD)/data/persistence:/persistence alpine sh -c 'rm -rf /persistence/*'
 	python3  $(COMPOSE_SCRIPT) --config=config/config-test.ini
 	@echo "Running tests... Logs redirected to logs.txt"
-	@if docker compose -f ${DOCKER} up --build > logs.txt 2>&1; then \
-		echo "Test passed"; \
-	else \
-		echo "Test failed. Check logs.txt"; \
-		exit 1; \
-	fi
+	@bash -c ' \
+		docker compose -f ${DOCKER} up --build > logs.txt 2>&1 & \
+		PID=$$!; \
+		while kill -0 $$PID 2>/dev/null; do \
+			LINES=$$(wc -l < logs.txt 2>/dev/null || echo 0); \
+			if [ $$LINES -gt 20000 ]; then \
+				echo "Log limit exceeded ($$LINES lines). Stopping test..."; \
+				kill $$PID; \
+				docker compose -f ${DOCKER} stop; \
+				exit 1; \
+			fi; \
+			sleep 2; \
+		done; \
+		wait $$PID; \
+		EXIT_CODE=$$?; \
+		if [ $$EXIT_CODE -eq 0 ]; then \
+			echo "Test passed"; \
+		else \
+			echo "Test failed. Check logs.txt"; \
+			exit $$EXIT_CODE; \
+		fi \
+	'
 .PHONY: test
 
 test-compilation:

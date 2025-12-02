@@ -111,9 +111,15 @@ class StoresTop3Joiner(Joiner):
         else:
             logging.info(f"action: no_results_to_send | type:{self.joiner_type} | client_id:{client_id}")
 
-    def run(self):
+    def _process_client_if_ready(self, client_id: int):
         from .joiner import Joiner
-        Joiner.run(self)
+        return Joiner._process_client_if_ready(self, client_id)
+
+    def run(self):
+        logging.info(f"Joiner iniciado. Tipo: {self.joiner_type}")
+        self.handle_processing_recovery()
+        self.data_handler_thread.start()
+        self.join_data_handler_thread.start()
 
     def shutdown(self, signum=None, frame=None):
         # Delegate to base shutdown to ensure signal handling exists

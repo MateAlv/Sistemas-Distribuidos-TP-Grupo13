@@ -35,7 +35,6 @@ USERS_JOINER = "USERS"
 from .joiner_working_state import JoinerMainWorkingState, JoinerJoinWorkingState
 
 class Joiner:
-    print("DEBUG: Loading Joiner class definition")
     
     def __init__(self, join_type: str, expected_inputs: int = 1, monitor=None):
         logging.getLogger('pika').setLevel(logging.CRITICAL)
@@ -327,297 +326,297 @@ class Joiner:
             logging.critical(f"Simulating crash at {point_name}")
             sys.exit(1)
 
-def _handle_barrier_forward(self, raw_msg: bytes):
-    try:
-        data = json.loads(raw_msg)
-        if data.get("type") != MSG_BARRIER_FORWARD:
-            return
-
-        stage = data.get("stage")
-        client_id = data.get("client_id")
-        shard = data.get("shard", DEFAULT_SHARD)
-
-        # Para joiners no shardeados distintos de TPV, solo aceptamos global
-        if self.stage != STAGE_JOIN_STORES_TPV:
-            if stage != self.stage or shard != DEFAULT_SHARD:
+    def _handle_barrier_forward(self, raw_msg: bytes):
+        try:
+            data = json.loads(raw_msg)
+            if data.get("type") != MSG_BARRIER_FORWARD:
                 return
-
-            key = (client_id, stage, shard)
-            if key in self.barrier_forwarded:
-                return
-
-            logging.info(
-                f"action: barrier_forward_received | type:{self.joiner_type} "
-                f"| stage:{stage} | client_id:{client_id}"
-            )
-
-            with self.lock:
-                self.working_state_main.mark_end_message_received(client_id)
-                self.working_state_main.mark_sender_finished(client_id, "monitor")
-                self.working_state_main.add_expected_chunks(
-                    client_id, data.get("total_chunks", 0)
+    
+            stage = data.get("stage")
+            client_id = data.get("client_id")
+            shard = data.get("shard", DEFAULT_SHARD)
+    
+            # Para joiners no shardeados distintos de TPV, solo aceptamos global
+            if self.stage != STAGE_JOIN_STORES_TPV:
+                if stage != self.stage or shard != DEFAULT_SHARD:
+                    return
+    
+                key = (client_id, stage, shard)
+                if key in self.barrier_forwarded:
+                    return
+    
+                logging.info(
+                    f"action: barrier_forward_received | type:{self.joiner_type} "
+                    f"| stage:{stage} | client_id:{client_id}"
                 )
-
-            self._process_client_if_ready(client_id)
-            self.barrier_forwarded.add(key)
-
-        else:
-            # Joiner TPV: esperar barreras de todos los shards de agg_tpv
-            if stage != STAGE_AGG_TPV:
-                return
-
-            key = (client_id, stage, shard)
-            if key in self.barrier_forwarded:
-                return
-
-            logging.info(
-                f"action: barrier_forward_received | type:{self.joiner_type} "
-                f"| stage:{stage} | client_id:{client_id} | shard:{shard}"
-            )
-
-            try:
-                self.received_shards[client_id].add(shard)
-            except Exception:
-                self.received_shards = getattr(self, "received_shards", {}) or {}
-                self.received_shards.setdefault(client_id, set()).add(shard)
-
-            if len(self.received_shards.get(client_id, set())) >= getattr(
-                self, "expected_shards", 1
-            ):
+    
                 with self.lock:
                     self.working_state_main.mark_end_message_received(client_id)
                     self.working_state_main.mark_sender_finished(client_id, "monitor")
                     self.working_state_main.add_expected_chunks(
                         client_id, data.get("total_chunks", 0)
                     )
-
+    
                 self._process_client_if_ready(client_id)
                 self.barrier_forwarded.add(key)
-
-    except Exception as e:
-        logging.error(
-            f"action: barrier_forward_error | type:{self.joiner_type} | error:{e}"
-        )
-
-    def save_data(self, chunk) -> bool:
-        """
-        Guarda los datos para la tabla que debe joinearse.
-        """
-        client_id = chunk.client_id()
-        rows = chunk.rows
-        
-        self.working_state_main.add_data(client_id, rows)
-        self.working_state_main.add_chunk(client_id, chunk)
-        
-        return True
-
-    def _process_client_if_ready(self, client_id: int):
-        """
-        Ejecuta apply/publish/cleanup si ya se recibieron todos los END esperados
-        y el join data está listo. Evita reprocesar clientes completados.
-        """
-        if self.working_state_main.is_client_completed(client_id):
-            return
-        if not (self.working_state_main.is_end_message_received(client_id) and self.is_ready_to_join_for_client(client_id)):
-            return
-
-        logging.info(f"action: processing_client | type:{self.joiner_type} | client_id:{client_id} | reason:ready_and_end_received")
-        try:
-            logging.debug(f"action: starting_apply_for_client | type:{self.joiner_type} | client_id:{client_id}")
-            self.apply_for_client(client_id)
-            logging.debug(f"action: completed_apply_for_client | type:{self.joiner_type} | client_id:{client_id}")
-
-            self._check_crash_point("CRASH_AFTER_PROCESS_BEFORE_COMMIT")
-
-            logging.debug(f"action: starting_publish_results | type:{self.joiner_type} | client_id:{client_id}")
-            self.publish_results(client_id)
-            logging.debug(f"action: completed_publish_results | type:{self.joiner_type} | client_id:{client_id}")
-
-            logging.debug(f"action: starting_clean_client_data | type:{self.joiner_type} | client_id:{client_id}")
-            self.clean_client_data(client_id)
-            logging.debug(f"action: completed_clean_client_data | type:{self.joiner_type} | client_id:{client_id}")
-
-            self.working_state_main.mark_client_completed(client_id)
-            self.working_state_main.add_pending_end_message(client_id)
-            logging.debug(f"action: processing_complete | type:{self.joiner_type} | client_id:{client_id}")
-        except Exception as inner_e:
-            logging.error(f"action: error_in_join_processing | type:{self.joiner_type} | client_id:{client_id} | error:{inner_e} | error_type:{type(inner_e).__name__}")
-            raise inner_e
-
-    def save_data_join(self, chunk) -> bool:
-        """
-        Guarda los datos para la tabla base necesaria para el join (tabla de productos).
-        """
-        client_id = chunk.client_id()
-        rows = chunk.rows
-        
-        # Guardar mapping item_id → nombre
-        for row in rows:
-            if hasattr(row, 'item_id') and hasattr(row, 'item_name'):
-                self.working_state_join.add_join_data(client_id, row.item_id, row.item_name)
-                logging.debug(f"action: save_join_data | type:{self.joiner_type} | item_id:{row.item_id} | name:{row.item_name}")
+    
             else:
-                logging.warning(f"action: invalid_join_row | type:{self.joiner_type} | row_type:{type(row)} | missing_fields | has_item_id:{hasattr(row, 'item_id')} | has_item_name:{hasattr(row, 'item_name')}")
-            
-        logging.info(f"action: saved_join_data | type:{self.joiner_type} | client_id:{client_id} | products_loaded:{self.working_state_join.get_join_data_count(client_id)}")
-        return True
-
-    def run(self):
-        logging.info(f"Joiner iniciado. Tipo: {self.joiner_type}")
-        self.handle_processing_recovery()
-        
-        self.data_handler_thread.start() 
-        self.join_data_handler_thread.start()
-
-    def define_queues(self):
-        raise NotImplementedError("Subclasses must implement define_queues method")
-
-    def save_data_join_fields(self, row: TableProcessRow, client_id):
-        raise NotImplementedError("Subclasses must implement save_data_join_fields method")
+                # Joiner TPV: esperar barreras de todos los shards de agg_tpv
+                if stage != STAGE_AGG_TPV:
+                    return
     
-    def join_result(self, row: TableProcessRow, client_id):
-        raise NotImplementedError("Subclasses must implement join_result method")
+                key = (client_id, stage, shard)
+                if key in self.barrier_forwarded:
+                    return
     
-    def publish_results(self):
-        raise NotImplementedError("Subclasses must implement publish_results method")
+                logging.info(
+                    f"action: barrier_forward_received | type:{self.joiner_type} "
+                    f"| stage:{stage} | client_id:{client_id} | shard:{shard}"
+                )
     
-    def send_end_query_msg(self, client_id):
-        raise NotImplementedError("Subclasses must implement send_end_query_msg method")
-    
-    def is_ready_to_join_for_client(self, client_id):
-        """Check if we have received all necessary data and end messages for this client"""
-        # Check if we have data from maximizers for this client
-        has_maximizer_data = self.working_state_main.has_chunks(client_id)
-        # Check if we have received end message for this client  
-        has_end_message = self.working_state_main.is_end_message_received(client_id)
-        # Check if we haven't already processed this client
-        not_processed = not self.working_state_main.is_client_completed(client_id)
-        
-        # Detailed logging to debug join readiness
-        logging.debug(f"action: checking_join_readiness | type:{self.joiner_type} | client_id:{client_id} | has_maximizer_data:{has_maximizer_data} | has_end_message:{has_end_message} | not_processed:{not_processed}")
-        
-        if has_maximizer_data and has_end_message and not_processed:
-            logging.info(f"action: ready_to_join | client_id:{client_id} | has_data:{has_maximizer_data} | has_end:{has_end_message}")
-        else:
-            if not has_maximizer_data:
-                logging.debug(f"action: not_ready_to_join | reason:no_maximizer_data | client_id:{client_id}")
-            if not has_end_message:
-                logging.debug(f"action: not_ready_to_join | reason:no_end_message | client_id:{client_id}")
-            if not not_processed:
-                logging.debug(f"action: not_ready_to_join | reason:already_processed | client_id:{client_id}")
-        
-        return has_maximizer_data and has_end_message and not_processed
-    
-    def apply_for_client(self, client_id):
-        """Apply join operation for a specific client"""
-        if not self.working_state_main.has_chunks(client_id):
-            logging.warning(f"action: no_data_to_join | client_id:{client_id}")
-            return
-            
-        chunks = self.working_state_main.get_chunks(client_id)
-        logging.debug(f"action: processing_chunks | type:{self.joiner_type} | client_id:{client_id} | chunks_count:{len(chunks)}")
-        
-        for chunk_idx, chunk in enumerate(chunks):
-
-            logging.debug(f"action: processing_chunk | type:{self.joiner_type} | client_id:{client_id} | chunk_idx:{chunk_idx} | rows_count:{len(chunk.rows)}")
-            
-            for row_idx, row in enumerate(chunk.rows):
                 try:
-                    logging.debug(f"action: joining_row | type:{self.joiner_type} | client_id:{client_id} | chunk_idx:{chunk_idx} | row_idx:{row_idx}")
-                    joined_row = self.join_result(row, client_id)
-                    
-                    self.working_state_main.add_result(client_id, joined_row)
-                    
-                    logging.debug(f"action: row_joined_successfully | type:{self.joiner_type} | client_id:{client_id} | chunk_idx:{chunk_idx} | row_idx:{row_idx}")
-                except Exception as row_error:
-                    logging.error(f"action: error_joining_row | type:{self.joiner_type} | client_id:{client_id} | chunk_idx:{chunk_idx} | row_idx:{row_idx} | error:{row_error} | error_type:{type(row_error).__name__}")
-                    raise row_error
-        
-        logging.info(f"action: applied_join | client_id:{client_id} | joined_rows:{len(self.working_state_main.get_results(client_id))}")
+                    self.received_shards[client_id].add(shard)
+                except Exception:
+                    self.received_shards = getattr(self, "received_shards", {}) or {}
+                    self.received_shards.setdefault(client_id, set()).add(shard)
     
-    def clean_client_data(self, client_id):
-        """Clean client data after processing to prevent reprocessing"""
-        self.working_state_main.clean_client_data(client_id)
-        logging.info(f"action: client_data_cleaned | type:{self.joiner_type} | client_id:{client_id}")
-
-    def reset_for_new_session(self):
-        """Reset joiner state for a new processing session (new client batch)"""
-        with self.lock:
-            self.working_state_main.reset()
-            logging.info(f"action: joiner_reset_for_new_session | type:{self.joiner_type}")
-
-    def shutdown(self, signum=None, frame=None):
-        logging.info(f"SIGTERM recibido: cerrando joiner {self.joiner_type}")
-
-        try:
-            if getattr(self, "data_receiver_timer", None):
-                self.data_receiver_timer.cancel()
-        except Exception:
-            pass
-
-        try:
-            if getattr(self, "data_join_receiver_timer", None):
-                self.data_join_receiver_timer.cancel()
-        except Exception:
-            pass
-
-        # Detener consumos
-        try:
-            self.data_receiver.stop_consuming()
-        except (OSError, RuntimeError, AttributeError):
-            pass
-        try:
-            self.data_join_receiver.stop_consuming()
-        except (OSError, RuntimeError, AttributeError):
-            pass
-        try:
-            self.middleware_coordination.stop_consuming()
-        except (OSError, RuntimeError, AttributeError):
-            pass
-
-        # Cerrar conexiones
-        try:
-            self.data_receiver.close()
-        except (OSError, RuntimeError, AttributeError):
-            pass
-        try:
-            self.data_join_receiver.close()
-        except (OSError, RuntimeError, AttributeError):
-            pass
-        try:
-            self.data_sender.close()
-        except (OSError, RuntimeError, AttributeError):
-            pass
-        try:
-            self.middleware_coordination.close()
-        except (OSError, RuntimeError, AttributeError):
-            pass
-        try:
-            self.middleware_coordination.close()
-        except (OSError, RuntimeError, AttributeError):
-            pass
-
-        # Detener bucle de manejo de datos
-        self.__running = False
-
-        # Esperar hilos
-        try:
-            if self.data_handler_thread.is_alive():
-                self.data_handler_thread.join(timeout=5)
-        except (OSError, RuntimeError, AttributeError):
-            pass
-
-        try:
-            if self.data_handler_thread.is_alive():
-                self.join_data_handler_thread.join(timeout=5)
-        except (OSError, RuntimeError, AttributeError):
-            pass
-
-        # Limpiar estructuras
-        try:
-            self.working_state_main.reset()
-            self.working_state_join.reset()
-        except Exception:
-            pass
-
-        logging.info(f"Joiner {self.joiner_type} cerrado correctamente.")
+                if len(self.received_shards.get(client_id, set())) >= getattr(
+                    self, "expected_shards", 1
+                ):
+                    with self.lock:
+                        self.working_state_main.mark_end_message_received(client_id)
+                        self.working_state_main.mark_sender_finished(client_id, "monitor")
+                        self.working_state_main.add_expected_chunks(
+                            client_id, data.get("total_chunks", 0)
+                        )
+    
+                    self._process_client_if_ready(client_id)
+                    self.barrier_forwarded.add(key)
+    
+        except Exception as e:
+            logging.error(
+                f"action: barrier_forward_error | type:{self.joiner_type} | error:{e}"
+            )
+    
+        def save_data(self, chunk) -> bool:
+            """
+            Guarda los datos para la tabla que debe joinearse.
+            """
+            client_id = chunk.client_id()
+            rows = chunk.rows
+            
+            self.working_state_main.add_data(client_id, rows)
+            self.working_state_main.add_chunk(client_id, chunk)
+            
+            return True
+    
+        def _process_client_if_ready(self, client_id: int):
+            """
+            Ejecuta apply/publish/cleanup si ya se recibieron todos los END esperados
+            y el join data está listo. Evita reprocesar clientes completados.
+            """
+            if self.working_state_main.is_client_completed(client_id):
+                return
+            if not (self.working_state_main.is_end_message_received(client_id) and self.is_ready_to_join_for_client(client_id)):
+                return
+    
+            logging.info(f"action: processing_client | type:{self.joiner_type} | client_id:{client_id} | reason:ready_and_end_received")
+            try:
+                logging.debug(f"action: starting_apply_for_client | type:{self.joiner_type} | client_id:{client_id}")
+                self.apply_for_client(client_id)
+                logging.debug(f"action: completed_apply_for_client | type:{self.joiner_type} | client_id:{client_id}")
+    
+                self._check_crash_point("CRASH_AFTER_PROCESS_BEFORE_COMMIT")
+    
+                logging.debug(f"action: starting_publish_results | type:{self.joiner_type} | client_id:{client_id}")
+                self.publish_results(client_id)
+                logging.debug(f"action: completed_publish_results | type:{self.joiner_type} | client_id:{client_id}")
+    
+                logging.debug(f"action: starting_clean_client_data | type:{self.joiner_type} | client_id:{client_id}")
+                self.clean_client_data(client_id)
+                logging.debug(f"action: completed_clean_client_data | type:{self.joiner_type} | client_id:{client_id}")
+    
+                self.working_state_main.mark_client_completed(client_id)
+                self.working_state_main.add_pending_end_message(client_id)
+                logging.debug(f"action: processing_complete | type:{self.joiner_type} | client_id:{client_id}")
+            except Exception as inner_e:
+                logging.error(f"action: error_in_join_processing | type:{self.joiner_type} | client_id:{client_id} | error:{inner_e} | error_type:{type(inner_e).__name__}")
+                raise inner_e
+    
+        def save_data_join(self, chunk) -> bool:
+            """
+            Guarda los datos para la tabla base necesaria para el join (tabla de productos).
+            """
+            client_id = chunk.client_id()
+            rows = chunk.rows
+            
+            # Guardar mapping item_id → nombre
+            for row in rows:
+                if hasattr(row, 'item_id') and hasattr(row, 'item_name'):
+                    self.working_state_join.add_join_data(client_id, row.item_id, row.item_name)
+                    logging.debug(f"action: save_join_data | type:{self.joiner_type} | item_id:{row.item_id} | name:{row.item_name}")
+                else:
+                    logging.warning(f"action: invalid_join_row | type:{self.joiner_type} | row_type:{type(row)} | missing_fields | has_item_id:{hasattr(row, 'item_id')} | has_item_name:{hasattr(row, 'item_name')}")
+                
+            logging.info(f"action: saved_join_data | type:{self.joiner_type} | client_id:{client_id} | products_loaded:{self.working_state_join.get_join_data_count(client_id)}")
+            return True
+    
+        def run(self):
+            logging.info(f"Joiner iniciado. Tipo: {self.joiner_type}")
+            self.handle_processing_recovery()
+            
+            self.data_handler_thread.start() 
+            self.join_data_handler_thread.start()
+    
+        def define_queues(self):
+            raise NotImplementedError("Subclasses must implement define_queues method")
+    
+        def save_data_join_fields(self, row: TableProcessRow, client_id):
+            raise NotImplementedError("Subclasses must implement save_data_join_fields method")
+        
+        def join_result(self, row: TableProcessRow, client_id):
+            raise NotImplementedError("Subclasses must implement join_result method")
+        
+        def publish_results(self):
+            raise NotImplementedError("Subclasses must implement publish_results method")
+        
+        def send_end_query_msg(self, client_id):
+            raise NotImplementedError("Subclasses must implement send_end_query_msg method")
+        
+        def is_ready_to_join_for_client(self, client_id):
+            """Check if we have received all necessary data and end messages for this client"""
+            # Check if we have data from maximizers for this client
+            has_maximizer_data = self.working_state_main.has_chunks(client_id)
+            # Check if we have received end message for this client  
+            has_end_message = self.working_state_main.is_end_message_received(client_id)
+            # Check if we haven't already processed this client
+            not_processed = not self.working_state_main.is_client_completed(client_id)
+            
+            # Detailed logging to debug join readiness
+            logging.debug(f"action: checking_join_readiness | type:{self.joiner_type} | client_id:{client_id} | has_maximizer_data:{has_maximizer_data} | has_end_message:{has_end_message} | not_processed:{not_processed}")
+            
+            if has_maximizer_data and has_end_message and not_processed:
+                logging.info(f"action: ready_to_join | client_id:{client_id} | has_data:{has_maximizer_data} | has_end:{has_end_message}")
+            else:
+                if not has_maximizer_data:
+                    logging.debug(f"action: not_ready_to_join | reason:no_maximizer_data | client_id:{client_id}")
+                if not has_end_message:
+                    logging.debug(f"action: not_ready_to_join | reason:no_end_message | client_id:{client_id}")
+                if not not_processed:
+                    logging.debug(f"action: not_ready_to_join | reason:already_processed | client_id:{client_id}")
+            
+            return has_maximizer_data and has_end_message and not_processed
+        
+        def apply_for_client(self, client_id):
+            """Apply join operation for a specific client"""
+            if not self.working_state_main.has_chunks(client_id):
+                logging.warning(f"action: no_data_to_join | client_id:{client_id}")
+                return
+                
+            chunks = self.working_state_main.get_chunks(client_id)
+            logging.debug(f"action: processing_chunks | type:{self.joiner_type} | client_id:{client_id} | chunks_count:{len(chunks)}")
+            
+            for chunk_idx, chunk in enumerate(chunks):
+    
+                logging.debug(f"action: processing_chunk | type:{self.joiner_type} | client_id:{client_id} | chunk_idx:{chunk_idx} | rows_count:{len(chunk.rows)}")
+                
+                for row_idx, row in enumerate(chunk.rows):
+                    try:
+                        logging.debug(f"action: joining_row | type:{self.joiner_type} | client_id:{client_id} | chunk_idx:{chunk_idx} | row_idx:{row_idx}")
+                        joined_row = self.join_result(row, client_id)
+                        
+                        self.working_state_main.add_result(client_id, joined_row)
+                        
+                        logging.debug(f"action: row_joined_successfully | type:{self.joiner_type} | client_id:{client_id} | chunk_idx:{chunk_idx} | row_idx:{row_idx}")
+                    except Exception as row_error:
+                        logging.error(f"action: error_joining_row | type:{self.joiner_type} | client_id:{client_id} | chunk_idx:{chunk_idx} | row_idx:{row_idx} | error:{row_error} | error_type:{type(row_error).__name__}")
+                        raise row_error
+            
+            logging.info(f"action: applied_join | client_id:{client_id} | joined_rows:{len(self.working_state_main.get_results(client_id))}")
+        
+        def clean_client_data(self, client_id):
+            """Clean client data after processing to prevent reprocessing"""
+            self.working_state_main.clean_client_data(client_id)
+            logging.info(f"action: client_data_cleaned | type:{self.joiner_type} | client_id:{client_id}")
+    
+        def reset_for_new_session(self):
+            """Reset joiner state for a new processing session (new client batch)"""
+            with self.lock:
+                self.working_state_main.reset()
+                logging.info(f"action: joiner_reset_for_new_session | type:{self.joiner_type}")
+    
+        def shutdown(self, signum=None, frame=None):
+            logging.info(f"SIGTERM recibido: cerrando joiner {self.joiner_type}")
+    
+            try:
+                if getattr(self, "data_receiver_timer", None):
+                    self.data_receiver_timer.cancel()
+            except Exception:
+                pass
+    
+            try:
+                if getattr(self, "data_join_receiver_timer", None):
+                    self.data_join_receiver_timer.cancel()
+            except Exception:
+                pass
+    
+            # Detener consumos
+            try:
+                self.data_receiver.stop_consuming()
+            except (OSError, RuntimeError, AttributeError):
+                pass
+            try:
+                self.data_join_receiver.stop_consuming()
+            except (OSError, RuntimeError, AttributeError):
+                pass
+            try:
+                self.middleware_coordination.stop_consuming()
+            except (OSError, RuntimeError, AttributeError):
+                pass
+    
+            # Cerrar conexiones
+            try:
+                self.data_receiver.close()
+            except (OSError, RuntimeError, AttributeError):
+                pass
+            try:
+                self.data_join_receiver.close()
+            except (OSError, RuntimeError, AttributeError):
+                pass
+            try:
+                self.data_sender.close()
+            except (OSError, RuntimeError, AttributeError):
+                pass
+            try:
+                self.middleware_coordination.close()
+            except (OSError, RuntimeError, AttributeError):
+                pass
+            try:
+                self.middleware_coordination.close()
+            except (OSError, RuntimeError, AttributeError):
+                pass
+    
+            # Detener bucle de manejo de datos
+            self.__running = False
+    
+            # Esperar hilos
+            try:
+                if self.data_handler_thread.is_alive():
+                    self.data_handler_thread.join(timeout=5)
+            except (OSError, RuntimeError, AttributeError):
+                pass
+    
+            try:
+                if self.data_handler_thread.is_alive():
+                    self.join_data_handler_thread.join(timeout=5)
+            except (OSError, RuntimeError, AttributeError):
+                pass
+    
+            # Limpiar estructuras
+            try:
+                self.working_state_main.reset()
+                self.working_state_join.reset()
+            except Exception:
+                pass
+    
+            logging.info(f"Joiner {self.joiner_type} cerrado correctamente.")

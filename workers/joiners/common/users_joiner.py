@@ -100,8 +100,10 @@ class UsersJoiner(Joiner):
             logging.info(f"action: no_query4_results_to_send | type:{self.joiner_type} | client_id:{client_id}")
 
     def run(self):
-        from .joiner import Joiner
-        Joiner.run(self)
+        logging.info(f"Joiner iniciado. Tipo: {self.joiner_type}")
+        self.handle_processing_recovery()
+        self.data_handler_thread.start()
+        self.join_data_handler_thread.start()
 
     def shutdown(self, signum=None, frame=None):
         # Delegate to base shutdown for consistent signal handling

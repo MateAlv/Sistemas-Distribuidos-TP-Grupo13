@@ -12,7 +12,8 @@ WORKDIR /workers/
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY workers/joiners/ ./joiners/
+# Copiamos todo el código de joiners (incluye common/joiner.py) y dependencias compartidas
+COPY workers/joiners/ /workers/joiners/
 COPY utils/ /workers/utils/
 COPY middleware/ /workers/middleware/
 
