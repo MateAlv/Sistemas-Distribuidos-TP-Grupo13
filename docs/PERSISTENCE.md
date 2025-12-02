@@ -46,14 +46,15 @@ x = mensaje original
 enviado = commit de procesamiento
 contador = estado del nodo
 
-service = PersistenceService()
+def __init__(self):
+    self.service = PersistenceService("/data/persistence/worker_1") # Recover Working State
+    self.recover_from_persistence()
 
-# 1. Restore State
-estado = estado.from_bytes(service.recover_working_state()) # restauro contadores
+def recover_from_persistence(self):
 
-# 2. Recover last processing chunk
+# 1. Recover last processing chunk
 # busco último valor x commiteado en disco si no fue enviado
-x = service.recover_last_processing_chunk() 
+x = self.service.recover_last_processing_chunk()  # Recover Last Processing Chunk
 
 if x:
     # Re-process if needed
@@ -64,34 +65,23 @@ if x:
         commit_working_state(self, estado.to_bytes, x.message_id())
     
     # Re-send
-    Mando_a_cola() # Enviar
+    send_to_queues(x)
     commit_send_ack(self, x.client_id(), x.message_id())
 ```
 
 ## Main Processing Loop (Pseudo-code)
 
 ```python
+def callback(x):
+    commit_processing_chunk(self, x)
+    results.append(x)
+
 while True:
     x = pop_from_queue()
-    
-    # Check if message was already acknowledged/processed
-    if message_acked(): # le mando al MessageChecker si lo recibio o no
-        commit_processing_chunk(self, x)
-        
-        apply(x) # Procesar
-        actualizar_estado(x)
-        
-        commit_working_state(self, estado.to_bytes, x.message_id())
-    else:
-        pass
-        
-    # Send ACK to RabbitMQ
-    mando_ACK_a_cola() 
-    
-    # Check if output was already sent
-    if not send_has_been_acknowledged(self, x.client_id(), x.message_id()):
-        Mando_a_cola() 
-        commit_send_ack(self, x.client_id(), x.message_id())
-    else:
-        pass
+    apply(x) # Procesar
+    actualizar_estado(x) # Registro de mensajes recibidos y no enviados
+    commit_working_state(self, estado.to_bytes, x.message_id())
+    # envio a todas las colas correspondientes 
+    send_to_queues(x)
+    commit_send_ack(self, x.client_id(), x.message_id())
 ```

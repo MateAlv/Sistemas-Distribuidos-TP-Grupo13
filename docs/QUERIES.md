@@ -6,6 +6,6 @@
 4. Fecha de cumpleaños de los 3 clientes que han hecho más compras durante 2024 y 2025, para cada sucursal.
 
 - Q1: FILTER_YEAR → FILTER_HOUR → FILTER_AMOUNT → server merge (QUERY_END).
-- Q2: FILTER_YEAR → AGG_PRODUCTS (sharded) → MAX partials → MAX absolute → JOIN_ITEMS → server.
+- Q2: FILTER_YEAR → AGG_PRODUCTS (sharded) → MAX absolute → JOIN_ITEMS → server.
 - Q3: FILTER_YEAR → FILTER_HOUR → AGG_TPV → JOIN_STORES_TPV → server.
-- Q4: FILTER_YEAR → AGG_PURCHASES → TOP3 partials → TOP3 absolute → JOIN_STORES_TOP3 → JOIN_USERS → server.
+- Q4: FILTER_YEAR → AGG_PURCHASES → TOP3 absolute → JOIN_STORES_TOP3 → JOIN_USERS → server.
