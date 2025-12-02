@@ -545,9 +545,13 @@ class Filter:
             elif self.filter_type == "amount":
                 converted_rows = [Query1ResultRow(tx.transaction_id, tx.final_amount) for tx in filtered_rows]
                 # Amount filter only sends to merge queue per client
-                for queue_name, queue in self.middleware_queue_sender.items():
+                queue_name = f"to_merge_data_{client_id}"
+                if queue_name in self.middleware_queue_sender:
+                    queue = self.middleware_queue_sender[queue_name]
                     logging.debug(f"action: sending_to_queue | type:{self.filter_type} | queue:{queue_name} | rows:{len(filtered_rows)/len(chunk.rows):.2%} | cli_id:{chunk.client_id()}")
                     queue.send(ResultChunk(ResultChunkHeader(client_id, ResultTableType.QUERY_1), converted_rows).serialize())
+                else:
+                    logging.error(f"action: queue_not_found | queue:{queue_name} | cli_id:{client_id}")
 
             logging.info(f"action: rows_sent | type:{self.filter_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()} | rows_out:{len(filtered_rows)}")
             # Se commitea el envío del chunk procesado

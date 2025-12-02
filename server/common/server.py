@@ -8,7 +8,9 @@ from collections import defaultdict
 from typing import Tuple, Optional
 from utils.communication.socket_utils import ensure_socket, recv_exact, sendall
 from utils.processing.process_batch_reader import ProcessBatchReader
+from utils.processing.process_batch_reader import ProcessBatchReader
 from utils.results.result_batch_reader import ResultBatchReader
+from utils.results.result_chunk import ResultChunk, ResultChunkHeader
 from utils.file_utils.file_chunk import FileChunk
 from utils.file_utils.table_type import TableType, ResultTableType
 from utils.eof_protocol.end_messages import MessageEnd, MessageQueryEnd
@@ -360,18 +362,16 @@ class Server:
             
             # Enrutar según el tipo de tabla
             table_type = process_chunk.table_type()
-            # Determinar shard de filtro year de forma determinística por message_id
-            def select_filter_shard(stage_shards: int, msg_id):
-                try:
-                    return (int(msg_id) % stage_shards) + 1
-                except Exception as e:
-                    key = (client_id, table_type, stage_shards)
-                    shard_counters[key] += 1
-                    logging.warning(f"action: shard_select_fallback | cli_id:{client_id} | table:{table_type} | reason:{e}")
-                    return (shard_counters[key] - 1) % stage_shards + 1
+            
+            # Determinar shard de filtro year de forma determinística por orden de chunk
+            def select_filter_shard(stage_shards: int):
+                key = (client_id, table_type)
+                idx = shard_counters[key]
+                shard_counters[key] += 1
+                return (idx % stage_shards) + 1
             
             if table_type == TableType.TRANSACTIONS or table_type == TableType.TRANSACTION_ITEMS:
-                shard_id = select_filter_shard(self.filter_year_shards, process_chunk.message_id())
+                shard_id = select_filter_shard(self.filter_year_shards)
                 queue_name = f"to_filter_year_shard_{shard_id}"
                 logging.debug("action: send_to_filter_year_shard | peer:%s | cli_id:%s | file:%s | table:%s | shard:%s | msg_id:%s",
                              peer, client_id, chunk.path(), table_type, shard_id, process_chunk.message_id())
@@ -479,6 +479,7 @@ class Server:
             ResultTableType.QUERY_3: None,
             ResultTableType.QUERY_4: None,
         }
+        processed_results = set()
 
         def callback(msg):
             results_for_client.append(msg)
@@ -516,16 +517,45 @@ class Server:
                                 self._send_batch_results_to_client(sock, client_id, chunks_received[query])
                                 chunks_received[query] = []
                     else:
+                        # ResultChunk
+                        # Use ResultBatchReader to deserialize the full chunk
                         result_chunk = ResultBatchReader.from_bytes(msg)
                         query = result_chunk.query_type()
-                        number_of_chunks_received[query] += 1
-                        chunks_received[query].append(result_chunk)
-                        logging.debug(f"action: result_receiver | client_id:{client_id} | rows:{len(result_chunk.rows)} | query:{query.name}")
+                        
+                        # Filter duplicates before adding
+                        new_rows = []
+                        for row in result_chunk.rows:
+                            # Assuming row has transaction_id or similar unique key.
+                            # For Q1: transaction_id. For others: might be store_id/user_id etc.
+                            # Use tuple of all fields as key if no explicit ID.
+                            if query == ResultTableType.QUERY_1:
+                                key = (query, row.transaction_id)
+                            else:
+                                # Fallback for other queries (using string rep or tuple)
+                                key = (query, str(row))
+                            
+                            if key not in processed_results:
+                                processed_results.add(key)
+                                new_rows.append(row)
+                            else:
+                                logging.debug(f"action: duplicate_result_ignored | query:{query} | key:{key}")
+
+                        if new_rows:
+                            # Create new header
+                            new_header = ResultChunkHeader(client_id, query)
+                            filtered_chunk = ResultChunk(new_header, new_rows)
+                            chunks_received[query].append(filtered_chunk)
+                            number_of_chunks_received[query] += 1
+                            logging.debug(f"action: result_receiver | client_id:{client_id} | rows:{len(new_rows)} | query:{query.name}")
+                        else:
+                            logging.debug(f"action: empty_chunk_after_dedup | client_id:{client_id} | query:{query.name}")
+                            # Still count the chunk as received because it was a valid protocol message.
+                            number_of_chunks_received[query] += 1
 
                         if len(chunks_received[query]) >= maximum_chunks:
                             self._send_batch_results_to_client(sock, client_id, chunks_received[query])
                             chunks_received[query] = []
-                            logging.debug(f"action: result_sent | client_id:{client_id} | rows:{len(result_chunk.rows)} | query:{query.name}")
+                            logging.debug(f"action: result_sent | client_id:{client_id} | query:{query.name}")
 
                         if expected_total_chunks[query] is not None and number_of_chunks_received[query] >= expected_total_chunks[query]:
                             all_data_received_per_query[query] = True
