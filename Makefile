@@ -56,6 +56,7 @@ up:
 
 test:
 	# Run the docker-compose setup
+	make down
 	make clean-results
 	-docker compose -f ${DOCKER} down -v --remove-orphans
 	-docker run --rm -v $(PWD)/data/persistence:/persistence alpine sh -c 'rm -rf /persistence/*'
