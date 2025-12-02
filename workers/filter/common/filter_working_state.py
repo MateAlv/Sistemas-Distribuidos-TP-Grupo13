@@ -92,8 +92,8 @@ class FilterWorkingState(WorkingState):
         total_received = self.get_total_chunks_received(client_id, table_type)
         total_not_sent = self.get_total_not_sent_chunks(client_id, table_type)
         logging.debug(f"Count: {total_processed}/{total_expected} (received:{total_received}, not_sent:{total_not_sent}) | cli_id:{client_id}")
-        # Cualquier instancia puede propagar END una vez que el total global coincide.
-        return total_expected == total_processed
+        # Propagar END una vez que se iguala o supera lo esperado (protege si el esperado quedó subestimado).
+        return total_processed >= total_expected
 
     def increase_received_chunks(self, client_id, table_type, filter_id, count):
         """Incrementa el número de chunks recibidos para un filtro específico"""
@@ -187,3 +187,9 @@ class FilterWorkingState(WorkingState):
                     obj.clear()
             except (OSError, RuntimeError, AttributeError):
                 pass
+
+    def is_processed(self, message_id):
+        return message_id in self.processed_ids
+
+    def mark_processed(self, message_id):
+        self.processed_ids.add(message_id)

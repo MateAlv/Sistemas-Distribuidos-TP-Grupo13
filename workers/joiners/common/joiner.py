@@ -18,6 +18,7 @@ from utils.protocol import (
     MSG_WORKER_STATS,
     MSG_BARRIER_FORWARD,
     DEFAULT_SHARD,
+    STAGE_AGG_TPV,
     STAGE_JOIN_ITEMS,
     STAGE_JOIN_STORES_TPV,
     STAGE_JOIN_STORES_TOP3,
@@ -72,7 +73,7 @@ class Joiner:
 
         # Persistence
         # Main persistence (Maximizer data)
-        base_dir = f"data/persistence/joiner_{self.joiner_type}_{self.id}" if hasattr(self, "id") else f"data/persistence/joiner_{self.joiner_type}"
+        base_dir = f"/data/persistence/joiner_{self.joiner_type}_{self.id}" if hasattr(self, "id") else f"/data/persistence/joiner_{self.joiner_type}"
         self.persistence_main = PersistenceService(directory=os.path.join(base_dir, "main"))
         
         # Join persistence (Server data)
@@ -330,25 +331,72 @@ class Joiner:
             data = json.loads(raw_msg)
             if data.get("type") != MSG_BARRIER_FORWARD:
                 return
+    
             stage = data.get("stage")
-            if stage != self.stage:
-                return
-            shard = data.get("shard", DEFAULT_SHARD)
-            if shard != DEFAULT_SHARD:
-                return
             client_id = data.get("client_id")
-            key = (client_id, stage, shard)
-            if key in self.barrier_forwarded:
-                return
-            logging.info(f"action: barrier_forward_received | type:{self.joiner_type} | stage:{stage} | client_id:{client_id}")
-            with self.lock:
-                self.working_state_main.mark_end_message_received(client_id)
-                self.working_state_main.mark_sender_finished(client_id, "monitor")
-                self.working_state_main.add_expected_chunks(client_id, data.get("total_chunks", 0))
-            self._process_client_if_ready(client_id)
-            self.barrier_forwarded.add(key)
+            shard = data.get("shard", DEFAULT_SHARD)
+    
+            # Para joiners no shardeados distintos de TPV, solo aceptamos global
+            if self.stage != STAGE_JOIN_STORES_TPV:
+                if stage != self.stage or shard != DEFAULT_SHARD:
+                    return
+    
+                key = (client_id, stage, shard)
+                if key in self.barrier_forwarded:
+                    return
+    
+                logging.info(
+                    f"action: barrier_forward_received | type:{self.joiner_type} "
+                    f"| stage:{stage} | client_id:{client_id}"
+                )
+    
+                with self.lock:
+                    self.working_state_main.mark_end_message_received(client_id)
+                    self.working_state_main.mark_sender_finished(client_id, "monitor")
+                    self.working_state_main.add_expected_chunks(
+                        client_id, data.get("total_chunks", 0)
+                    )
+    
+                self._process_client_if_ready(client_id)
+                self.barrier_forwarded.add(key)
+    
+            else:
+                # Joiner TPV: esperar barreras de todos los shards de agg_tpv
+                if stage != STAGE_AGG_TPV:
+                    return
+    
+                key = (client_id, stage, shard)
+                if key in self.barrier_forwarded:
+                    return
+    
+                logging.info(
+                    f"action: barrier_forward_received | type:{self.joiner_type} "
+                    f"| stage:{stage} | client_id:{client_id} | shard:{shard}"
+                )
+    
+                try:
+                    self.received_shards[client_id].add(shard)
+                except Exception:
+                    self.received_shards = getattr(self, "received_shards", {}) or {}
+                    self.received_shards.setdefault(client_id, set()).add(shard)
+    
+                if len(self.received_shards.get(client_id, set())) >= getattr(
+                    self, "expected_shards", 1
+                ):
+                    with self.lock:
+                        self.working_state_main.mark_end_message_received(client_id)
+                        self.working_state_main.mark_sender_finished(client_id, "monitor")
+                        self.working_state_main.add_expected_chunks(
+                            client_id, data.get("total_chunks", 0)
+                        )
+    
+                    self._process_client_if_ready(client_id)
+                    self.barrier_forwarded.add(key)
+    
         except Exception as e:
-            logging.error(f"action: barrier_forward_error | type:{self.joiner_type} | error:{e}")
+            logging.error(
+                f"action: barrier_forward_error | type:{self.joiner_type} | error:{e}"
+            )
 
     def save_data(self, chunk) -> bool:
         """
@@ -501,14 +549,14 @@ class Joiner:
         logging.info(f"SIGTERM recibido: cerrando joiner {self.joiner_type}")
 
         try:
-            if self.data_receiver_timer is not None:
-                self.stats_timer.cancel()
+            if getattr(self, "data_receiver_timer", None):
+                self.data_receiver_timer.cancel()
         except Exception:
             pass
 
         try:
-            if self.data_join_receiver_timer is not None:
-                self.consume_timer.cancel()
+            if getattr(self, "data_join_receiver_timer", None):
+                self.data_join_receiver_timer.cancel()
         except Exception:
             pass
 
