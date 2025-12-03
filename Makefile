@@ -23,6 +23,15 @@ default: docker-image
 
 all: docker-image
 
+init:
+	# Create results directory
+	mkdir -p .results
+	# Create persistence directory
+	mkdir -p data/persistence
+	# Download datasets
+	./scripts/generar-data.sh
+.PHONY: init
+
 docker-image:
 	# Server & Client
 	docker build -f ./server/Dockerfile -t "server:latest" ./server
@@ -47,10 +56,11 @@ build:
 
 up:
 	make clean-results
+	make down
 	-docker compose -f ${DOCKER} down -v --remove-orphans
 	-docker run --rm -v $(PWD)/data/persistence:/persistence alpine sh -c 'rm -rf /persistence/*'
 	python3  $(COMPOSE_SCRIPT) --config=${CONFIG}
-	docker compose -f ${DOCKER} up -d --build
+	docker compose -f ${DOCKER} up --build > logs.txt 2>&1
 .PHONY: docker-compose-up
 
 
