@@ -291,7 +291,8 @@ class Filter:
                 self._send_end_message(client_id, table_type, total_expected, total_not_sent)
 
     def send_filtered_rows(self, filtered_rows, chunk, client_id, table_type, message_id):
-         if filtered_rows:
+        
+        if filtered_rows:
             # Dispatch according to filter type and destination
             if self.filter_type == "year":
                 if table_type == TableType.TRANSACTIONS:
