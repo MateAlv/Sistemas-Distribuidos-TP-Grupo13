@@ -533,10 +533,13 @@ class Aggregator:
                     f"DEBUG: aggregator_data_sent | type:{self.aggregator_type} | agg_id:{self.aggregator_id} "
                     f"| client_id:{client_id} | table_type:{table_type} | payload_size:{len(payload)}"
                 )
-                self.middleware_data_exchange.send(data_msg.encode())
+                if self.aggregator_type != "TPV":
+                    self.middleware_data_exchange.send(data_msg.encode())
+                else:
+                    logging.debug("DEBUGGING_QUERY_3 | skip_fanout_tpv_peers")
                 if self.aggregator_type == "TPV":
                     logging.info(
-                        f"DEBUGGING_QUERY_4 | agg_tpv_payload_sent | cli_id:{client_id} | rows:{len(aggregated_chunk.rows)} | accumulated_keys:{len(self.working_state.get_tpv_accumulator(client_id))}"
+                        f"DEBUGGING_QUERY_3 | agg_tpv_payload_sent | cli_id:{client_id} | rows:{len(aggregated_chunk.rows)} | accumulated_keys:{len(self.working_state.get_tpv_accumulator(client_id))}"
                     )
                 self.persistence.commit_send_ack(client_id, chunk.message_id())
             except Exception as e:
@@ -752,6 +755,11 @@ class Aggregator:
         client_id = data_msg.client_id
         payload = data_msg.payload
 
+        if self.aggregator_type == "TPV":
+            # Skip remote fanout for TPV to avoid duplicate accumulation
+            logging.debug("DEBUGGING_QUERY_3 | skip_remote_tpv_fanout")
+            return
+
         if self.aggregator_type == "PRODUCTS":
             rows = []
             for item_id, year, month, quantity, subtotal in payload.get("products", []):
@@ -894,7 +902,7 @@ class Aggregator:
         # Send to TPV Maximizer
         queue = self.middleware_queue_sender["to_absolute_tpv_max"]
         logging.info(
-            f"DEBUGGING_QUERY_4 | agg_tpv_publish_final | cli_id:{client_id} | rows:{len(rows)} | keys:{len(data)} | queue:{queue.queue_name}"
+            f"DEBUGGING_QUERY_3 | agg_tpv_publish_final | cli_id:{client_id} | rows:{len(rows)} | keys:{len(data)} | queue:{queue.queue_name}"
         )
         queue.send(chunk.serialize())
         logging.info(f"action: sent_tpv_chunk | client_id:{client_id} | rows:{len(chunk.rows)}")

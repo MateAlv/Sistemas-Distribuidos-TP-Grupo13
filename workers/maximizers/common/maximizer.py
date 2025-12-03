@@ -326,13 +326,13 @@ class Maximizer:
         if self.maximizer_type == "TPV":
             prev_keys = len(self.working_state.get_tpv_results(client_id))
             logging.info(
-                f"DEBUGGING_QUERY_4 | max_tpv_apply_before | cli_id:{client_id} | rows_in:{len(chunk.rows)} | keys_before:{prev_keys}"
+                f"DEBUGGING_QUERY_3 | max_tpv_apply_before | cli_id:{client_id} | rows_in:{len(chunk.rows)} | keys_before:{prev_keys}"
             )
         self.apply(client_id, chunk)
         if self.maximizer_type == "TPV":
             post_keys = len(self.working_state.get_tpv_results(client_id))
             logging.info(
-                f"DEBUGGING_QUERY_4 | max_tpv_apply_after | cli_id:{client_id} | keys_after:{post_keys}"
+                f"DEBUGGING_QUERY_3 | max_tpv_apply_after | cli_id:{client_id} | keys_after:{post_keys}"
             )
 
         self._check_crash_point("CRASH_AFTER_PROCESS_BEFORE_COMMIT")
@@ -807,7 +807,7 @@ class Maximizer:
         try:
             self.data_sender.send(chunk.serialize())
             logging.info(
-                f"action: publish_tpv_results | client_id:{client_id} | rows:{len(output_rows)} | keys:{len(results)} | queue:{self.data_sender.queue_name} | msg_id:{msg_id} | DEBUGGING_QUERY_4"
+                f"action: publish_tpv_results | client_id:{client_id} | rows:{len(output_rows)} | keys:{len(results)} | queue:{self.data_sender.queue_name} | msg_id:{msg_id} | DEBUGGING_QUERY_3"
             )
             return 1
         except Exception as e:

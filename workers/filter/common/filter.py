@@ -525,7 +525,7 @@ class Filter:
                     self.middleware_queue_sender[queue_name].send(ProcessChunk(chunk.header, filtered_rows).serialize())
                     self.shard_chunks_sent[(STAGE_AGG_TPV, client_id, table_type, shard_id)] += 1
                     logging.info(
-                        f"DEBUGGING_QUERY_4 | filter_hour_to_agg_tpv | cli_id:{client_id} | shard:{shard_id} | rows_out:{len(filtered_rows)} | shard_total:{self.shard_chunks_sent[(STAGE_AGG_TPV, client_id, table_type, shard_id)]}"
+                        f"DEBUGGING_QUERY_3 | filter_hour_to_agg_tpv | cli_id:{client_id} | shard:{shard_id} | rows_out:{len(filtered_rows)} | shard_total:{self.shard_chunks_sent[(STAGE_AGG_TPV, client_id, table_type, shard_id)]}"
                     )
 
             elif self.filter_type == "amount":

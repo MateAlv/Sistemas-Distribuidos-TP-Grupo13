@@ -550,7 +550,7 @@ class Server:
                             number_of_chunks_received[query] += 1
                             if query == ResultTableType.QUERY_3:
                                 logging.info(
-                                    f"DEBUGGING_QUERY_4 | server_result_chunk | client_id:{client_id} | query:{query.name} | rows:{len(new_rows)} | chunks_received:{number_of_chunks_received[query]}"
+                                    f"DEBUGGING_QUERY_3 | server_result_chunk | client_id:{client_id} | query:{query.name} | rows:{len(new_rows)} | chunks_received:{number_of_chunks_received[query]}"
                                 )
                             logging.debug(f"action: result_receiver | client_id:{client_id} | rows:{len(new_rows)} | query:{query.name}")
                         else:
