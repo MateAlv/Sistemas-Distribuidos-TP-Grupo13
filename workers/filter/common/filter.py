@@ -417,6 +417,9 @@ class Filter:
                  for i in range(1, target_shards + 1):
                      shard_total = self.shard_chunks_sent.get((next_stage, client_id, table_type, i), 0)
                      try:
+                        logging.info(
+                            f"action: sending_expected_for_next_stage | stage:{next_stage} | shard:{i} | cli_id:{client_id} | expected_chunks:{shard_total} | sender_filter:{self.id}"
+                        )
                         payload = {
                             "type": MSG_WORKER_STATS,
                             "id": str(self.id),

@@ -32,30 +32,41 @@ class BarrierTracker:
         # Aggregator Specific
         self.agg_expected = None
         self.agg_processed = 0
+        self.expected_senders = set()
 
-    def apply_expected(self, expected):
+    def apply_expected(self, expected, sender_id=None, expected_filters=None):
         """Updates expected count from upstream (e.g. Filters telling Aggregators)."""
         if expected is not None:
             # Use max to avoid regression if out-of-order messages arrive
             self.agg_expected = max(self.agg_expected or 0, expected)
-            logging.info(f"Aggregator Barrier Expected Chunks to be Processed: {self.agg_expected}")
+            if sender_id is not None:
+                self.expected_senders.add(str(sender_id))
+            # Always log with a clear counter
+            expected_total = expected_filters if expected_filters is not None else "?"
+            logging.info(
+                f"Aggregator Barrier Expected update from {sender_id}: "
+                f"{len(self.expected_senders)}/{expected_total} reports | agg_expected:{self.agg_expected}"
+            )
 
-    def apply_stats(self, chunks, processed, expected=None):
+    def apply_stats(self, chunks, processed, expected=None, sender_id=None, expected_filters=None):
         """Updates stats from a worker."""
         if expected is not None:
-            self.apply_expected(expected)
+            self.apply_expected(expected, sender_id, expected_filters)
             
         # For Aggregators, 'processed' is what matters against 'agg_expected'
         self.agg_processed = max(self.agg_processed, processed)
         logging.info(f"Aggregator Barrier Processed Chunks so far: {self.agg_processed}")
 
-    def apply_end(self, sender_id, chunks):
+    def apply_end(self, sender_id, chunks, expected_filters=None):
         """Handles an END message."""
         if sender_id not in self.end_sender_ids:
             self.received_end += 1
             self.end_sender_ids.add(sender_id)
         self.total_chunks += chunks
-        logging.info(f"Aggregator Barrier Received END from {sender_id}: {self.received_end}/{expected_filters}")
+        if expected_filters:
+            logging.info(f"Aggregator Barrier Received END from {sender_id}: {self.received_end}/{expected_filters}")
+        else:
+            logging.info(f"Aggregator Barrier Received END from {sender_id}: {self.received_end}")
 
     def is_complete(self, stage_type, now, forward_interval, expected_filters):
         """
@@ -87,6 +98,7 @@ class BarrierTracker:
             'forwarded': self.forwarded,
             'agg_expected': self.agg_expected,
             'agg_processed': self.agg_processed,
+            'expected_senders': list(self.expected_senders),
         }
 
     @classmethod
@@ -99,6 +111,7 @@ class BarrierTracker:
         t.forwarded = data.get('forwarded', False)
         t.agg_expected = data.get('agg_expected')
         t.agg_processed = data.get('agg_processed', 0)
+        t.expected_senders = set(data.get('expected_senders', []))
         # Ignore legacy fields if present in old state files
         return t
 
@@ -292,8 +305,6 @@ class MonitorNode:
                         logging.info(f"New Leader elected: {sender_id}")
                         logging.info(f"Accepting {sender_id} as Coordinator.")
             elif msg_type in (MSG_WORKER_END, MSG_WORKER_STATS):
-                if not self.is_leader:
-                    return
                 self._handle_barrier_message(data)
 
         except Exception as e:
@@ -387,24 +398,38 @@ class MonitorNode:
             chunks = data.get('chunks', 0)
             msg_type = data.get('type')
             
+            # Determine upstream expected count for logging (filters feeding each aggregator stage)
+            upstream_count = 0
+            if stage == STAGE_AGG_PRODUCTS:
+                upstream_count = self.stage_expected.get(STAGE_FILTER_YEAR, 1)
+            elif stage == STAGE_AGG_PURCHASES:
+                upstream_count = self.stage_expected.get(STAGE_FILTER_YEAR, 1)
+            elif stage == STAGE_AGG_TPV:
+                upstream_count = self.stage_expected.get(STAGE_FILTER_HOUR, 1)
+            
             # Only process Aggregator stages
             if stage not in [STAGE_AGG_PRODUCTS, STAGE_AGG_TPV, STAGE_AGG_PURCHASES]:
                 return
 
-            logging.info(f"Processing barrier message: client={client_id}, stage={stage}, shard={shard}, type={msg_type}, chunks={chunks}, processed={data.get('processed')}, expected={data.get('expected')}")
+            logging.info(
+                f"Processing barrier message: client={client_id}, stage={stage}, shard={shard}, "
+                f"type={msg_type}, chunks={chunks}, processed={data.get('processed')}, "
+                f"expected={data.get('expected')} | upstream_expected_filters:{upstream_count}"
+            )
 
             with self.state.lock:
                 tracker = self.state.get_tracker(client_id, stage, shard)
                 
                 if msg_type == MSG_WORKER_END:
-                    tracker.apply_end(sender, chunks)
+                    tracker.apply_end(sender, chunks, upstream_count)
                 elif msg_type == MSG_WORKER_STATS:
                     processed = data.get('processed', chunks) 
                     expected = data.get('expected')
-                    tracker.apply_stats(chunks, processed, expected)
+                    tracker.apply_stats(chunks, processed, expected, sender_id=sender, expected_filters=upstream_count)
                     
                     logging.info(f"Tracker Updated | client:{client_id} | stage:{stage} | shard:{shard} | "
                                  f"AggProcessed:{tracker.agg_processed} | AggExpected:{tracker.agg_expected} | "
+                                 f"ExpectedReports:{len(tracker.expected_senders)}/{upstream_count} | "
                                  f"Ends:{tracker.received_end}")
                 
             self._save_state()
