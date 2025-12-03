@@ -64,16 +64,6 @@ class Filter:
         # Track how many chunks we actually sent to each shard so END carries correct per-shard expected count
         # Key: (stage, client_id, table_type, shard_id) -> chunks_sent
         self.shard_chunks_sent = defaultdict(int)
-        # Global dedup across replicas per filter type
-        self.global_dedup_path = f"/data/persistence/filter_{self.filter_type}_global_processed"
-        self.global_processed_ids = set()
-        try:
-            if os.path.exists(self.global_dedup_path):
-                with open(self.global_dedup_path, "r", encoding="utf-8") as fh:
-                    for line in fh:
-                        self.global_processed_ids.add(line.strip())
-        except Exception as e:
-            logging.warning(f"action: global_dedup_load_failed | type:{self.filter_type} | error:{e}")
 
         self.middleware_end_exchange = MessageMiddlewareExchange("rabbitmq", 
                                                                  f"end_exchange_filter_{self.filter_type}", 
@@ -111,11 +101,25 @@ class Filter:
                      )
 
         logging.info("Verificando recuperación de procesamiento previo")
-        self.persistence_service = PersistenceService(f"/data/persistence/filter_{self.filter_type}_{self.id}")
+        # Support PERSISTENCE_DIR for testing (defaults to /data/persistence for production)
+        persistence_dir = os.getenv("PERSISTENCE_DIR", "/data/persistence")
+        self.persistence_service = PersistenceService(f"{persistence_dir}/filter_{self.filter_type}_{self.id}")
         self.handle_processing_recovery()
 
     def handle_processing_recovery(self):
 
+        # First, recover the working state (processed_ids, global_processed_ids, etc.)
+        recovered_state_bytes = self.persistence_service.recover_working_state()
+        if recovered_state_bytes:
+            try:
+                # Deserialize and restore working state
+                self.working_state = self.working_state.__class__.from_bytes(recovered_state_bytes)
+                logging.info(f"Working state recovered: {len(self.working_state.processed_ids)} processed chunks, "
+                           f"{len(self.working_state.global_processed_ids)} global processed")
+            except Exception as e:
+                logging.warning(f"Could not recover working state: {e}")
+        
+        # Then, recover any last processing chunk that was interrupted
         last_processing_chunk = self.persistence_service.recover_last_processing_chunk()
 
         if last_processing_chunk:
@@ -126,8 +130,8 @@ class Filter:
             message_id = last_processing_chunk.message_id()
 
             filtered_rows = self.process_chunk(last_processing_chunk)
-            # Se actualiza el working state según si el chunk fue enviado o no
-            if self.persistence_service.process_has_been_counted(last_processing_chunk):
+            # Se actualiza el working state solo si el chunk NO fue contado previamente
+            if not self.persistence_service.process_has_been_counted(last_processing_chunk.message_id()):
                 if filtered_rows:
                     self.working_state.increase_received_chunks(client_id, table_type, self.id, 1)
                 else:
@@ -182,11 +186,14 @@ class Filter:
         while self.__running:
 
 
-            try:
-                self.stats_timer = self.middleware_end_exchange.connection.call_later(TIMEOUT, stats_stop)
-                self.middleware_end_exchange.start_consuming(stats_callback)
-            except (OSError, RuntimeError, MessageMiddlewareMessageError) as e:
-                logging.error(f"Error en consumo: {e}")
+            # Skip end_exchange consumption in test mode (no downstream workers)
+            test_mode = os.getenv("TEST_MODE", "false").lower() == "true"
+            if not test_mode:
+                try:
+                    self.stats_timer = self.middleware_end_exchange.connection.call_later(TIMEOUT, stats_stop)
+                    self.middleware_end_exchange.start_consuming(stats_callback)
+                except (OSError, RuntimeError, MessageMiddlewareMessageError) as e:
+                    logging.error(f"Error en consumo: {e}")
 
             try:
                 self.consume_timer = self.middleware_queue_receiver.connection.call_later(TIMEOUT, stop)
@@ -194,11 +201,13 @@ class Filter:
             except (OSError, RuntimeError, MessageMiddlewareMessageError) as e:
                  logging.error(f"Error en consumo: {e}")
 
-            try:
-                self.coord_timer = self.middleware_coordination.connection.call_later(TIMEOUT, coord_stop)
-                self.middleware_coordination.start_consuming(coord_callback)
-            except (OSError, RuntimeError, MessageMiddlewareMessageError) as e:
-                logging.error(f"Error en consumo coordination: {e}")
+            # Skip coordination exchange in test mode (no coordination infrastructure)
+            if not test_mode:
+                try:
+                    self.coord_timer = self.middleware_coordination.connection.call_later(TIMEOUT, coord_stop)
+                    self.middleware_coordination.start_consuming(coord_callback)
+                except (OSError, RuntimeError, MessageMiddlewareMessageError) as e:
+                    logging.error(f"Error en consumo coordination: {e}")
 
             while stats_results:
 
@@ -250,7 +259,7 @@ class Filter:
             logging.info(f"action: duplicate_chunk_ignored | message_id:{msg_id}")
             return
         # Global dedup across replicas per filter type
-        if msg_id_str in self.global_processed_ids:
+        if msg_id_str in self.working_state.global_processed_ids:
             logging.info(f"action: global_duplicate_chunk_ignored | message_id:{msg_id}")
             return
 
@@ -265,17 +274,11 @@ class Filter:
 
         # Se commitea el working state
         self.working_state.processed_ids.add(msg_id)
+        self.working_state.global_processed_ids.add(msg_id_str)
         
         # Crash point for testing: before commit_working_state
         if os.getenv("CRASH_POINT") == "CRASH_BEFORE_COMMIT_WORKING_STATE":
             raise SystemExit("Simulated crash before commit_working_state")
-
-        try:
-            self.global_processed_ids.add(msg_id_str)
-            with open(self.global_dedup_path, "a", encoding="utf-8") as fh:
-                fh.write(f"{msg_id_str}\n")
-        except Exception as e:
-            logging.warning(f"action: global_dedup_save_failed | type:{self.filter_type} | message_id:{msg_id} | error:{e}")
         self.persistence_service.commit_working_state(self.working_state.to_bytes(), msg_id)
 
         # 4. Send to next stage (only if there are filtered rows)

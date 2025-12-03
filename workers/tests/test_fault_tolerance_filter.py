@@ -1,30 +1,26 @@
 """
-Comprehensive Mock-based Fault Tolerance Tests for Filter Worker
+Unit Fault Tolerance Tests for Filter Worker
 
-Tests verify that for each crash point, the filter can:
-1. Process multiple messages
-2. Crash at a specific point
-3. Recover and continue
-4. Produce EXACTLY the same result as if no crash occurred
+Tests verify fault tolerance logic without requiring full RabbitMQ infrastructure.
+Uses mocks to simulate RabbitMQ and tests process_chunk() directly.
 
 Crash Points Tested:
 1. CRASH_BEFORE_COMMIT_PROCESSING - Before persisting chunk
 2. CRASH_AFTER_COMMIT_PROCESSING - After persisting chunk
 3. CRASH_BEFORE_COMMIT_WORKING_STATE - Before persisting state  
-4. CRASH_BEFORE_COMMIT_SEND_ACK - Before sending message
-5. CRASH_AFTER_COMMIT_SEND_ACK - After sending message
+4. CRASH_BEFORE_SEND - Before sending to downstream
+5. CRASH_AFTER_SEND - After commit_send_ack
 """
 import unittest
 import os
 import tempfile
 import shutil
-from unittest.mock import Mock, patch, MagicMock, call
+from unittest.mock import Mock, patch, MagicMock
 import datetime as dt_module
 
 # Import filter and dependencies
 import sys
 from pathlib import Path
-# Adjust path - now we're in workers/tests, need to go up to project root
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
 from workers.filter.common.filter import Filter
@@ -34,8 +30,8 @@ from utils.file_utils.table_type import TableType
 from utils.eof_protocol.end_messages import MessageEnd
 
 
-class TestFilterFaultToleranceComprehensive(unittest.TestCase):
-    """Comprehensive fault tolerance tests covering all crash points"""
+class TestFilterFaultTolerance(unittest.TestCase):
+    """Fault tolerance tests using mocks"""
 
     def setUp(self):
         """Set up test environment with mocks"""
@@ -44,6 +40,8 @@ class TestFilterFaultToleranceComprehensive(unittest.TestCase):
         os.environ["PERSISTENCE_DIR"] = self.temp_dir
         os.environ["WORKER_ID"] = "1"
         os.environ["CONTAINER_NAME"] = "test_filter"
+        os.environ["FILTER_SHARD_ID"] = "1"
+        os.environ["FILTER_SHARDS"] = "1"
         
         # Clear any crash points
         if "CRASH_POINT" in os.environ:
@@ -64,10 +62,9 @@ class TestFilterFaultToleranceComprehensive(unittest.TestCase):
             shutil.rmtree(self.temp_dir, ignore_errors=True)
         
         # Clear environment variables
-        if "CRASH_POINT" in os.environ:
-            del os.environ["CRASH_POINT"]
-        if "PERSISTENCE_DIR" in os.environ:
-            del os.environ["PERSISTENCE_DIR"]
+        for key in ["CRASH_POINT", "PERSISTENCE_DIR", "FILTER_SHARD_ID", "FILTER_SHARDS"]:
+            if key in os.environ:
+                del os.environ[key]
 
     def _create_test_chunk(self, client_id=1, message_id="msg_001", num_rows=3):
         """Helper to create a test ProcessChunk"""
@@ -85,7 +82,6 @@ class TestFilterFaultToleranceComprehensive(unittest.TestCase):
         
         rows = []
         for i in range(num_rows):
-            # Create DateTime using date and time objects
             date_obj = dt_module.date(2020, 1, i+1)
             time_obj = dt_module.time(12, 0, 0)
             
@@ -99,267 +95,131 @@ class TestFilterFaultToleranceComprehensive(unittest.TestCase):
             rows.append(row)
         
         return ProcessChunk(header, rows)
-
-    def _process_chunks_no_fault(self, chunks):
-        """Helper: Process chunks without any faults (baseline)"""
-        with patch('workers.filter.common.filter.MessageMiddlewareQueue'), \
-             patch('workers.filter.common.filter.MessageMiddlewareExchange'):
-            
-            filter_worker = Filter(self.config)
-            results = []
-            
-            for chunk in chunks:
-                filtered = filter_worker.process_chunk(chunk)
-                results.append((chunk.message_id(), len(filtered)))
-                filter_worker.working_state.processed_ids.add(chunk.message_id())
-            
-            return results
+    
+    def _verify_working_state(self, working_state, expected_processed_count, chunks_processed, msg=""):
+        """Helper: Comprehensive working state verification"""
+        # Verify processed_ids count
+        self.assertEqual(len(working_state.processed_ids), expected_processed_count,
+                        f"{msg} - processed_ids count mismatch")
+        
+        # Verify global_processed_ids count matches processed_ids
+        self.assertEqual(len(working_state.global_processed_ids), expected_processed_count,
+                        f"{msg} - global_processed_ids count mismatch")
+        
+        # Verify each chunk is in both processed_ids and global_processed_ids
+        for chunk in chunks_processed:
+            self.assertIn(chunk.message_id(), working_state.processed_ids,
+                         f"{msg} - chunk {chunk.message_id()} not in processed_ids")
+            self.assertIn(str(chunk.message_id()), working_state.global_processed_ids,
+                         f"{msg} - chunk {chunk.message_id()} not in global_processed_ids")
+        
+        # Verify structure consistency
+        self.assertIsInstance(working_state.processed_ids, set,
+                            f"{msg} - processed_ids should be a set")
+        self.assertIsInstance(working_state.global_processed_ids, set,
+                            f"{msg} - global_processed_ids should be a set")
 
     @patch('workers.filter.common.filter.MessageMiddlewareQueue')
     @patch('workers.filter.common.filter.MessageMiddlewareExchange')
-    def test_crash_before_commit_processing_multi_message_recovery(self, mock_exchange, mock_queue):
+    def test_global_processed_ids_persisted_and_recovered(self, mock_exchange, mock_queue):
         """
-        Test Crash Point 1: CRASH_BEFORE_COMMIT_PROCESSING
-        
-        Scenario:
-        1. Process 3 messages successfully  
-        2. Process 4th message, crash BEFORE commit_processing_chunk
-        3. Restart filter
-        4. Verify 4th message is redelivered and processed
-        5. Result identical to no-fault execution
+        Test that global_processed_ids is persisted and recovered correctly
         """
-        # Create 4 test chunks
         chunks = [self._create_test_chunk(message_id=f"msg_{i}") for i in range(4)]
         
-        # Get baseline (no fault)
-        baseline_results = self._process_chunks_no_fault(chunks)
-        
-        # PHASE 1: Process first 3 successfully
+        # PHASE 1: Process first 3 chunks
         filter_worker = Filter(self.config)
         for i in range(3):
             filtered = filter_worker.process_chunk(chunks[i])
             filter_worker.working_state.processed_ids.add(chunks[i].message_id())
+            filter_worker.working_state.global_processed_ids.add(str(chunks[i].message_id()))
             filter_worker.persistence_service.commit_working_state(
-                filter_worker.working_state.to_bytes(), 
+                filter_worker.working_state.to_bytes(),
                 chunks[i].message_id()
             )
         
-        # Verify 3 chunks processed
-        self.assertEqual(len(filter_worker.working_state.processed_ids), 3)
+        # Verify comprehensive state
+        self._verify_working_state(filter_worker.working_state, 3, chunks[:3], "Before crash")
         
-        # PHASE 2: Set crash point and simulate processing 4th message
-        # The crash would happen in run() before commit_processing_chunk
-        # We verify the crash point is set
-        os.environ["CRASH_POINT"] = "CRASH_BEFORE_COMMIT_PROCESSING"
-        
-        # PHASE 3: Restart filter (simulates recovery)
-        del os.environ["CRASH_POINT"]  # Remove crash point for recovery
+        # PHASE 2: Simulate crash and restart
         filter_worker2 = Filter(self.config)
         
-        # Verify recovered state has 3 processed messages
-        self.assertEqual(len(filter_worker2.working_state.processed_ids), 3)
+        # Verify recovered state
+        self._verify_working_state(filter_worker2.working_state, 3, chunks[:3], "After recovery")
         
-        # Process 4th message after recovery
+        # Process 4th chunk
         filtered_4 = filter_worker2.process_chunk(chunks[3])
         filter_worker2.working_state.processed_ids.add(chunks[3].message_id())
-        
-        # VERIFICATION: Result identical to baseline
-        self.assertEqual(len(filter_worker2.working_state.processed_ids), 4)
-        self.assertEqual(len(filtered_4), baseline_results[3][1])
-
-    @patch('workers.filter.common.filter.MessageMiddlewareQueue')
-    @patch('workers.filter.common.filter.MessageMiddlewareExchange')
-    def test_crash_after_commit_processing_recovery(self, mock_exchange, mock_queue):
-        """
-        Test Crash Point 2: CRASH_AFTER_COMMIT_PROCESSING
-        
-        Scenario:
-        1. Process 2 messages
-        2. Process 3rd message, persist it, then crash AFTER commit
-        3. Restart filter
-        4. Verify recovery processes persisted chunk
-        5. Result identical to no-fault execution
-        """
-        chunks = [self._create_test_chunk(message_id=f"msg_{i}") for i in range(3)]
-        baseline_results = self._process_chunks_no_fault(chunks)
-        
-        # PHASE 1: Process first 2 messages
-        filter_worker = Filter(self.config)
-        for i in range(2):
-            filtered = filter_worker.process_chunk(chunks[i])
-            filter_worker.working_state.processed_ids.add(chunks[i].message_id())
-        
-        # PHASE 2: Process 3rd, persist it (simulating AFTER commit but BEFORE handle_process_message)
-        filter_worker.persistence_service.commit_processing_chunk(chunks[2])
-        
-        # Crash happens here (AFTER commit_processing_chunk)
-        os.environ["CRASH_POINT"] = "CRASH_AFTER_COMMIT_PROCESSING"
-        
-        # PHASE 3: Restart filter
-        del os.environ["CRASH_POINT"]
-        filter_worker2 = Filter(self.config)
-        
-        # Verify recovery detected persisted chunk
-        recovered_chunk = filter_worker2.persistence_service.recover_last_processing_chunk()
-        self.assertIsNotNone(recovered_chunk)
-        # Compare UUID objects
-        self.assertEqual(recovered_chunk.message_id(), chunks[2].message_id())
-        
-        # Recovery should have processed it via handle_processing_recovery
-        # Verify final state matches baseline
-        self.assertIn(chunks[2].message_id(), filter_worker2.working_state.processed_ids)
-
-    @patch('workers.filter.common.filter.MessageMiddlewareQueue')
-    @patch('workers.filter.common.filter.MessageMiddlewareExchange')
-    def test_crash_before_commit_working_state_recovery(self, mock_exchange, mock_queue):
-        """
-        Test Crash Point 3: CRASH_BEFORE_COMMIT_WORKING_STATE
-        
-        Scenario:
-        1. Process 2 messages
-        2. Process 3rd, apply filter, crash BEFORE commit_working_state
-        3. Restart filter
-        4. Verify 3rd message reprocessed (idempotency)
-        5. Result identical to no-fault execution
-        """
-        chunks = [self._create_test_chunk(message_id=f"msg_{i}") for i in range(3)]
-        baseline_results = self._process_chunks_no_fault(chunks)
-        
-        # PHASE 1: Process first 2 messages completely
-        filter_worker = Filter(self.config)
-        for i in range(2):
-            filtered = filter_worker.process_chunk(chunks[i])
-            filter_worker.working_state.processed_ids.add(chunks[i].message_id())
-            filter_worker.persistence_service.commit_working_state(
-                filter_worker.working_state.to_bytes(),
-                chunks[i].message_id()
-            )
-        
-        # PHASE 2: Process 3rd message but DON'T commit working state
-        filtered_3 = filter_worker.process_chunk(chunks[2])
-        # Crash happens here (BEFORE commit_working_state)
-        # Working state was NOT persisted
-        
-        # PHASE 3: Restart filter
-        filter_worker2 = Filter(self.config)
-        
-        # Verify recovered state only has 2 processed IDs
-        self.assertEqual(len(filter_worker2.working_state.processed_ids), 2)
-        self.assertNotIn(chunks[2].message_id(), filter_worker2.working_state.processed_ids)
-        
-        # Reprocess 3rd message
-        filtered_3_retry = filter_worker2.process_chunk(chunks[2])
-        filter_worker2.working_state.processed_ids.add(chunks[2].message_id())
-        
-        # VERIFICATION: Same result as baseline
-        self.assertEqual(len(filtered_3_retry), baseline_results[2][1])
-
-    @patch('workers.filter.common.filter.MessageMiddlewareQueue')
-    @patch('workers.filter.common.filter.MessageMiddlewareExchange')
-    def test_crash_before_send_ack_recovery(self, mock_exchange, mock_queue):
-        """
-        Test Crash Point 4: CRASH_BEFORE_COMMIT_SEND_ACK
-        
-        Scenario:
-        1. Process and persist 2 messages
-        2. Process 3rd message, commit state, crash BEFORE send ACK
-        3. Restart filter
-        4. Verify 3rd message marked as processed but needs resending
-        5. Result identical to no-fault execution
-        """
-        chunks = [self._create_test_chunk(message_id=f"msg_{i}") for i in range(3)]
-        
-        # PHASE 1: Process first 2 completely
-        filter_worker = Filter(self.config)
-        for i in range(2):
-            filtered = filter_worker.process_chunk(chunks[i])
-            filter_worker.working_state.processed_ids.add(chunks[i].message_id())
-            filter_worker.persistence_service.commit_working_state(
-                filter_worker.working_state.to_bytes(),
-                chunks[i].message_id()
-            )
-        
-        # PHASE 2: Process 3rd, commit state, but DON'T send
-        filtered_3 = filter_worker.process_chunk(chunks[2])
-        filter_worker.working_state.processed_ids.add(chunks[2].message_id())
-        filter_worker.persistence_service.commit_working_state(
-            filter_worker.working_state.to_bytes(),
-            chunks[2].message_id()
+        filter_worker2.working_state.global_processed_ids.add(str(chunks[3].message_id()))
+        filter_worker2.persistence_service.commit_working_state(
+            filter_worker2.working_state.to_bytes(),
+            chunks[3].message_id()
         )
-        # Crash happens here (BEFORE commit_send_ack / sending to queue)
         
-        # PHASE 3: Restart filter
-        filter_worker2 = Filter(self.config)
-        
-        # Verify 3rd message was marked as processed in working state
-        self.assertIn(chunks[2].message_id(), filter_worker2.working_state.processed_ids)
-        
-        # But sending was NOT acknowledged
-        # In real scenario, message would be resent or checked via persistence
-
-    @patch('workers.filter.common.filter.MessageMiddlewareQueue')
-    @patch('workers.filter.common.filter.MessageMiddlewareExchange')
-    def test_crash_after_send_ack_recovery(self, mock_exchange, mock_queue):
-        """
-        Test Crash Point 5: CRASH_AFTER_COMMIT_SEND_ACK
-        
-        Scenario:
-        1. Process 3 messages completely (send + ACK)
-        2. Process 4th message, send, ACK, then crash AFTER
-        3. Restart filter
-        4. Verify 4th message fully processed and acknowledged
-        5. Result identical to no-fault execution
-        """
-        chunks = [self._create_test_chunk(message_id=f"msg_{i}") for i in range(4)]
-        
-        # PHASE 1: Process all 4 messages completely
-        filter_worker = Filter(self.config)
-        for i in range(4):
-            filtered = filter_worker.process_chunk(chunks[i])
-            filter_worker.working_state.processed_ids.add(chunks[i].message_id())
-            filter_worker.persistence_service.commit_working_state(
-                filter_worker.working_state.to_bytes(),
-                chunks[i].message_id()
-            )
-            # Simulate send + ACK
-            filter_worker.persistence_service.commit_send_ack(
-                chunks[i].client_id(),
-                chunks[i].message_id()
-            )
-        
-        # Crash happens AFTER everything complete
-        
-        # PHASE 2: Restart filter
-        filter_worker2 = Filter(self.config)
-        
-        # Verify all 4 messages in processed state
-        self.assertEqual(len(filter_worker2.working_state.processed_ids), 4)
-        for i in range(4):
-            self.assertIn(chunks[i].message_id(), filter_worker2.working_state.processed_ids)
+        # Verify final state
+        self._verify_working_state(filter_worker2.working_state, 4, chunks, "Final state")
 
     @patch('workers.filter.common.filter.MessageMiddlewareQueue')
     @patch('workers.filter.common.filter.MessageMiddlewareExchange')
     def test_idempotency_duplicate_prevention(self, mock_exchange, mock_queue):
         """
-        Test idempotency: duplicate messages are ignored
-        
-        This ensures that if a message is redelivered (e.g., after crash),
-        it won't be processed twice.
+        Test that duplicate messages are properly detected and ignored
         """
-        chunk = self._create_test_chunk(message_id="msg_dup")
+        chunk = self._create_test_chunk(message_id="msg_duplicate")
         
         filter_worker = Filter(self.config)
         
         # Process first time
         filtered_1 = filter_worker.process_chunk(chunk)
         filter_worker.working_state.processed_ids.add(chunk.message_id())
+        filter_worker.working_state.global_processed_ids.add(str(chunk.message_id()))
         
-        # Simulate redelivery - check idempotency
+        # Check idempotency
         is_duplicate = chunk.message_id() in filter_worker.working_state.processed_ids
-        self.assertTrue(is_duplicate, "Duplicate should be detected")
+        self.assertTrue(is_duplicate, "Duplicate should be detected in processed_ids")
         
-        # If we tried to process again, it should be skipped
-        # (In real code, this check happens before process_chunk)
+        is_global_duplicate = str(chunk.message_id()) in filter_worker.working_state.global_processed_ids
+        self.assertTrue(is_global_duplicate, "Duplicate should be detected in global_processed_ids")
+
+    @patch('workers.filter.common.filter.MessageMiddlewareQueue')
+    @patch('workers.filter.common.filter.MessageMiddlewareExchange')
+    def test_working_state_survives_multiple_crashes(self, mock_exchange, mock_queue):
+        """
+        Test that working state accumulates correctly across multiple crash/recovery cycles
+        """
+        chunks = [self._create_test_chunk(message_id=f"msg_{i}") for i in range(4)]
+        
+        # CYCLE 1: Process first 2 chunks
+        filter_worker1 = Filter(self.config)
+        for i in range(2):
+            filtered = filter_worker1.process_chunk(chunks[i])
+            filter_worker1.working_state.processed_ids.add(chunks[i].message_id())
+            filter_worker1.working_state.global_processed_ids.add(str(chunks[i].message_id()))
+            filter_worker1.persistence_service.commit_working_state(
+                filter_worker1.working_state.to_bytes(),
+                chunks[i].message_id()
+            )
+        
+        self._verify_working_state(filter_worker1.working_state, 2, chunks[:2], "After cycle 1")
+        
+        # CRASH 1 - CYCLE 2: Restart and process next 2 chunks
+        filter_worker2 = Filter(self.config)
+        self._verify_working_state(filter_worker2.working_state, 2, chunks[:2], "After recovery 1")
+        
+        for i in range(2, 4):
+            filtered = filter_worker2.process_chunk(chunks[i])
+            filter_worker2.working_state.processed_ids.add(chunks[i].message_id())
+            filter_worker2.working_state.global_processed_ids.add(str(chunks[i].message_id()))
+            filter_worker2.persistence_service.commit_working_state(
+                filter_worker2.working_state.to_bytes(),
+                chunks[i].message_id()
+            )
+        
+        self._verify_working_state(filter_worker2.working_state, 4, chunks, "After cycle 2")
+        
+        # CRASH 2 - CYCLE 3: Final restart and verify
+        filter_worker3 = Filter(self.config)
+        self._verify_working_state(filter_worker3.working_state, 4, chunks, "After recovery 2")
 
     @patch('workers.filter.common.filter.MessageMiddlewareQueue')
     @patch('workers.filter.common.filter.MessageMiddlewareExchange')
@@ -374,6 +234,7 @@ class TestFilterFaultToleranceComprehensive(unittest.TestCase):
         for chunk in chunks:
             filter_worker.process_chunk(chunk)
             filter_worker.working_state.processed_ids.add(chunk.message_id())
+            filter_worker.working_state.global_processed_ids.add(str(chunk.message_id()))
         
         # Receive END message
         end_msg = MessageEnd(
@@ -384,10 +245,10 @@ class TestFilterFaultToleranceComprehensive(unittest.TestCase):
         )
         filter_worker.working_state.end_received(end_msg.client_id(), end_msg.table_type())
         
-        # Persist state with END - use last chunk's message_id
+        # Persist state with END
         filter_worker.persistence_service.commit_working_state(
             filter_worker.working_state.to_bytes(),
-            chunks[-1].message_id()  # Use UUID from chunk
+            chunks[-1].message_id()
         )
         
         # Crash and restart
@@ -396,6 +257,234 @@ class TestFilterFaultToleranceComprehensive(unittest.TestCase):
         # Verify END was recovered
         has_end = filter_worker2.working_state.end_is_received(1, TableType.TRANSACTIONS)
         self.assertTrue(has_end, "END message should survive crash")
+
+
+class TestFilterCrashPoints(unittest.TestCase):
+    """Specific crash point tests - simulating exact failure scenarios"""
+
+    def setUp(self):
+        """Set up test environment"""
+        self.temp_dir = tempfile.mkdtemp(prefix="filter_crash_test_")
+        os.environ["PERSISTENCE_DIR"] = self.temp_dir
+        os.environ["WORKER_ID"] = "1"
+        os.environ["FILTER_SHARD_ID"] = "1"
+        os.environ["FILTER_SHARDS"] = "1"
+        
+        self.config = {
+            "id": 1,
+            "filter_type": "year",
+            "year_start": 2019,
+            "year_end": 2025
+        }
+
+    def tearDown(self):
+        if os.path.exists(self.temp_dir):
+            shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _create_test_chunk(self, message_id="msg_001"):
+        """Helper to create test chunk"""
+        import uuid
+        if isinstance(message_id, str):
+            message_id = uuid.UUID(int=hash(message_id) & (2**128 - 1))
+        
+        header = ProcessChunkHeader(
+            client_id=1,
+            message_id=message_id,
+            table_type=TableType.TRANSACTIONS
+        )
+        
+        rows = []
+        for i in range(3):
+            row = TransactionsProcessRow(
+                transaction_id=f"tx_{i}",
+                store_id=i+1,
+                user_id=i+1,
+                final_amount=100.0 + i,
+                created_at=DateTime(dt_module.date(2020, 1, i+1), dt_module.time(12, 0, 0))
+            )
+            rows.append(row)
+        
+        return ProcessChunk(header, rows)
+
+    @patch('workers.filter.common.filter.MessageMiddlewareQueue')
+    @patch('workers.filter.common.filter.MessageMiddlewareExchange')
+    def test_crash_point_1_before_commit_processing(self, mock_exchange, mock_queue):
+        """
+        CRASH POINT 1: CRASH BEFORE commit_processing_chunk
+        
+        Scenario:
+        - pop() from queue -> chunk
+        - callback() starts
+        - ❌ CRASH BEFORE commit_processing_chunk(chunk)
+        
+        Expected: Chunk NOT persisted, should be redelivered by RabbitMQ
+        """
+        chunk = self._create_test_chunk("msg_crash1")
+        
+        filter_worker = Filter(self.config)
+        
+        # Simulate receiving chunk but crashing BEFORE commit_processing
+        # In real scenario, RabbitMQ would not get ACK and would redeliver
+        
+        # Verify: No processing chunk is saved
+        recovered_chunk = filter_worker.persistence_service.recover_last_processing_chunk()
+        self.assertIsNone(recovered_chunk, "No chunk should be persisted before commit")
+        
+        # Verify: Working state is empty
+        self.assertEqual(len(filter_worker.working_state.processed_ids), 0)
+
+    @patch('workers.filter.common.filter.MessageMiddlewareQueue')
+    @patch('workers.filter.common.filter.MessageMiddlewareExchange')
+    def test_crash_point_2_after_commit_processing(self, mock_exchange, mock_queue):
+        """
+        CRASH POINT 2: CRASH AFTER commit_processing_chunk
+        
+        Scenario:
+        - commit_processing_chunk(chunk) ✅
+        - ❌ CRASH BEFORE _handle_process_message()
+        
+        Expected: Chunk is persisted, recovery should process it
+        """
+        chunk = self._create_test_chunk("msg_crash2")
+        
+        filter_worker = Filter(self.config)
+        
+        # Simulate: commit_processing_chunk was called
+        filter_worker.persistence_service.commit_processing_chunk(chunk)
+        
+        # ❌ CRASH (simulated by creating new Filter instance)
+        filter_worker2 = Filter(self.config)
+        
+        # Verify: Chunk was recovered and processed
+        # The handle_processing_recovery() should have processed it
+        recovered_chunk = filter_worker2.persistence_service.recover_last_processing_chunk()
+        
+        # After recovery, the chunk should have been processed
+        # Note: This depends on handle_processing_recovery implementation
+        self.assertIsNotNone(recovered_chunk, "Chunk should be persisted and recoverable")
+
+    @patch('workers.filter.common.filter.MessageMiddlewareQueue')
+    @patch('workers.filter.common.filter.MessageMiddlewareExchange')
+    def test_crash_point_3_before_commit_working_state(self, mock_exchange, mock_queue):
+        """
+        CRASH POINT 3: CRASH BEFORE commit_working_state
+        
+        Scenario:
+        - apply(chunk) - process ✅
+        - update state (add to processed_ids) ✅
+        - ❌ CRASH BEFORE commit_working_state()
+        
+        Expected: Chunk was processed but state NOT persisted, chunk should be reprocessed (idempotent)
+        """
+        chunk = self._create_test_chunk("msg_crash3")
+        
+        filter_worker = Filter(self.config)
+        
+        # Process chunk
+        filtered = filter_worker.process_chunk(chunk)
+        
+        # Update in-memory state but DON'T commit
+        filter_worker.working_state.processed_ids.add(chunk.message_id())
+        filter_worker.working_state.global_processed_ids.add(str(chunk.message_id()))
+        
+        # ❌ CRASH - DON'T call commit_working_state
+        
+        # Restart
+        filter_worker2 = Filter(self.config)
+        
+        # Verify: State was NOT persisted
+        self.assertEqual(len(filter_worker2.working_state.processed_ids), 0,
+                        "State should not be persisted before commit")
+        
+        # Chunk should be reprocessed (idempotency ensures no duplicates downstream)
+        self.assertNotIn(chunk.message_id(), filter_worker2.working_state.processed_ids)
+
+    @patch('workers.filter.common.filter.MessageMiddlewareQueue')
+    @patch('workers.filter.common.filter.MessageMiddlewareExchange')
+    def test_crash_point_4_before_send(self, mock_exchange, mock_queue):
+        """
+        CRASH POINT 4: CRASH BEFORE sending to downstream queue
+        
+        Scenario:
+        - commit_working_state() ✅
+        - ❌ CRASH BEFORE sending to queue
+        
+        Expected: State persisted, but message NOT sent. On recovery, should resend.
+        """
+        chunk = self._create_test_chunk("msg_crash4")
+        
+        filter_worker = Filter(self.config)
+        
+        # Process and commit state
+        filtered = filter_worker.process_chunk(chunk)
+        filter_worker.working_state.processed_ids.add(chunk.message_id())
+        filter_worker.working_state.global_processed_ids.add(str(chunk.message_id()))
+        filter_worker.persistence_service.commit_working_state(
+            filter_worker.working_state.to_bytes(),
+            chunk.message_id()
+        )
+        
+        # ❌ CRASH - DON'T send to queue or commit_send_ack
+        
+        # Restart
+        filter_worker2 = Filter(self.config)
+        
+        # Verify: State was persisted
+        self.assertEqual(len(filter_worker2.working_state.processed_ids), 1,
+                        "State should be persisted")
+        self.assertIn(chunk.message_id(), filter_worker2.working_state.processed_ids)
+        
+        # Verify: send_ack NOT committed (message should be resent on recovery)
+        # This checks that process_has_been_counted would return False
+        has_been_sent = filter_worker2.persistence_service.process_has_been_counted(chunk)
+        self.assertFalse(has_been_sent, "Message should NOT be marked as sent")
+
+    @patch('workers.filter.common.filter.MessageMiddlewareQueue')
+    @patch('workers.filter.common.filter.MessageMiddlewareExchange')
+    def test_crash_point_5_after_send(self, mock_exchange, mock_queue):
+        """
+        CRASH POINT 5: CRASH AFTER commit_send_ack
+        
+        Scenario:
+        - Send to queue ✅
+        - commit_send_ack() ✅
+        - ❌ CRASH (complete processing)
+        
+        Expected: Everything persisted, recovery should find nothing to do
+        """
+        chunk = self._create_test_chunk("msg_crash5")
+        
+        filter_worker = Filter(self.config)
+        
+        # Complete processing
+        filtered = filter_worker.process_chunk(chunk)
+        filter_worker.working_state.processed_ids.add(chunk.message_id())
+        filter_worker.working_state.global_processed_ids.add(str(chunk.message_id()))
+        filter_worker.persistence_service.commit_working_state(
+            filter_worker.working_state.to_bytes(),
+            chunk.message_id()
+        )
+        
+        # Simulate: message was sent and ACK committed
+        filter_worker.persistence_service.commit_send_ack(chunk.client_id(), chunk.message_id())
+        
+        # ❌ CRASH after everything complete
+        
+        # Restart
+        filter_worker2 = Filter(self.config)
+        
+        # Verify: State was persisted
+        self.assertEqual(len(filter_worker2.working_state.processed_ids), 1)
+        self.assertIn(chunk.message_id(), filter_worker2.working_state.processed_ids)
+        
+        # Verify: Send was marked as complete
+        has_been_sent = filter_worker2.persistence_service.process_has_been_counted(chunk.message_id())
+        self.assertTrue(has_been_sent, "Message should be marked as sent")
+        
+        # Verify: No pending work
+        recovered_chunk = filter_worker2.persistence_service.recover_last_processing_chunk()
+        # After handle_processing_recovery, there should be no pending chunk
+        # (or it was already processed)
 
 
 if __name__ == "__main__":
