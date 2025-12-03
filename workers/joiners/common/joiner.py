@@ -155,6 +155,9 @@ class Joiner:
                             # Si ya tenemos END de datos principales, intentar procesar ahora
                             self._process_client_if_ready(end_message.client_id)
                     else:
+                        logging.info(
+                            f"action: join_data_received | type:{self.joiner_type} | bytes:{len(data)}"
+                        )
                         self._handle_join_chunk_bytes(data)
                 except ValueError as e:
                     logging.error(f"action: error_parsing_join_data | type:{self.joiner_type} | error:{e} | error_type:{type(e).__name__} | data_preview:{data[:100] if len(data) > 100 else data}")
@@ -225,6 +228,9 @@ class Joiner:
                                     logging.info(f"action: waiting_for_more_senders | type:{self.joiner_type} | client_id:{client_id} | finished:{finished_count} | expected:{self.expected_inputs}")
 
                     else:
+                        logging.info(
+                            f"action: maximizer_data_received | type:{self.joiner_type} | bytes:{len(data)}"
+                        )
                         self._handle_data_chunk(data)
                     
                     # Enviar END messages para clientes recién completados

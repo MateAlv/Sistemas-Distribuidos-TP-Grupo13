@@ -159,6 +159,9 @@ class Maximizer:
         elif self.maximizer_type == "TOP3":
             chunks_sent = self.publish_absolute_top3_results(client_id)
             self._send_end_message(client_id, TableType.PURCHASES_PER_USER_STORE, "joiner", chunks_sent, sender_id or "absolute")
+        elif self.maximizer_type == "TPV":
+            chunks_sent = self.publish_tpv_results(client_id)
+            self._send_end_message(client_id, TableType.TPV, "joiner", chunks_sent, sender_id or "absolute")
 
         logging.info(f"action: maximizer_finished | type:{self.maximizer_type} | range:{self.maximizer_range} | client_id:{client_id}")
         self.delete_client_data(client_id)
@@ -793,6 +796,39 @@ class Maximizer:
             return 1
         else:
             logging.warning(f"action: no_absolute_top3_results | client_id:{client_id}")
+            return 0
+
+    def publish_tpv_results(self, client_id: int) -> int:
+        """
+        Publica los resultados de TPV agregados hacia el joiner de stores TPV.
+        """
+        results = self.working_state.get_tpv_results(client_id)
+        if not results:
+            logging.info(f"action: no_tpv_results | client_id:{client_id}")
+            return 0
+
+        output_rows = []
+        for (store_id, year_half), tpv in results.items():
+            output_rows.append(
+                TPVProcessRow(
+                    store_id=store_id,
+                    tpv=tpv,
+                    year_half=year_half,
+                    shard_id=self.shard_id if self.shard_id else DEFAULT_SHARD,
+                )
+            )
+
+        from utils.processing.process_chunk import ProcessChunkHeader as PCH
+        header = PCH(client_id=client_id, table_type=TableType.TPV)
+        chunk = ProcessChunk(header, output_rows)
+        try:
+            self.data_sender.send(chunk.serialize())
+            logging.info(
+                f"action: publish_tpv_results | client_id:{client_id} | rows:{len(output_rows)} | queue:{self.data_sender.queue_name}"
+            )
+            return 1
+        except Exception as e:
+            logging.error(f"action: publish_tpv_results_error | client_id:{client_id} | error:{e}")
             return 0
 
     def publish_absolute_max_results(self, client_id: int) -> int:
