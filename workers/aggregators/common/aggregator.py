@@ -96,7 +96,6 @@ class Aggregator:
         self.shard_count = int(os.getenv("AGGREGATOR_SHARDS", "1"))
 
         self.persistence = PersistenceService(f"/data/persistence/aggregator_{self.aggregator_type}_{self.aggregator_id}")
-        self.persistence = PersistenceService(f"/data/persistence/aggregator_{self.aggregator_type}_{self.aggregator_id}")
         self._recover_state()
 
 
@@ -255,7 +254,20 @@ class Aggregator:
         #     stats_results.append(msg)
 
         def chunk_callback(msg):
+            if msg.startswith(b"END;"):
+                end_message = MessageEnd.decode(msg)
+                client_id = end_message.client_id()
+                table_type = end_message.table_type()
+                total_expected = end_message.total_chunks()
+                self.working_state.mark_end_message_received(client_id, table_type)
+                self.working_state.set_chunks_to_receive(client_id, table_type, total_expected)
+                self._save_state(uuid.uuid4())
+                # REVISAR LÓGICA DE PERSISTENCIA Y RECOVERY DE END
+            else:
+                chunk = ProcessBatchReader.from_bytes(msg)
+                self.persistence.commit_processing_chunk(chunk)
             data_chunks.append(msg)
+            
         def coord_callback(msg):
             coord_results.append(msg)
 
@@ -440,13 +452,13 @@ class Aggregator:
             f"| file_type:{table_type} | total_chunks_expected:{total_expected}"
         )
 
-        self.working_state.mark_end_message_received(client_id, table_type)
+        # self.working_state.mark_end_message_received(client_id, table_type)
         # self.working_state.set_global_total_expected(client_id, table_type, total_expected) # Monitor handles this
         
-        self.working_state.set_chunks_to_receive(client_id, table_type, total_expected)
+        # self.working_state.set_chunks_to_receive(client_id, table_type, total_expected)
         # self.working_state.set_global_total_expected(client_id, table_type, total_expected)
 
-        self._save_state(uuid.uuid4())
+        # self._save_state(uuid.uuid4())
 
         # [NEW] Send stats to Monitor (processed count). 
         # Even if we haven't processed everything, we update Monitor.
@@ -467,8 +479,6 @@ class Aggregator:
         if self.working_state.is_processed(chunk.message_id()):
             logging.info(f"action: duplicate_chunk_ignored | message_id:{chunk.message_id()}")
             return
-
-        self.persistence.commit_processing_chunk(chunk)
 
         logging.info(
             f"action: aggregate | type:{self.aggregator_type} | cli_id:{client_id} "
@@ -544,9 +554,6 @@ class Aggregator:
                 self.persistence.commit_send_ack(client_id, chunk.message_id())
             except Exception as e:
                 logging.error(f"action: error_sending_data_message | error:{e}")
-
-        self.working_state.mark_processed(chunk.message_id())
-        self._save_state(chunk.message_id())
 
         self.working_state.mark_processed(chunk.message_id())
         self._save_state(chunk.message_id())
