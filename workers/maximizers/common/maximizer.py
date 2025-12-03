@@ -110,6 +110,8 @@ class Maximizer:
         )
 
         self._recover_state()
+        # Resume any pending finalization after recovery
+        self._resume_pending_finalization()
 
     def is_absolute_max(self):
         return self.maximizer_type == "MAX" and self.role == "absolute"
@@ -147,10 +149,6 @@ class Maximizer:
             logging.debug(f"action: ignoring_end_wrong_table | expected:{expected_table} | received:{table_type} | client_id:{client_id}")
             return
 
-        self.working_state.mark_client_end_processed(client_id)
-        self._save_state(uuid.uuid4())
-        logging.info(f"action: end_received_processing_final | type:{self.maximizer_type} | range:{self.maximizer_range} | client_id:{client_id}")
-
         chunks_sent = 0
         sender_id = self.shard_slug if self.shard_slug else self.maximizer_range
 
@@ -164,8 +162,13 @@ class Maximizer:
             chunks_sent = self.publish_tpv_results(client_id)
             self._send_end_message(client_id, TableType.TPV, "joiner", chunks_sent, sender_id or "absolute")
 
+        # Only finalize once results and END have been sent
+        label_end = f"end-{self.stage}"
+        if self.working_state.results_already_sent(client_id, self._results_label()) and self.working_state.end_already_sent(client_id, label_end):
+            self.working_state.mark_client_end_processed(client_id)
+            self._save_state(uuid.uuid4())
             logging.info(f"action: maximizer_finished | type:{self.maximizer_type} | range:{self.maximizer_range} | client_id:{client_id}")
-        self.delete_client_data(client_id)
+            self.delete_client_data(client_id)
     
     def run(self):
         logging.info(f"Maximizer iniciado. Tipo: {self.maximizer_type}, Rango: {self.maximizer_range}, Receiver: {getattr(self.data_receiver, 'queue_name', 'unknown')}")
@@ -271,17 +274,14 @@ class Maximizer:
                          logging.info(f"action: tpv_finished | client_id:{client_id} | finished:{finished_count} | expected:{self.expected_shards}")
                          self.process_client_end(client_id, table_type)
                      else:
-                         logging.info(f"action: tpv_waiting | client_id:{client_id} | finished:{finished_count} | expected:{self.expected_shards}")
+                        logging.info(f"action: tpv_waiting | client_id:{client_id} | finished:{finished_count} | expected:{self.expected_shards}")
 
                 else:
-                    # Partial Maximizer logic
-                    # We received END from all Aggregators.
-                    # We should have processed 'total_expected' chunks.
-                    # But wait, 'total_expected' is the sum of 'processed' from Aggregators.
-                    # This should match what we received.
                     self.process_client_end(client_id, table_type)
             else:
                  logging.info(f"action: waiting_for_more_senders | client_id:{client_id} | finished:{finished_count} | expected:{self.expected_inputs}")
+        # Persist END tracking so recovery can resume finalization
+        self._save_state(uuid.uuid4())
 
     def _handle_data_chunk(self, data: bytes):
         self._check_crash_point("CRASH_BEFORE_PROCESS")
@@ -382,7 +382,9 @@ class Maximizer:
                 logging.info(f"action: skip_end_already_sent | client_id:{client_id} | label:{label}")
                 return
             end_msg = MessageEnd(client_id, table_type, count, sender_id)
+            self._check_crash_point("CRASH_BEFORE_SEND_END")
             self.data_sender.send(end_msg.encode())
+            self._check_crash_point("CRASH_AFTER_SEND_END")
             logging.info(f"action: sent_end_message_to_{target} | client_id:{client_id} | format:END;{client_id};{table_type.value};{count};{sender_id}")
             # Publish coordination END
             try:
@@ -693,7 +695,9 @@ class Maximizer:
             chunk = ProcessChunk(header, accumulated_results)
             
             chunk_data = chunk.serialize()
+            self._check_crash_point("CRASH_BEFORE_PUBLISH_RESULTS")
             self.data_sender.send(chunk_data)
+            self._check_crash_point("CRASH_AFTER_PUBLISH_RESULTS")
             # We don't have an incoming message ID to ack here easily unless we pass it down.
             # But publish_partial_max_results is called from process_client_end which is called from handle_end_message or handle_data_chunk.
             # If called from handle_data_chunk, we save state after return.
@@ -748,7 +752,9 @@ class Maximizer:
                 message_id=self._deterministic_msg_id("top3-partial", client_id),
             )
             chunk = ProcessChunk(header, accumulated_results)
+            self._check_crash_point("CRASH_BEFORE_PUBLISH_RESULTS")
             self.data_sender.send(chunk.serialize())
+            self._check_crash_point("CRASH_AFTER_PUBLISH_RESULTS")
             # NO cerrar la conexión aquí - se cerrará después de enviar el END message
             
             logging.info(
@@ -809,7 +815,9 @@ class Maximizer:
                 message_id=self._deterministic_msg_id("top3-absolute", client_id),
             )
             chunk = ProcessChunk(header, accumulated_results)
+            self._check_crash_point("CRASH_BEFORE_PUBLISH_RESULTS")
             self.data_sender.send(chunk.serialize())
+            self._check_crash_point("CRASH_AFTER_PUBLISH_RESULTS")
             
             logging.info(f"action: publish_absolute_top3_results | result: success | client_id:{client_id} | stores_processed:{len(client_top3)} | total_results_forwarded:{len(accumulated_results)}")
             self.working_state.mark_results_sent(client_id, label)
@@ -851,7 +859,9 @@ class Maximizer:
         header = PCH(client_id=client_id, table_type=TableType.TPV, message_id=msg_id)
         chunk = ProcessChunk(header, output_rows)
         try:
+            self._check_crash_point("CRASH_BEFORE_PUBLISH_RESULTS")
             self.data_sender.send(chunk.serialize())
+            self._check_crash_point("CRASH_AFTER_PUBLISH_RESULTS")
             logging.info(
                 f"action: publish_tpv_results | client_id:{client_id} | rows:{len(output_rows)} | keys:{len(results)} | queue:{self.data_sender.queue_name} | msg_id:{msg_id} | DEBUGGING_QUERY_3"
             )
@@ -938,7 +948,9 @@ class Maximizer:
                 message_id=self._deterministic_msg_id("max-absolute", client_id),
             )
             chunk = ProcessChunk(header, accumulated_results)
+            self._check_crash_point("CRASH_BEFORE_PUBLISH_RESULTS")
             self.data_sender.send(chunk.serialize())
+            self._check_crash_point("CRASH_AFTER_PUBLISH_RESULTS")
             
             logging.info(f"action: publish_absolute_max_results | result: success | client_id:{client_id} | months_selling:{len(monthly_max_selling)} | months_profit:{len(monthly_max_profit)} | total_rows:{len(accumulated_results)}")
             self.working_state.mark_results_sent(client_id, label)
@@ -969,3 +981,30 @@ class Maximizer:
         """Stable UUID for idempotent publishes (per client and shard/range)."""
         shard_component = self.shard_id or DEFAULT_SHARD
         return uuid.uuid5(uuid.NAMESPACE_DNS, f"{label}-{client_id}-{self.maximizer_type}-{self.maximizer_range}-{shard_component}")
+
+    def _results_label(self):
+        if self.maximizer_type == "MAX":
+            return "max-absolute" if self.is_absolute_max() else "max-partial"
+        if self.maximizer_type == "TOP3":
+            return "top3-absolute" if self.is_absolute_top3() else "top3-partial"
+        if self.maximizer_type == "TPV":
+            return "tpv-absolute"
+        return "results"
+
+    def _resume_pending_finalization(self):
+        """
+        On recovery, if ENDs were seen but results/END not sent, resend deterministically and finalize.
+        """
+        for client_id, senders in self.working_state.finished_senders.items():
+            if self.working_state.is_client_end_processed(client_id):
+                continue
+            finished_count = len(senders)
+            required = self.expected_shards if self.maximizer_type == "TPV" else self.expected_inputs
+            if finished_count < required:
+                continue
+            # We don't know table_type here; use expected table for this maximizer
+            table_type = self._expected_table_type()
+            try:
+                self.process_client_end(client_id, table_type)
+            except Exception as e:
+                logging.error(f"action: resume_finalization_error | client_id:{client_id} | error:{e}S")
