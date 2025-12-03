@@ -148,6 +148,7 @@ class Maximizer:
             return
 
         self.working_state.mark_client_end_processed(client_id)
+        self._save_state(uuid.uuid4())
         logging.info(f"action: end_received_processing_final | type:{self.maximizer_type} | range:{self.maximizer_range} | client_id:{client_id}")
 
         chunks_sent = 0
@@ -788,12 +789,15 @@ class Maximizer:
             )
 
         from utils.processing.process_chunk import ProcessChunkHeader as PCH
-        header = PCH(client_id=client_id, table_type=TableType.TPV)
+        # Use deterministic UUID to prevent duplicates on retry/restart
+        msg_id = uuid.uuid5(uuid.NAMESPACE_DNS, f"tpv-final-{client_id}")
+        logging.info(f"action: generated_tpv_msg_id | client_id:{client_id} | msg_id:{msg_id}")
+        header = PCH(client_id=client_id, table_type=TableType.TPV, message_id=msg_id)
         chunk = ProcessChunk(header, output_rows)
         try:
             self.data_sender.send(chunk.serialize())
             logging.info(
-                f"action: publish_tpv_results | client_id:{client_id} | rows:{len(output_rows)} | queue:{self.data_sender.queue_name}"
+                f"action: publish_tpv_results | client_id:{client_id} | rows:{len(output_rows)} | queue:{self.data_sender.queue_name} | msg_id:{msg_id}"
             )
             return 1
         except Exception as e:

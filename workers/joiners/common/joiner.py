@@ -288,7 +288,9 @@ class Joiner:
         
         with self.lock:
             # Idempotency
-            if self.working_state_main.is_processed(chunk.message_id()):
+            is_proc = self.working_state_main.is_processed(chunk.message_id())
+            logging.info(f"action: check_idempotency | type:{self.joiner_type} | msg_id:{chunk.message_id()} | is_processed:{is_proc}")
+            if is_proc:
                 return
 
             self.persistence_main.commit_processing_chunk(chunk)

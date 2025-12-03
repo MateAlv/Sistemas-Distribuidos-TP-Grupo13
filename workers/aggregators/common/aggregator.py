@@ -618,6 +618,8 @@ class Aggregator:
             send_table_type = table_type
             if self.aggregator_type == "TPV":
                 send_table_type = TableType.TPV
+            elif self.aggregator_type == "PURCHASES":
+                send_table_type = TableType.PURCHASES_PER_USER_STORE
 
             my_processed = self.working_state.get_processed_for_aggregator(client_id, table_type, self.aggregator_id)
             end_msg = MessageEnd(client_id, send_table_type, my_processed, str(self.aggregator_id))
@@ -994,18 +996,19 @@ class Aggregator:
         marker_date = DateTime(datetime.date(2024, 1, 1), datetime.time(0, 0))
 
         for (store_id, user_id), count in chunk_accumulator.items():
-            row = TransactionsProcessRow(
-                transaction_id="",
+            # Use PurchasesPerUserStoreRow so TOP3 maximizer can consume directly
+            row = PurchasesPerUserStoreRow(
                 store_id=store_id,
+                store_name="",
                 user_id=user_id,
-                final_amount=float(count),
-                created_at=marker_date,
+                user_birthdate=marker_date.date,
+                purchases_made=count,
             )
             rows.append(row)
 
         from utils.processing.process_chunk import ProcessChunkHeader
 
-        header = ProcessChunkHeader(client_id=chunk.header.client_id, table_type=TableType.TPV)
+        header = ProcessChunkHeader(client_id=chunk.header.client_id, table_type=TableType.PURCHASES_PER_USER_STORE)
         return ProcessChunk(header, rows)
 
     def apply_tpv(self, chunk):
