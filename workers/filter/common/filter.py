@@ -12,8 +12,6 @@ from utils.protocol import (
     COORDINATION_EXCHANGE,
     MSG_WORKER_END,
     MSG_WORKER_STATS,
-    MSG_BARRIER_FORWARD,
-    DEFAULT_SHARD,
     STAGE_FILTER_YEAR,
     STAGE_FILTER_HOUR,
     STAGE_FILTER_AMOUNT,
@@ -79,8 +77,6 @@ class Filter:
         )
         self.stats_timer = None
         self.consume_timer = None
-        self.coord_timer = None
-        self.barrier_forwarded = set()
         
         if self.filter_type == "year":
             self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", f"to_filter_year_shard_{self.shard_id}")
@@ -167,7 +163,6 @@ class Filter:
             results.append(msg)
             
         def stats_callback(msg): stats_results.append(msg)
-        def coord_callback(msg): results.append((b"BARRIER", msg))
         def stop():
             if not self.middleware_queue_receiver.connection or not self.middleware_queue_receiver.connection.is_open:
                 return
@@ -177,11 +172,6 @@ class Filter:
             if not self.middleware_end_exchange.connection or not self.middleware_end_exchange.connection.is_open:
                 return
             self.middleware_end_exchange.stop_consuming()
-
-        def coord_stop():
-            if not self.middleware_coordination.connection or not self.middleware_coordination.connection.is_open:
-                return
-            self.middleware_coordination.stop_consuming()
 
         while self.__running:
 
@@ -195,19 +185,13 @@ class Filter:
                 except (OSError, RuntimeError, MessageMiddlewareMessageError) as e:
                     logging.error(f"Error en consumo: {e}")
 
-            try:
-                self.consume_timer = self.middleware_queue_receiver.connection.call_later(TIMEOUT, stop)
-                self.middleware_queue_receiver.start_consuming(callback)
-            except (OSError, RuntimeError, MessageMiddlewareMessageError) as e:
-                 logging.error(f"Error en consumo: {e}")
-
             # Skip coordination exchange in test mode (no coordination infrastructure)
             if not test_mode:
                 try:
-                    self.coord_timer = self.middleware_coordination.connection.call_later(TIMEOUT, coord_stop)
-                    self.middleware_coordination.start_consuming(coord_callback)
+                    self.consume_timer = self.middleware_queue_receiver.connection.call_later(TIMEOUT, stop)
+                    self.middleware_queue_receiver.start_consuming(callback)
                 except (OSError, RuntimeError, MessageMiddlewareMessageError) as e:
-                    logging.error(f"Error en consumo coordination: {e}")
+                     logging.error(f"Error en consumo: {e}")
 
             while stats_results:
 
@@ -218,9 +202,6 @@ class Filter:
                         continue
                     else:
                         stats = FilterStatsMessage.decode(stats_msg)
-                        # Ignore peer stats to avoid mixing replicas
-                        if stats.filter_id != self.id:
-                            continue
 
                         self.working_state.update_stats_received(stats.client_id, stats.table_type, stats)
 
@@ -238,9 +219,7 @@ class Filter:
 
                 msg = results.popleft()
                 try:
-                    if isinstance(msg, tuple) and msg[0] == b"BARRIER":
-                        self._handle_barrier_forward(msg[1])
-                    elif msg.startswith(b"END;"):
+                    if msg.startswith(b"END;"):
                         self._handle_end_message(msg)
 
                     else:
@@ -312,7 +291,7 @@ class Filter:
                 self._send_end_message(client_id, table_type, total_expected, total_not_sent)
 
     def send_filtered_rows(self, filtered_rows, chunk, client_id, table_type, message_id):
-        if filtered_rows:
+         if filtered_rows:
             # Dispatch according to filter type and destination
             if self.filter_type == "year":
                 if table_type == TableType.TRANSACTIONS:
@@ -354,6 +333,9 @@ class Filter:
                     logging.debug(f"action: sending_to_queue | type:{self.filter_type} | queue:{queue_name} | rows:{len(filtered_rows)/len(chunk.rows):.2%} | cli_id:{chunk.client_id()} | shard:{shard_id}")
                     self.middleware_queue_sender[queue_name].send(ProcessChunk(chunk.header, filtered_rows).serialize())
                     self.shard_chunks_sent[(STAGE_AGG_TPV, client_id, table_type, shard_id)] += 1
+                    logging.info(
+                        f"DEBUGGING_QUERY_3 | filter_hour_to_agg_tpv | cli_id:{client_id} | shard:{shard_id} | rows_out:{len(filtered_rows)} | shard_total:{self.shard_chunks_sent[(STAGE_AGG_TPV, client_id, table_type, shard_id)]}"
+                    )
 
             elif self.filter_type == "amount":
                 converted_rows = [Query1ResultRow(tx.transaction_id, tx.final_amount) for tx in filtered_rows]
@@ -374,6 +356,7 @@ class Filter:
             return False
 
         return True
+
 
     def _handle_end_message(self, msg):
         end_message = MessageEnd.decode(msg)
@@ -497,7 +480,7 @@ class Filter:
                     msg_to_send = self._end_message_to_send(client_id, table_type, shard_total, 0)
                     self.middleware_queue_sender[queue_name].send(msg_to_send.encode())
 
-        # Publish to coordination for centralized barrier
+        # Publish to coordination for centralized barrier - MONITOR
         try:
             payload = {
                 "type": MSG_WORKER_END,
@@ -514,6 +497,53 @@ class Filter:
             logging.debug(f"action: coordination_end_sent | stage:{self.stage} | cli_id:{client_id} | chunks:{total_expected-total_not_sent}")
         except Exception as e:
             logging.error(f"action: coordination_end_send_error | stage:{self.stage} | cli_id:{client_id} | error:{e}")
+        
+        # Send explicit stats for the NEXT stage (Aggregator) to Monitor
+        # This allows Monitor to know 'agg_expected'
+        if self.filter_type in ["year", "hour"]:
+             # Determine next stage name
+             next_stage = None
+             if self.filter_type == "year":
+                 if table_type == TableType.TRANSACTION_ITEMS: next_stage = STAGE_AGG_PRODUCTS
+                 elif table_type == TableType.TRANSACTIONS: next_stage = STAGE_AGG_PURCHASES
+             elif self.filter_type == "hour":
+                 if table_type == TableType.TRANSACTIONS: next_stage = STAGE_AGG_TPV
+             
+             if next_stage:
+                 # We need to send stats for EACH shard we sent data to
+                 # self.shard_chunks_sent tracks chunks sent to each shard
+                 # We iterate over shards and send stats to Monitor
+                 # The 'chunks' field in stats will be the expected count for that shard
+
+                 target_shards = 0
+                 if next_stage == STAGE_AGG_PRODUCTS: target_shards = self.products_shards
+                 elif next_stage == STAGE_AGG_PURCHASES: target_shards = self.purchases_shards
+                 elif next_stage == STAGE_AGG_TPV: target_shards = self.tpv_shards
+                 
+                 for i in range(1, target_shards + 1):
+                     shard_total = self.shard_chunks_sent.get((next_stage, client_id, table_type, i), 0)
+                     try:
+                        logging.info(
+                            f"action: sending_expected_for_next_stage | stage:{next_stage} | shard:{i} | cli_id:{client_id} | expected_chunks:{shard_total} | sender_filter:{self.id}"
+                        )
+                        payload = {
+                            "type": MSG_WORKER_STATS,
+                            "id": str(self.id),
+                            "client_id": client_id,
+                            "stage": next_stage, # Target stage
+                            "shard": str(i),     # Target shard
+                            "expected": shard_total, # Tell Monitor how many chunks to expect for this shard
+                            "chunks": shard_total,
+                            "processed": 0,      # Explicitly 0 so we don't update agg_processed in Monitor
+                            "not_sent": 0,
+                            "sender": str(self.id),
+                        }
+                        rk = f"coordination.stats.{next_stage}.{i}"
+                        self.middleware_coordination.send(json.dumps(payload).encode("utf-8"), routing_key=rk)
+                        logging.info(f"action: sent_next_stage_expected | stage:{next_stage} | shard:{i} | expected:{shard_total}")
+                     except Exception as e:
+                        logging.error(f"action: next_stage_stats_error | stage:{next_stage} | shard:{i} | error:{e}")
+
         end_msg = FilterStatsEndMessage(self.id, client_id, table_type)
         self.middleware_end_exchange.send(end_msg.encode())
         self.working_state.delete_client_stats_data(end_msg)
@@ -524,49 +554,6 @@ class Filter:
         else:
             return MessageQueryEnd(client_id, ResultTableType.QUERY_1, total_expected - total_not_sent)
 
-    def _handle_barrier_forward(self, raw_msg):
-        try:
-            data = json.loads(raw_msg)
-            if data.get("type") != MSG_BARRIER_FORWARD:
-                return
-            client_id = data.get("client_id")
-            stage = data.get("stage")
-            shard = data.get("shard", DEFAULT_SHARD)
-            if stage != self.stage:
-                return
-            if str(shard) != str(self.shard_id):
-                return
-            key = (client_id, stage, shard)
-            if key in self.barrier_forwarded:
-                return
-            total_chunks = data.get("total_chunks", 0)
-            total_expected = total_chunks
-            # Send stats to monitor to record expected
-            try:
-                own_received = self.working_state.get_own_chunks_received(client_id, TableType.TRANSACTIONS, self.id)
-                own_not_sent = self.working_state.get_own_chunks_not_sent(client_id, TableType.TRANSACTIONS, self.id)
-                payload = {
-                    "type": MSG_WORKER_STATS,
-                    "id": str(self.id),
-                    "client_id": client_id,
-                    "stage": self.stage,
-                    "expected": total_expected,
-                    "chunks": own_received,
-                    "not_sent": own_not_sent,
-                    "sender": str(self.id),
-                    "shard": shard,
-                }
-                rk = f"coordination.barrier.{self.stage}.shard.{shard}"
-                self.middleware_coordination.send(json.dumps(payload).encode("utf-8"), routing_key=rk)
-            except Exception as e:
-                logging.error(f"action: coordination_stats_send_error | stage:{self.stage} | cli_id:{client_id} | error:{e}")
-            # Forward END downstream
-            self._send_end_message(client_id, TableType.TRANSACTIONS, total_expected, 0)
-            self.barrier_forwarded.add(key)
-            logging.info(f"action: barrier_forward_consumed | stage:{self.stage} | cli_id:{client_id} | total_chunks:{total_chunks}")
-        except Exception as e:
-            logging.error(f"action: barrier_forward_error | stage:{self.stage} | error:{e}")
-            
     def apply(self, tx: TableProcessRow) -> bool:
         """
         Aplica el filtro según el tipo configurado.

@@ -321,6 +321,8 @@ def define_maximizer(meta: dict, compose: dict, nodo: str, worker_id: int, max_s
              expected_inputs = nodes.get("AGGREGATOR_PRODUCTS", 1)
         elif max_type == "TOP3":
              expected_inputs = nodes.get("AGGREGATOR_PURCHASES", 1)
+        elif max_type == "TPV":
+             expected_inputs = nodes.get("AGGREGATOR_TPV", 1)
     
     env.append(f"EXPECTED_INPUTS={expected_inputs}")
     # Aggregator shards count for absolutes to gate shards received
@@ -329,6 +331,8 @@ def define_maximizer(meta: dict, compose: dict, nodo: str, worker_id: int, max_s
             env.append(f"AGGREGATOR_SHARDS={nodes.get('AGGREGATOR_PRODUCTS', 1)}")
         elif max_type == "TOP3":
             env.append(f"AGGREGATOR_SHARDS={nodes.get('AGGREGATOR_PURCHASES', 1)}")
+        elif max_type == "TPV":
+            env.append(f"AGGREGATOR_SHARDS={nodes.get('AGGREGATOR_TPV', 1)}")
 
     if role == "PARTIAL":
         if max_type == "MAX":
@@ -366,6 +370,11 @@ def define_maximizer(meta: dict, compose: dict, nodo: str, worker_id: int, max_s
                 raise ValueError("TOP3_PARTIAL_SHARDS requiere TOP3_SHARDS configurado.")
             shard_ids = ",".join(shard.shard_id for shard in top3_shards)
             env.append(f"TOP3_PARTIAL_SHARDS={shard_ids}")
+        elif max_type == "TPV":
+            # TPV Absolute doesn't have partials, it receives directly from aggregators
+            # But if we wanted partials, we'd handle it here.
+            # For now, just pass.
+            pass
         else:
             raise ValueError(f"Tipo de maximizer absoluto inválido: {max_type}")
     else:
@@ -448,7 +457,7 @@ def define_joiner(meta: dict, compose: dict, nodo: str, worker_id: int, nodes: d
     expected_inputs = 1
     joiner_type = get_joiner_type(nodo)
     if joiner_type == "STORES_TPV":
-        expected_inputs = nodes.get("AGGREGATOR_TPV", 1)
+        expected_inputs = nodes.get("MAXIMIZER_TPV_ABSOLUTE", 1)
     elif joiner_type == "STORES_TOP3":
         # Receives from Absolute Top3 Maximizer (which is 1)
         expected_inputs = nodes.get("MAXIMIZER_TOP3_ABSOLUTE", 1)
