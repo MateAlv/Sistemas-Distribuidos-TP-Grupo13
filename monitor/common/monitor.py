@@ -5,14 +5,142 @@ import os
 import json
 import subprocess
 import pika
+from collections import defaultdict
 from utils.protocol import (
     MSG_HEARTBEAT, MSG_ELECTION, MSG_COORDINATOR, MSG_DEATH,
     HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT, ELECTION_TIMEOUT,
-    CONTROL_EXCHANGE, HEARTBEAT_EXCHANGE
+    CONTROL_EXCHANGE, HEARTBEAT_EXCHANGE,
+    COORDINATION_EXCHANGE, COORDINATION_ROUTING_KEY, DEFAULT_SHARD,
+    MSG_WORKER_END, MSG_WORKER_STATS, MSG_BARRIER_FORWARD,
+    STAGE_FILTER_YEAR, STAGE_FILTER_HOUR, STAGE_FILTER_AMOUNT,
+    STAGE_AGG_PRODUCTS, STAGE_AGG_TPV, STAGE_AGG_PURCHASES,
+    STAGE_MAX_PARTIALS, STAGE_MAX_ABSOLUTE,
+    STAGE_TOP3_PARTIALS, STAGE_TOP3_ABSOLUTE,
+    STAGE_JOIN_ITEMS, STAGE_JOIN_STORES_TPV, STAGE_JOIN_STORES_TOP3, STAGE_JOIN_USERS,
+    STAGE_SERVER_RESULTS,
 )
+
+# --- Barrier Tracker ---
+class BarrierTracker:
+    def __init__(self):
+        self.received_end = 0
+        self.end_sender_ids = set()
+        self.total_chunks = 0
+        self.last_forward_ts = 0
+        self.forwarded = False
+        
+        # Aggregator Specific
+        self.agg_expected = None
+        self.agg_processed = 0
+
+    def apply_expected(self, expected):
+        """Updates expected count from upstream (e.g. Filters telling Aggregators)."""
+        if expected is not None:
+            # Use max to avoid regression if out-of-order messages arrive
+            self.agg_expected = max(self.agg_expected or 0, expected)
+            logging.info(f"Aggregator Barrier Expected Chunks to be Processed: {self.agg_expected}")
+
+    def apply_stats(self, chunks, processed, expected=None):
+        """Updates stats from a worker."""
+        if expected is not None:
+            self.apply_expected(expected)
+            
+        # For Aggregators, 'processed' is what matters against 'agg_expected'
+        self.agg_processed = max(self.agg_processed, processed)
+        logging.info(f"Aggregator Barrier Processed Chunks so far: {self.agg_processed}")
+
+    def apply_end(self, sender_id, chunks):
+        """Handles an END message."""
+        if sender_id not in self.end_sender_ids:
+            self.received_end += 1
+            self.end_sender_ids.add(sender_id)
+        self.total_chunks += chunks
+        logging.info(f"Aggregator Barrier Received END from {sender_id}: {self.received_end}/{expected_filters}")
+
+    def is_complete(self, stage_type, now, forward_interval, expected_filters):
+        """
+        Determines if the barrier is complete.
+        Strictly for Aggregator stages:
+        1. agg_expected is known (Filters reported).
+        2. agg_processed >= agg_expected.
+        3. received_end >= expected_filters (Safety check: all filters finished).
+        """
+        if self.forwarded:
+            return False, "Already forwarded"
+        
+        # Gate: agg_processed >= agg_expected
+        if self.agg_expected is not None and self.agg_processed >= self.agg_expected:
+            # Safety check: Ensure we heard END from all upstream filters
+            if expected_filters is not None and self.received_end < expected_filters:
+                 return False, f"Aggregator Barrier Pending: Waiting for Filters END {self.received_end}/{expected_filters}"
+
+            return True, f"Aggregator Barrier Met: processed {self.agg_processed} >= expected {self.agg_expected}"
+            
+        return False, f"Aggregator Barrier Pending: processed {self.agg_processed} < {self.agg_expected}"
+
+    def to_dict(self):
+        return {
+            'received_end': self.received_end,
+            'end_sender_ids': list(self.end_sender_ids),
+            'total_chunks': self.total_chunks,
+            'last_forward_ts': self.last_forward_ts,
+            'forwarded': self.forwarded,
+            'agg_expected': self.agg_expected,
+            'agg_processed': self.agg_processed,
+        }
+
+    @classmethod
+    def from_dict(cls, data):
+        t = cls()
+        t.received_end = data.get('received_end', 0)
+        t.end_sender_ids = set(data.get('end_sender_ids', []))
+        t.total_chunks = data.get('total_chunks', 0)
+        t.last_forward_ts = data.get('last_forward_ts', 0)
+        t.forwarded = data.get('forwarded', False)
+        t.agg_expected = data.get('agg_expected')
+        t.agg_processed = data.get('agg_processed', 0)
+        # Ignore legacy fields if present in old state files
+        return t
+
+# --- Barrier State ---
+class BarrierState:
+    def __init__(self):
+        # client -> stage -> shard -> BarrierTracker
+        self.trackers = defaultdict(lambda: defaultdict(lambda: defaultdict(BarrierTracker)))
+        self.lock = threading.Lock()
+
+    def get_tracker(self, client_id, stage, shard):
+        return self.trackers[client_id][stage][shard]
+
+    def remove_tracker(self, client_id, stage, shard):
+        if shard in self.trackers[client_id][stage]:
+            del self.trackers[client_id][stage][shard]
+
+    def snapshot(self):
+        """Returns a dict representation for persistence."""
+        with self.lock:
+            state = {}
+            for client, stages in self.trackers.items():
+                state[client] = {}
+                for stage, shards in stages.items():
+                    state[client][stage] = {}
+                    for shard, tracker in shards.items():
+                        state[client][stage][shard] = tracker.to_dict()
+            return state
+
+    def restore(self, state_dict):
+        """Restores state from dict."""
+        with self.lock:
+            for client, stages in state_dict.items():
+                for stage, shards in stages.items():
+                    for shard, data in shards.items():
+                        self.trackers[client][stage][shard] = BarrierTracker.from_dict(data)
+
 
 class MonitorNode:
     def __init__(self):
+        logging.getLogger('pika').setLevel(logging.CRITICAL)
+        
         self.container_name = os.environ.get('CONTAINER_NAME', 'unknown')
         self.node_id = self.container_name
         self.is_leader = False
@@ -21,22 +149,38 @@ class MonitorNode:
         self.running = True
         
         # Tracking
-        self.nodes_last_seen = {} # Map: node_id -> timestamp (for ALL nodes: workers, server, monitors)
+        self.nodes_last_seen = {} 
         
         # Election State
         self.election_in_progress = False
         self.election_start_time = 0
+
+        # Barrier State
+        self.state = BarrierState()
+        
+        # Persistence
+        self.persistence_path = "/data/persistence/monitor_state.json"
+        self._recover_state()
+
+        # How often we forward (seconds). Default: 60s.
+        self.forward_interval = int(os.environ.get('BARRIER_FORWARD_INTERVAL', '60'))
         
         # Threads
         self.sender_thread = threading.Thread(target=self._sender_loop, daemon=True)
         self.listener_thread = threading.Thread(target=self._listener_loop, daemon=True)
         self.checker_thread = threading.Thread(target=self._checker_loop, daemon=True)
+        self.forward_thread = threading.Thread(target=self._forward_loop, daemon=True)
+
+        # Expected worker counts per stage (loaded from config)
+        self.stage_expected = self._load_expected_from_config()
 
     def start(self):
         logging.info(f"Starting MonitorNode {self.node_id}")
+        logging.info(f"Barrier expected counts: {self.stage_expected}")
         self.sender_thread.start()
         self.listener_thread.start()
         self.checker_thread.start()
+        self.forward_thread.start()
 
     def _get_connection(self):
         return pika.BlockingConnection(pika.ConnectionParameters(host='rabbitmq', heartbeat=0))
@@ -57,7 +201,6 @@ class MonitorNode:
                         'component': 'monitor',
                         'is_leader': self.is_leader
                     }
-                    # Routing key: heartbeat.monitor.<node_id>
                     routing_key = f"heartbeat.monitor.{self.node_id}"
                     
                     channel.basic_publish(
@@ -79,17 +222,16 @@ class MonitorNode:
                 channel = connection.channel()
                 channel.exchange_declare(exchange=CONTROL_EXCHANGE, exchange_type='topic', durable=True)
                 channel.exchange_declare(exchange=HEARTBEAT_EXCHANGE, exchange_type='topic', durable=True)
+                channel.exchange_declare(exchange=COORDINATION_EXCHANGE, exchange_type='topic', durable=True)
                 
                 queue_name = f"monitor_listener_{self.node_id}"
                 channel.queue_declare(queue=queue_name, exclusive=True)
                 
                 # Bindings
-                # 1. Heartbeats from everyone (Monitors, Workers, Server)
                 channel.queue_bind(exchange=HEARTBEAT_EXCHANGE, queue=queue_name, routing_key='heartbeat.#')
-                # 2. Elections
                 channel.queue_bind(exchange=CONTROL_EXCHANGE, queue=queue_name, routing_key="election.#")
-                # 3. Control (Coordinator, Death)
                 channel.queue_bind(exchange=CONTROL_EXCHANGE, queue=queue_name, routing_key="control.#")
+                channel.queue_bind(exchange=COORDINATION_EXCHANGE, queue=queue_name, routing_key="coordination.#")
 
                 def callback(ch, method, properties, body):
                     self._handle_message(body)
@@ -112,10 +254,11 @@ class MonitorNode:
             msg_type = data.get('type')
             sender_id = data.get('id')
             
+            if msg_type != MSG_HEARTBEAT:
+                logging.info(f"Monitor received message: {data}")
+
             if msg_type == MSG_HEARTBEAT:
                 component = data.get('component')
-                
-                # Update last seen for everyone
                 self.nodes_last_seen[sender_id] = time.time()
                 
                 if component == 'monitor':
@@ -123,17 +266,13 @@ class MonitorNode:
                     if is_sender_leader:
                         self.leader_id = sender_id
                         self.last_leader_heartbeat = time.time()
-                        
-                        # Bully: If I am higher ID, challenge
                         if sender_id < self.node_id:
                             logging.warning(f"Detected Leader {sender_id} with lower ID. Challenging...")
                             self._start_election()
-                        
                         if self.election_in_progress and sender_id > self.node_id:
                             self.election_in_progress = False
 
             elif msg_type == MSG_ELECTION:
-                # Only Monitors participate
                 if sender_id < self.node_id:
                     logging.info(f"Received ELECTION from {sender_id}. Sending my own election message.")
                     self._start_election()
@@ -152,6 +291,10 @@ class MonitorNode:
                     else:
                         logging.info(f"New Leader elected: {sender_id}")
                         logging.info(f"Accepting {sender_id} as Coordinator.")
+            elif msg_type in (MSG_WORKER_END, MSG_WORKER_STATS):
+                if not self.is_leader:
+                    return
+                self._handle_barrier_message(data)
 
         except Exception as e:
             logging.error(f"Error handling message: {e}")
@@ -161,11 +304,9 @@ class MonitorNode:
         while self.running:
             time.sleep(1)
             
-            # Election Timeout
             if self.election_in_progress:
                 if time.time() - self.election_start_time > ELECTION_TIMEOUT:
-                    # Declare Victory
-                    logging.info("Election timeout reached. No higher ID detected. Declaring victory.")
+                    logging.info("Election timeout reached. Declaring victory.")
                     self.is_leader = True
                     self.leader_id = self.node_id
                     self._broadcast(MSG_COORDINATOR)
@@ -174,23 +315,144 @@ class MonitorNode:
                 continue
 
             if self.is_leader:
-                # Debug: Print nodes seen
                 if int(time.time()) % 5 == 0:
                     logging.info(f"Leader {self.node_id} tracking nodes: {list(self.nodes_last_seen.keys())}")
 
                 for node_id, last_seen in list(self.nodes_last_seen.items()):
-                    if node_id == self.node_id: continue # Don't check self
-                    
+                    if node_id == self.node_id: continue
                     if time.time() - last_seen > HEARTBEAT_TIMEOUT:
                         logging.info(f"Node {node_id} died. Reviving...")
                         self._revive_node(node_id)
                         del self.nodes_last_seen[node_id]
-            
-            # If I am NOT Leader: Check Leader
             else:
                 if time.time() - self.last_leader_heartbeat > HEARTBEAT_TIMEOUT:
                     logging.warning("Leader died! Starting election...")
                     self._start_election()
+
+    def _forward_loop(self):
+        """Periodically forward barrier completion messages downstream"""
+        while self.running:
+            time.sleep(1)
+            if not self.is_leader:
+                continue
+            
+            now = time.time()
+            forwards_to_send = []
+            trackers_to_prune = []
+            
+            # 1. Snapshot / Iterate safely under lock
+            with self.state.lock:
+                for client_id, stages in self.state.trackers.items():
+                    for stage, shards in list(stages.items()):
+                        # Only process Aggregator stages
+                        if stage not in [STAGE_AGG_PRODUCTS, STAGE_AGG_TPV, STAGE_AGG_PURCHASES]:
+                            continue
+
+                        for shard, tracker in list(shards.items()):
+                            # Determine upstream expected count
+                            upstream_count = 0
+                            if stage == STAGE_AGG_PRODUCTS:
+                                upstream_count = self.stage_expected.get(STAGE_FILTER_YEAR, 1)
+                            elif stage == STAGE_AGG_PURCHASES:
+                                upstream_count = self.stage_expected.get(STAGE_FILTER_YEAR, 1)
+                            elif stage == STAGE_AGG_TPV:
+                                upstream_count = self.stage_expected.get(STAGE_FILTER_HOUR, 1)
+
+                            complete, reason = tracker.is_complete(stage, now, self.forward_interval, upstream_count)
+                            
+                            if complete:
+                                tracker.forwarded = True
+                                tracker.last_forward_ts = now
+                                forwards_to_send.append((client_id, stage, shard, tracker.total_chunks, list(tracker.end_sender_ids), reason))
+                                trackers_to_prune.append((client_id, stage, shard))
+            
+            # 2. Send messages (I/O outside lock)
+            if forwards_to_send:
+                self._save_state() # Save state before sending
+                for (client, stage, shard, total, senders, reason) in forwards_to_send:
+                    self._forward_barrier(client, stage, shard, total, senders, reason)
+                
+                # 3. Prune completed trackers
+                with self.state.lock:
+                    for (client, stage, shard) in trackers_to_prune:
+                        self.state.remove_tracker(client, stage, shard)
+                self._save_state() # Save state after pruning
+
+    def _handle_barrier_message(self, data):
+        try:
+            client_id = data.get('client_id')
+            stage = data.get('stage')
+            shard = data.get('shard') or DEFAULT_SHARD
+            sender = data.get('sender')
+            chunks = data.get('chunks', 0)
+            msg_type = data.get('type')
+            
+            # Only process Aggregator stages
+            if stage not in [STAGE_AGG_PRODUCTS, STAGE_AGG_TPV, STAGE_AGG_PURCHASES]:
+                return
+
+            logging.info(f"Processing barrier message: client={client_id}, stage={stage}, shard={shard}, type={msg_type}, chunks={chunks}, processed={data.get('processed')}, expected={data.get('expected')}")
+
+            with self.state.lock:
+                tracker = self.state.get_tracker(client_id, stage, shard)
+                
+                if msg_type == MSG_WORKER_END:
+                    tracker.apply_end(sender, chunks)
+                elif msg_type == MSG_WORKER_STATS:
+                    processed = data.get('processed', chunks) 
+                    expected = data.get('expected')
+                    tracker.apply_stats(chunks, processed, expected)
+                    
+                    logging.info(f"Tracker Updated | client:{client_id} | stage:{stage} | shard:{shard} | "
+                                 f"AggProcessed:{tracker.agg_processed} | AggExpected:{tracker.agg_expected} | "
+                                 f"Ends:{tracker.received_end}")
+                
+            self._save_state()
+        except Exception as e:
+            logging.error(f"Barrier handle error: {e} | data:{data}")
+
+    def _save_state(self):
+        try:
+            state_dict = self.state.snapshot()
+            os.makedirs(os.path.dirname(self.persistence_path), exist_ok=True)
+            with open(self.persistence_path, 'w') as f:
+                json.dump(state_dict, f)
+        except Exception as e:
+            logging.error(f"Error saving state: {e}")
+
+    def _recover_state(self):
+        try:
+            if os.path.exists(self.persistence_path):
+                with open(self.persistence_path, 'r') as f:
+                    state_dict = json.load(f)
+                    self.state.restore(state_dict)
+                logging.info("Monitor state recovered.")
+        except Exception as e:
+            logging.error(f"Error recovering state: {e}")
+
+    def _forward_barrier(self, client_id, stage, shard, total_chunks, senders, reason):
+        try:
+            msg = {
+                'type': MSG_BARRIER_FORWARD,
+                'client_id': client_id,
+                'stage': stage,
+                'shard': shard,
+                'timestamp': time.time(),
+                'total_chunks': total_chunks,
+                'senders': senders,
+            }
+            connection = self._get_connection()
+            channel = connection.channel()
+            channel.exchange_declare(exchange=COORDINATION_EXCHANGE, exchange_type='topic', durable=True)
+            channel.basic_publish(
+                exchange=COORDINATION_EXCHANGE,
+                routing_key=f"{COORDINATION_ROUTING_KEY}.{stage}.{shard}",
+                body=json.dumps(msg)
+            )
+            connection.close()
+            logging.info(f"BARRIER FORWARD SENT | client:{client_id} | stage:{stage} | shard:{shard} | Reason: {reason}")
+        except Exception as e:
+            logging.error(f"Barrier forward error: {e} | client:{client_id} | stage:{stage} | shard:{shard}")
 
     def _start_election(self):
         if self.election_in_progress: return
@@ -220,9 +482,7 @@ class MonitorNode:
             logging.error(f"Broadcast error: {e}")
 
     def _revive_node(self, node_id):
-        # 1. Publish Death Certificate
         self._publish_death(node_id)
-        # 2. Docker Restart
         try:
             logging.info(f"Restarting container {node_id}...")
             subprocess.run(['docker', 'restart', node_id], check=False)
@@ -242,3 +502,43 @@ class MonitorNode:
             connection.close()
         except Exception as e:
             logging.error(f"Death cert error: {e}")
+
+    def _load_expected_from_config(self):
+        cfg_path = os.environ.get("MONITOR_CONFIG_PATH", "/home/mate/FIUBA/sistemas-distribuidos/Sistemas-Distribuidos-TP-Grupo13/config/config.ini")
+        raw = {}
+        try:
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#"): continue
+                    if ":" not in line: continue
+                    key, val = line.split(":", 1)
+                    try: raw[key.strip()] = int(val.strip())
+                    except ValueError: continue
+        except FileNotFoundError:
+            logging.warning(f"Monitor config not found at {cfg_path}, using defaults.")
+        except Exception as e:
+            logging.error(f"Failed to load monitor config {cfg_path}: {e}")
+
+        stage_map = {
+            "FILTER_YEAR": STAGE_FILTER_YEAR,
+            "FILTER_HOUR": STAGE_FILTER_HOUR,
+            "FILTER_AMOUNT": STAGE_FILTER_AMOUNT,
+            "AGGREGATOR_PRODUCTS": STAGE_AGG_PRODUCTS,
+            "AGGREGATOR_TPV": STAGE_AGG_TPV,
+            "AGGREGATOR_PURCHASES": STAGE_AGG_PURCHASES,
+            "MAXIMIZER_MAX_PARTIAL": STAGE_MAX_PARTIALS,
+            "MAXIMIZER_MAX_ABSOLUTE": STAGE_MAX_ABSOLUTE,
+            "MAXIMIZER_TOP3_PARTIAL": STAGE_TOP3_PARTIALS,
+            "MAXIMIZER_TOP3_ABSOLUTE": STAGE_TOP3_ABSOLUTE,
+            "JOINER_ITEMS": STAGE_JOIN_ITEMS,
+            "JOINER_STORES_TPV": STAGE_JOIN_STORES_TPV,
+            "JOINER_STORES_TOP3": STAGE_JOIN_STORES_TOP3,
+            "JOINER_USERS": STAGE_JOIN_USERS,
+            "SERVER_RESULTS": STAGE_SERVER_RESULTS,
+        }
+        # Load actual shard counts for all stages
+        stage_expected = {}
+        for cfg_key, stage in stage_map.items():
+            stage_expected[stage] = raw.get(cfg_key, 1)
+        return stage_expected

@@ -16,6 +16,7 @@ class AggregatorWorkingState(WorkingState):
         self.accumulated_chunks_per_client = {}
         self.chunks_to_receive = {}
         self.already_sent_stats = {}
+        self.last_stats_sent_time = {}
         self.global_accumulator = {}
         self.processed_ids = set()
 
@@ -100,6 +101,16 @@ class AggregatorWorkingState(WorkingState):
     def get_processed_for_aggregator(self, client_id, table_type, aggregator_id):
         return self._get_aggregator_value(self.chunks_processed_per_client, client_id, table_type, aggregator_id)
 
+    def set_global_total_expected(self, client_id, table_type, total):
+        self._ensure_dict_entry(self.chunks_to_receive, client_id, table_type)
+        self.chunks_to_receive[client_id][table_type] = total
+
+    def get_global_total_expected(self, client_id, table_type):
+        return self.chunks_to_receive.get(client_id, {}).get(table_type)
+
+    def get_total_processed_global(self, client_id, table_type):
+        return self._sum_counts(self.chunks_processed_per_client, client_id, table_type)
+
     def get_leader_id(self, client_id, table_type, default_id):
         aggregators = self.chunks_received_per_client.get(client_id, {}).get(table_type, {}).keys()
         return min(aggregators) if aggregators else default_id
@@ -133,6 +144,12 @@ class AggregatorWorkingState(WorkingState):
         self._ensure_global_entry(client_id)
         return self.global_accumulator[client_id].setdefault("tpv", defaultdict(float))
 
+    def get_last_stats_sent_time(self, client_id, table_type):
+        return self.last_stats_sent_time.get((client_id, table_type), 0.0)
+
+    def set_last_stats_sent_time(self, client_id, table_type, time_val):
+        self.last_stats_sent_time[(client_id, table_type)] = time_val
+
     def delete_client_data(self, client_id, table_type, accumulator_key):
         for dictionary in [
             self.end_message_received,
@@ -149,10 +166,19 @@ class AggregatorWorkingState(WorkingState):
         if (client_id, table_type) in self.already_sent_stats:
             del self.already_sent_stats[(client_id, table_type)]
 
+        if (client_id, table_type) in self.last_stats_sent_time:
+            del self.last_stats_sent_time[(client_id, table_type)]
+
         if (
             client_id in self.global_accumulator
             and accumulator_key in self.global_accumulator[client_id]
         ):
-            del self.global_accumulator[client_id][accumulator_key]
             if not self.global_accumulator[client_id]:
                 del self.global_accumulator[client_id]
+
+    def get_active_clients_and_tables(self):
+        active = []
+        for client_id, tables in self.chunks_received_per_client.items():
+            for table_type in tables.keys():
+                active.append((client_id, table_type))
+        return active

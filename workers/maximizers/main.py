@@ -25,9 +25,12 @@ def initialize_config():
             raise ValueError(f"Tipo de maximizer inválido: {max_type}")
 
         # Validar que sea uno de los tipos válidos
-        valid_types = ["MAX", "TOP3"]
+        valid_types = ["MAX", "TOP3", "TPV"]
         if max_type not in valid_types:
             raise ValueError(f"Tipo de maximizer inválido: {max_type}")
+
+        if max_type == "TPV":
+             return (logging_level, max_type, "absolute", None, [])
 
         if max_type == "MAX":
             shard_env = "MAX_SHARD_ID"
@@ -108,7 +111,14 @@ def main():
     monitor = HeartbeatSender()
     monitor.start()
 
-    maximizer = Maximizer(max_type, role, shard_id, partial_shards, monitor)
+    expected_inputs = int(os.getenv("EXPECTED_INPUTS", 1))
+    
+    # Determine maximizer_range based on role and shard_id
+    maximizer_range = "absolute"
+    if role == "partial":
+        maximizer_range = shard_id
+
+    maximizer = Maximizer(max_type, maximizer_range, expected_inputs, monitor)
 
     signal.signal(signal.SIGTERM, maximizer.shutdown)
         
