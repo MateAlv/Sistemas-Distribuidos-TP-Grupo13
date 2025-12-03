@@ -275,15 +275,11 @@ class Aggregator:
         if last_chunk:
             logging.info("Recovering last processing chunk...")
             try:
-                # We pass the serialized chunk to _handle_data_chunk
-                # But _handle_data_chunk expects bytes that ProcessBatchReader can parse.
-                # ProcessChunk.serialize() returns exactly that.
                 self._handle_data_chunk(last_chunk.serialize())
             except Exception as e:
                 logging.error(f"Error recovering last chunk: {e}")
 
         while self._running:
-            self._send_periodic_stats()
             try:
                 self.chunk_timer = self.middleware_queue_receiver.connection.call_later(TIMEOUT, chunk_stop)
                 self.middleware_queue_receiver.start_consuming(chunk_callback)
@@ -308,7 +304,6 @@ class Aggregator:
             #         f"action: stats_consume_error | type:{self.aggregator_type} | agg_id:{self.aggregator_id} | error:{e}"
             #     )
 
-            # Consume coordination barrier forwards
             try:
                 coord_timer = self.middleware_coordination.connection.call_later(TIMEOUT, coord_stop)
                 self.middleware_coordination.start_consuming(coord_callback)
@@ -547,23 +542,8 @@ class Aggregator:
         self.working_state.mark_processed(chunk.message_id())
         self._save_state(chunk.message_id())
 
-        # [NEW] Send stats to Monitor
-        self._send_stats_to_monitor(client_id, table_type)
-
-        # [CRITICAL] Late Data Handling
-        # If we already forwarded the barrier (sent END), and we receive more data (out of order),
-        # we must re-send stats to Monitor so it knows we processed more.
-        # However, if we already sent END to Maximizer, sending more data might confuse it if it closed the stream.
-        # But Maximizers usually wait for END. If we sent END, we shouldn't send more data?
-        # Actually, if we sent END, it means Monitor saw processed >= expected.
-        # If we receive MORE data now, it means 'expected' was wrong or 'processed' was incomplete?
-        # Or maybe 'expected' increased?
-        # If we receive data, we MUST process it.
-        # If we already sent END, we might need to send another END?
-        # Or just rely on the fact that Maximizer might handle it.
-        # For now, just ensure Monitor gets the update.
-        
-        # Removed: self._can_send_end_message check
+        if self.working_state.is_end_message_received(client_id, table_type):
+            self._send_stats_to_monitor(client_id, table_type)
 
     def _recover_state(self):
         state_data = self.persistence.recover_working_state()
@@ -577,8 +557,6 @@ class Aggregator:
     def _save_state(self, last_processed_id):
         self.persistence.commit_working_state(self.working_state.to_bytes(), last_processed_id)
 
-
-    # Helper methods removed as they are now in WorkingState
 
     def _send_stats_to_monitor(self, client_id, table_type):
         processed = self.working_state.get_processed_for_aggregator(client_id, table_type, self.aggregator_id)
@@ -597,14 +575,7 @@ class Aggregator:
             logging.info(f"DEBUG: stats_sent_to_monitor | stage:{self.stage} | cli_id:{client_id} | processed:{processed}")
         except Exception as e:
             logging.error(f"action: stats_send_error | stage:{self.stage} | cli_id:{client_id} | error:{e}")
-
-    # Removed _send_periodic_stats
-    def _send_periodic_stats(self):
-        pass
-
-
-
-    # Removed _can_send_end_message (logic moved to Monitor)
+            
 
     def _send_end_message(self, client_id, table_type):
         total_processed = self.working_state.get_total_processed(client_id, table_type)
@@ -620,38 +591,6 @@ class Aggregator:
 
         # Send END message with OUR ID
         try:
-            # We send the count of chunks WE processed/generated. 
-            # Actually, for the next stage (Maximizer/Joiner), they need to know how many items to expect.
-            # If we are sending results (e.g. Products), we send chunks of results.
-            # The count in MessageEnd should be the number of RESULT chunks we sent?
-            # Or the number of input chunks we processed?
-            
-            # The protocol usually expects "total_items" or "total_chunks".
-            # If downstream waits for "total_expected", and we send "total_processed", it might be confusing if they sum it up.
-            # But wait, the Maximizer will sum up "count" from all aggregators.
-            # So we should send the number of items/chunks WE produced for the next stage.
-            
-            # However, `publish_final_results` sends data but doesn't return the count easily here.
-            # But wait, `publish_final_results` sends ONE chunk per queue usually, or multiple.
-            # Let's look at `publish_final_products`: it iterates and sends chunks.
-            
-            # For simplicity in this refactor, let's assume we send 1 END message per aggregator.
-            # The count in MessageEnd is used by the receiver.
-            # If the receiver sums them up, it gets a total.
-            # What does the receiver use this total for?
-            # Maximizer uses it to know if it received all data? No, it uses it to know "total_expected".
-            
-            # If we change the logic so Maximizer waits for N end messages, the "count" field becomes "payload size" or "items produced".
-            # Let's send 0 for now if it's not strictly used for verification, OR send the number of result chunks we sent.
-            # Given we don't track result chunks sent count easily here without modifying publish_final_results, 
-            # and the previous logic sent "total_processed" (input chunks), let's stick to sending "total_processed" 
-            # BUT downstream must know this is "input chunks processed by this aggregator" if they want to verify.
-            
-            # Actually, the previous logic sent `total_processed` which was the GLOBAL total processed (since it was leader).
-            # Now each aggregator sends its OWN processed count.
-            # So Sum(OwnProcessed) = GlobalTotalProcessed = GlobalTotalExpected.
-            # This maintains consistency!
-            
             send_table_type = table_type
             if self.aggregator_type == "TPV":
                 send_table_type = TableType.TPV
@@ -684,21 +623,9 @@ class Aggregator:
         except Exception as e:
             logging.error(f"action: error_sending_end_message | error:{e}")
 
-        # Removed stats_end emission
-        # stats_end_table = TableType.TPV if self.aggregator_type == "TPV" else table_type
-        # stats_end = AggregatorStatsEndMessage(self.aggregator_id, client_id, stats_end_table)
-        # self.middleware_stats_exchange.send(stats_end.encode())
-        
-        # Clean up
-        self.delete_client_data(client_id) # Modified to take client_id directly if possible or adapt
+        self.delete_client_data(client_id)
         
     def delete_client_data(self, client_id):
-        # Wrapper to adapt to old signature if needed, or just call working_state
-        # The original delete_client_data took a message object?
-        # Let's check AggregatorWorkingState.
-        # It seems we need to implement this or fix the call.
-        # Original code called self.delete_client_data(stats_end) where stats_end was a message.
-        # We should just clear state for client.
         self.working_state.delete_client_data(client_id, self.aggregator_type)
         logging.info(f"action: client_data_deleted | client_id:{client_id}")
 
