@@ -336,6 +336,9 @@ class Maximizer:
             logging.info(
                 f"DEBUGGING_QUERY_3 | max_tpv_apply_after | cli_id:{client_id} | keys_after:{post_keys}"
             )
+        # Persist immediately after apply + mark processed to avoid losing state on crash
+        self.working_state.mark_processed(chunk.message_id())
+        self._save_state(chunk.message_id())
 
         self._check_crash_point("CRASH_AFTER_PROCESS_BEFORE_COMMIT")
 
@@ -368,11 +371,9 @@ class Maximizer:
                 if shard_slug:
                     self.received_shards[client_id].add(shard_slug)
                 logging.info(
-                    f"action: tpv_tracking | client_id:{client_id} | shards_seen:{len(self.received_shards[client_id])} | shards:{sorted(self.received_shards[client_id])}"
-                )
+                f"action: tpv_tracking | client_id:{client_id} | shards_seen:{len(self.received_shards[client_id])} | shards:{sorted(self.received_shards[client_id])}"
+            )
 
-        self.working_state.mark_processed(chunk.message_id())
-        self._save_state(chunk.message_id())
         # Clear processing commit after successful handling to avoid recovery loops
         try:
             self.persistence.clear_processing_commit()
@@ -679,7 +680,11 @@ class Maximizer:
         if accumulated_results:
             from utils.processing.process_chunk import ProcessChunkHeader
             from utils.file_utils.table_type import TableType
-            header = ProcessChunkHeader(client_id=client_id, table_type=TableType.TRANSACTION_ITEMS)
+            header = ProcessChunkHeader(
+                client_id=client_id,
+                table_type=TableType.TRANSACTION_ITEMS,
+                message_id=self._deterministic_msg_id("max-partial", client_id),
+            )
             chunk = ProcessChunk(header, accumulated_results)
             
             chunk_data = chunk.serialize()
@@ -725,7 +730,11 @@ class Maximizer:
         if accumulated_results:
             from utils.processing.process_chunk import ProcessChunkHeader
             from utils.file_utils.table_type import TableType
-            header = ProcessChunkHeader(client_id=client_id, table_type=TableType.PURCHASES_PER_USER_STORE)
+            header = ProcessChunkHeader(
+                client_id=client_id,
+                table_type=TableType.PURCHASES_PER_USER_STORE,
+                message_id=self._deterministic_msg_id("top3-partial", client_id),
+            )
             chunk = ProcessChunk(header, accumulated_results)
             self.data_sender.send(chunk.serialize())
             # NO cerrar la conexión aquí - se cerrará después de enviar el END message
@@ -775,7 +784,11 @@ class Maximizer:
         if accumulated_results:
             from utils.processing.process_chunk import ProcessChunkHeader
             from utils.file_utils.table_type import TableType
-            header = ProcessChunkHeader(client_id=client_id, table_type=TableType.PURCHASES_PER_USER_STORE)
+            header = ProcessChunkHeader(
+                client_id=client_id,
+                table_type=TableType.PURCHASES_PER_USER_STORE,
+                message_id=self._deterministic_msg_id("top3-absolute", client_id),
+            )
             chunk = ProcessChunk(header, accumulated_results)
             self.data_sender.send(chunk.serialize())
             
@@ -886,7 +899,11 @@ class Maximizer:
         if accumulated_results:
             from utils.processing.process_chunk import ProcessChunkHeader
             from utils.file_utils.table_type import TableType
-            header = ProcessChunkHeader(client_id=client_id, table_type=TableType.TRANSACTION_ITEMS)
+            header = ProcessChunkHeader(
+                client_id=client_id,
+                table_type=TableType.TRANSACTION_ITEMS,
+                message_id=self._deterministic_msg_id("max-absolute", client_id),
+            )
             chunk = ProcessChunk(header, accumulated_results)
             self.data_sender.send(chunk.serialize())
             
@@ -912,3 +929,8 @@ class Maximizer:
 
     def _save_state(self, last_processed_id):
         self.persistence.commit_working_state(self.working_state.to_bytes(), last_processed_id)
+
+    def _deterministic_msg_id(self, label: str, client_id: int) -> uuid.UUID:
+        """Stable UUID for idempotent publishes (per client and shard/range)."""
+        shard_component = self.shard_id or DEFAULT_SHARD
+        return uuid.uuid5(uuid.NAMESPACE_DNS, f"{label}-{client_id}-{self.maximizer_type}-{self.maximizer_range}-{shard_component}")
