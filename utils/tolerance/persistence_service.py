@@ -249,7 +249,9 @@ class PersistenceService:
 
     def commit_send_ack(self, client_id: int, last_sent_id: uuid.UUID):
         """Commits the send ack for a given client_id and last_sent_id."""
-        self.messages_sent_by_user[client_id] = last_sent_id
+        if client_id not in self.messages_sent_by_user:
+            self.messages_sent_by_user[client_id] = []
+        self.messages_sent_by_user[client_id].append(last_sent_id)
         try:
             commit = SendAckCommit(last_sent_id, client_id)
             atomic_file_append(self.send_commit_path, commit.serialize())

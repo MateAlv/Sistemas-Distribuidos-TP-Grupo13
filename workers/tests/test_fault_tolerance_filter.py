@@ -354,14 +354,16 @@ class TestFilterCrashPoints(unittest.TestCase):
         
         # ❌ CRASH (simulated by creating new Filter instance)
         filter_worker2 = Filter(self.config)
-        
-        # Verify: Chunk was recovered and processed
-        # The handle_processing_recovery() should have processed it
+
+        # Verify: Chunk was recovered and processed during handle_processing_recovery
+        # It should no longer be pending in persistence (processed + ACKed)
         recovered_chunk = filter_worker2.persistence_service.recover_last_processing_chunk()
-        
-        # After recovery, the chunk should have been processed
-        # Note: This depends on handle_processing_recovery implementation
-        self.assertIsNotNone(recovered_chunk, "Chunk should be persisted and recoverable")
+        self.assertIsNone(recovered_chunk, "Chunk should have been reprocessed and cleared on recovery")
+
+        # Confirm it was marked processed and acked
+        self.assertIn(chunk.message_id(), filter_worker2.working_state.processed_ids)
+        # On recovery the code marks processed_ids but not global_processed_ids
+        self.assertIn(chunk.message_id(), filter_worker2.persistence_service.messages_sent_by_user.get(chunk.client_id(), []))
 
     @patch('workers.filter.common.filter.MessageMiddlewareQueue')
     @patch('workers.filter.common.filter.MessageMiddlewareExchange')
