@@ -96,12 +96,17 @@ class Aggregator:
         self.shard_count = int(os.getenv("AGGREGATOR_SHARDS", "1"))
 
         # Initialize persistence with chunk buffering
-        commit_interval = int(os.getenv("AGGREGATOR_COMMIT_INTERVAL", "10"))
+        # Support PERSISTENCE_DIR for testing (defaults to /data/persistence for production)
+        persistence_dir = os.getenv("PERSISTENCE_DIR", "/data/persistence")
+        commit_interval = int(os.getenv("AGGREGATOR_COMMIT_INTERVAL", "50"))
         self.persistence = PersistenceService(
-            f"/data/persistence/aggregator_{self.aggregator_type}_{self.aggregator_id}",
+            f"{persistence_dir}/aggregator_{self.aggregator_type}_{self.aggregator_id}",
             commit_interval=commit_interval
         )
         self._recover_state()
+        
+        # Handle recovery of buffered chunks
+        self.handle_processing_recovery()
 
 
 
@@ -336,9 +341,6 @@ class Aggregator:
         def coord_stop():
             self.middleware_coordination.stop_consuming()
 
-
-        # Recovery: handle_processing_recovery()
-        self.handle_processing_recovery()
 
         while self._running:
             try:
