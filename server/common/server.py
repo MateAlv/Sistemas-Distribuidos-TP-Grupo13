@@ -213,15 +213,28 @@ class Server:
                     for table_type, count in number_of_chunks_per_file.items():
                         # Use chunks actually sent per client/table/shard (if available) instead of file count
                         # Broadcast END a todos los shards de year para que propaguen su propio total
-                        for sid in range(1, self.filter_year_shards + 1):
-                            chunk_total = chunks_sent_per_shard.get((client_id, table_type, sid), count)
+                        if table_type == TableType.TRANSACTIONS or table_type == TableType.TRANSACTION_ITEMS:
+                            # Sharded tables: Send END only to shards that received data
+                            for sid in range(1, self.filter_year_shards + 1):
+                                chunk_total = chunks_sent_per_shard.get((client_id, table_type, sid), 0)
+                                if chunk_total > 0:
+                                    message = MessageEnd(client_id, table_type=table_type, count=chunk_total).encode()
+                                    queue_name = f"to_filter_year_shard_{sid}"
+                                    logging.debug("action: sending_end_message | peer:%s | client_id:%s | table_type:%s | shard:%s | count:%d", 
+                                               peer, client_id, table_type.name, sid, chunk_total)
+                                    middleware_queue_senders[queue_name].send(message)
+                                else:
+                                    logging.debug("action: skip_end_empty_shard | peer:%s | client_id:%s | table_type:%s | shard:%s", 
+                                               peer, client_id, table_type.name, sid)
+                        
+                        else:
+                            # Non-sharded tables: Send END once
+                            chunk_total = count
                             message = MessageEnd(client_id, table_type=table_type, count=chunk_total).encode()
-                            logging.debug("action: sending_end_message | peer:%s | client_id:%s | table_type:%s | shard:%s | count:%d", 
-                                       peer, client_id, table_type.name, sid, chunk_total)
-                            if table_type == TableType.TRANSACTIONS or table_type == TableType.TRANSACTION_ITEMS:
-                                queue_name = f"to_filter_year_shard_{sid}"
-                                middleware_queue_senders[queue_name].send(message)
-                            elif table_type == TableType.STORES:
+                            logging.debug("action: sending_end_message_broadcast | peer:%s | client_id:%s | table_type:%s | count:%d", 
+                                       peer, client_id, table_type.name, chunk_total)
+                            
+                            if table_type == TableType.STORES:
                                 middleware_queue_senders["to_join_stores_tpv"].send(message)
                                 middleware_queue_senders["to_join_stores_top3"].send(message)
                                 middleware_queue_senders["to_top3"].send(message)
@@ -442,12 +455,6 @@ class Server:
         Escucha resultados de la cola to_merge_data para este cliente específico.
         Envía resultados en lotes y detecta fin automáticamente.
         """
-        # Additionally, listen for monitor BARRIER_FORWARD for server_results
-        coord_results = []
-        def coord_callback(msg): coord_results.append(msg)
-        def coord_stop():
-            middleware_coordination.stop_consuming()
-        
         maximum_chunks = self._max_number_of_chunks_in_batch()
         all_data_received = False
         all_data_received_per_query = {
@@ -488,11 +495,6 @@ class Server:
             middleware_queue.stop_consuming()
 
         while not all_data_received:
-            try:
-                middleware_coordination.connection.call_later(TIMEOUT, coord_stop)
-                middleware_coordination.start_consuming(coord_callback)
-            except Exception as e:
-                logging.error(f"action: server_coordination_consume_error | error:{e}")
             middleware_queue.connection.call_later(TIMEOUT, stop)
             middleware_queue.start_consuming(callback)
 
@@ -546,6 +548,10 @@ class Server:
                             filtered_chunk = ResultChunk(new_header, new_rows)
                             chunks_received[query].append(filtered_chunk)
                             number_of_chunks_received[query] += 1
+                            if query == ResultTableType.QUERY_3:
+                                logging.info(
+                                    f"DEBUGGING_QUERY_3 | server_result_chunk | client_id:{client_id} | query:{query.name} | rows:{len(new_rows)} | chunks_received:{number_of_chunks_received[query]}"
+                                )
                             logging.debug(f"action: result_receiver | client_id:{client_id} | rows:{len(new_rows)} | query:{query.name}")
                         else:
                             logging.debug(f"action: empty_chunk_after_dedup | client_id:{client_id} | query:{query.name}")
@@ -569,19 +575,6 @@ class Server:
                 finally:
                     if msg in results_for_client:
                         results_for_client.remove(msg)
-
-            # Process barrier_forward signals
-            for raw_coord in list(coord_results):
-                try:
-                    data = json.loads(raw_coord)
-                    if data.get("type") == "BARRIER_FORWARD" and data.get("stage") == STAGE_SERVER_RESULTS and data.get("shard", DEFAULT_SHARD) == DEFAULT_SHARD:
-                        logging.info(f"action: barrier_forward_received_server | client_id:{client_id}")
-                        all_data_received = True
-                except Exception as e:
-                    logging.error(f"action: error_processing_server_barrier | error:{e}")
-                finally:
-                    if raw_coord in coord_results:
-                        coord_results.remove(raw_coord)
 
             all_data_received = all(all_data_received_per_query.values())
 

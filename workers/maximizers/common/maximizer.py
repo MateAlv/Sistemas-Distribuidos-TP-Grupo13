@@ -1,4 +1,4 @@
-from utils.processing.process_table import TransactionItemsProcessRow, PurchasesPerUserStoreRow
+from utils.processing.process_table import TransactionItemsProcessRow, PurchasesPerUserStoreRow, TPVProcessRow
 import logging
 import json
 from utils.processing.process_table import TableProcessRow
@@ -27,12 +27,12 @@ from utils.protocol import (
     COORDINATION_EXCHANGE,
     MSG_WORKER_END,
     MSG_WORKER_STATS,
-    MSG_BARRIER_FORWARD,
     DEFAULT_SHARD,
     STAGE_MAX_PARTIALS,
     STAGE_MAX_ABSOLUTE,
     STAGE_TOP3_PARTIALS,
     STAGE_TOP3_ABSOLUTE,
+    STAGE_MAX_TPV,
 )
 
 TIMEOUT = 3
@@ -52,7 +52,6 @@ class Maximizer:
         self.maximizer_type = maximizer_type
         self.maximizer_range = maximizer_range
         self.expected_inputs = int(expected_inputs)
-        self.barrier_forwarded = set()
         
         self.role = "absolute" if self.maximizer_range == "absolute" else "partial"
         self.shard_id = self.maximizer_range if self.role == "partial" else None
@@ -70,8 +69,10 @@ class Maximizer:
         # Stage name and shard for centralized barrier
         if self.maximizer_type == "MAX":
             self.stage = STAGE_MAX_ABSOLUTE if self.is_absolute_max() else STAGE_MAX_PARTIALS
-        else:
+        elif self.maximizer_type == "TOP3":
             self.stage = STAGE_TOP3_ABSOLUTE if self.is_absolute_top3() else STAGE_TOP3_PARTIALS
+        elif self.maximizer_type == "TPV":
+            self.stage = STAGE_MAX_TPV
         self.shard_id = self.shard_slug if self.shard_slug else DEFAULT_SHARD
         
         if self.maximizer_type == "MAX":
@@ -89,6 +90,13 @@ class Maximizer:
             self.data_receiver = MessageMiddlewareQueue("rabbitmq", "to_top3_absolute")
             self.middleware_exchange_sender = MessageMiddlewareExchange("rabbitmq", "end_exchange_maximizer_TOP3", [""], exchange_type="fanout")
             self.middleware_exchange_receiver = None  # No necesita escuchar END de nadie
+        elif self.maximizer_type == "TPV":
+            # TPV absoluto - recibe de aggregators shardeados
+            # Output: Joiner Stores TPV
+            self.data_sender = MessageMiddlewareQueue("rabbitmq", "to_absolute_tpv") # Joiner queue name
+            self.data_receiver = MessageMiddlewareQueue("rabbitmq", "to_absolute_tpv_max") # New queue for max
+            self.middleware_exchange_sender = MessageMiddlewareExchange("rabbitmq", "end_exchange_maximizer_TPV", [""], exchange_type="fanout")
+            self.middleware_exchange_receiver = None
         else:
             raise ValueError(f"Tipo de maximizer inválido: {self.maximizer_type}")
 
@@ -122,12 +130,25 @@ class Maximizer:
             logging.debug(f"action: end_already_processed | type:{self.maximizer_type} | range:{self.maximizer_range} | client_id:{client_id}")
             return
 
-        if not self._is_valid_table_type(table_type, for_end=True):
-            expected_table = self._expected_table_type()
+        expected_table = self._expected_table_type()
+        if self.maximizer_type == "TOP3" and not self.is_absolute_top3():
+            if table_type == TableType.TRANSACTIONS:
+                 # Partial TOP3 receives TRANSACTIONS end from aggregator
+                 pass
+            elif table_type != expected_table:
+                 logging.debug(f"action: ignoring_end_wrong_table | expected:{expected_table} | received:{table_type} | client_id:{client_id}")
+                 return
+        elif self.maximizer_type == "TPV":
+            # TPV receives TPV end from aggregator
+            if table_type != TableType.TPV:
+                 logging.debug(f"action: ignoring_end_wrong_table | expected:{expected_table} | received:{table_type} | client_id:{client_id}")
+                 return
+        elif table_type != expected_table:
             logging.debug(f"action: ignoring_end_wrong_table | expected:{expected_table} | received:{table_type} | client_id:{client_id}")
             return
 
         self.working_state.mark_client_end_processed(client_id)
+        self._save_state(uuid.uuid4())
         logging.info(f"action: end_received_processing_final | type:{self.maximizer_type} | range:{self.maximizer_range} | client_id:{client_id}")
 
         chunks_sent = 0
@@ -139,6 +160,9 @@ class Maximizer:
         elif self.maximizer_type == "TOP3":
             chunks_sent = self.publish_absolute_top3_results(client_id)
             self._send_end_message(client_id, TableType.PURCHASES_PER_USER_STORE, "joiner", chunks_sent, sender_id or "absolute")
+        elif self.maximizer_type == "TPV":
+            chunks_sent = self.publish_tpv_results(client_id)
+            self._send_end_message(client_id, TableType.TPV, "joiner", chunks_sent, sender_id or "absolute")
 
         logging.info(f"action: maximizer_finished | type:{self.maximizer_type} | range:{self.maximizer_range} | client_id:{client_id}")
         self.delete_client_data(client_id)
@@ -147,25 +171,16 @@ class Maximizer:
         logging.info(f"Maximizer iniciado. Tipo: {self.maximizer_type}, Rango: {self.maximizer_range}, Receiver: {getattr(self.data_receiver, 'queue_name', 'unknown')}")
         
         messages = deque()
-        coord_messages = deque()
         
         def callback(msg):
             messages.append(msg)
             logging.info(f"action: data_received | type:{self.maximizer_type} | range:{self.maximizer_range} | size:{len(msg)}")
-        def coord_callback(msg):
-            coord_messages.append(msg)
-            logging.debug(f"action: coordination_received | type:{self.maximizer_type} | range:{self.maximizer_range} | size:{len(msg)}")
             
         def stop():
             try:
                 self.data_receiver.stop_consuming()
             except Exception as e:
                 logging.debug(f"action: stop_consuming_warning | type:{self.maximizer_type} | range:{self.maximizer_range} | error:{e}")
-        def coord_stop():
-            try:
-                self.middleware_coordination.stop_consuming()
-            except Exception as e:
-                logging.debug(f"action: coord_stop_consuming_warning | type:{self.maximizer_type} | range:{self.maximizer_range} | error:{e}")
 
         # Recover last processing chunk if exists
         last_chunk = self.persistence.recover_last_processing_chunk()
@@ -184,12 +199,6 @@ class Maximizer:
                 self.data_receiver.start_consuming(callback)
             except Exception as e:
                 logging.error(f"action: error_during_consumption | type:{self.maximizer_type} | range:{self.maximizer_range} | error:{e}")
-            try:
-                if hasattr(self.middleware_coordination, "connection"):
-                    self.middleware_coordination.connection.call_later(TIMEOUT, coord_stop)
-                self.middleware_coordination.start_consuming(coord_callback)
-            except Exception as e:
-                logging.error(f"action: coordination_consume_error | type:{self.maximizer_type} | range:{self.maximizer_range} | error:{e}")
 
             while messages:
 
@@ -202,18 +211,14 @@ class Maximizer:
                 except Exception as e:
                     logging.error(f"action: error_processing_message | type:{self.maximizer_type} | range:{self.maximizer_range} | error:{e}")
 
-            while coord_messages:
-                cmsg = coord_messages.popleft()
-                try:
-                    self._handle_barrier_forward(cmsg)
-                except Exception as e:
-                    logging.error(f"action: error_processing_coord | type:{self.maximizer_type} | range:{self.maximizer_range} | error:{e}")
-
     def _handle_end_message(self, raw_message: bytes):
-        logging.info(f"DEBUG: _handle_end_message called with {raw_message}")
+        logging.info(f"action: recv_end_raw | type:{self.maximizer_type} | range:{self.maximizer_range} | raw:{raw_message}")
         try:
             end_message = MessageEnd.decode(raw_message)
-            logging.info(f"DEBUG: decoded end_message: client_id={end_message.client_id()}, table_type={end_message.table_type()}, sender_id={end_message.sender_id()}")
+            logging.info(
+                f"action: end_decoded | type:{self.maximizer_type} | range:{self.maximizer_range} | client_id:{end_message.client_id()} "
+                f"| table:{end_message.table_type()} | sender_id:{end_message.sender_id()} | count:{end_message.total_chunks()}"
+            )
         except Exception as e:
             logging.error(f"action: error_decoding_end_message | error:{e}")
             return
@@ -239,7 +244,11 @@ class Maximizer:
             self.working_state.add_expected_chunks(client_id, count)
             
             finished_count = self.working_state.get_finished_senders_count(client_id)
-            logging.info(f"action: end_received | client_id:{client_id} | sender_id:{sender_id} | count:{count} | finished:{finished_count}/{self.expected_inputs}")
+            total_expected = self.working_state.get_total_expected_chunks(client_id)
+            logging.info(
+                f"action: end_received | type:{self.maximizer_type} | range:{self.maximizer_range} | client_id:{client_id} "
+                f"| sender_id:{sender_id} | count:{count} | finished:{finished_count}/{self.expected_inputs} | total_expected_chunks:{total_expected}"
+            )
             
             if finished_count >= self.expected_inputs:
                 logging.info(f"action: all_inputs_finished | client_id:{client_id}")
@@ -262,6 +271,15 @@ class Maximizer:
                      # Absolute Top3 logic
                      self.process_client_end(client_id, table_type)
                 
+                elif self.maximizer_type == "TPV":
+                     # TPV Absolute logic: Wait for all configured shards to finish
+                     # We use expected_shards from configuration.
+                     if finished_count >= self.expected_shards:
+                         logging.info(f"action: tpv_finished | client_id:{client_id} | finished:{finished_count} | expected:{self.expected_shards}")
+                         self.process_client_end(client_id, table_type)
+                     else:
+                         logging.info(f"action: tpv_waiting | client_id:{client_id} | finished:{finished_count} | expected:{self.expected_shards}")
+
                 else:
                     # Partial Maximizer logic
                     # We received END from all Aggregators.
@@ -305,7 +323,17 @@ class Maximizer:
             return
 
         logging.info(f"action: maximize | type:{self.maximizer_type} | range:{self.maximizer_range} | client_id:{client_id} | file_type:{table_type} | rows_in:{len(chunk.rows)}")
+        if self.maximizer_type == "TPV":
+            prev_keys = len(self.working_state.get_tpv_results(client_id))
+            logging.info(
+                f"DEBUGGING_QUERY_3 | max_tpv_apply_before | cli_id:{client_id} | rows_in:{len(chunk.rows)} | keys_before:{prev_keys}"
+            )
         self.apply(client_id, chunk)
+        if self.maximizer_type == "TPV":
+            post_keys = len(self.working_state.get_tpv_results(client_id))
+            logging.info(
+                f"DEBUGGING_QUERY_3 | max_tpv_apply_after | cli_id:{client_id} | keys_after:{post_keys}"
+            )
 
         self._check_crash_point("CRASH_AFTER_PROCESS_BEFORE_COMMIT")
 
@@ -331,6 +359,15 @@ class Maximizer:
             if len(self.received_shards[client_id]) >= self.expected_shards:
                 logging.info(f"action: absolute_top3_ready | client_id:{client_id} | all_shards_received")
                 self.process_client_end(client_id, table_type)
+        elif self.maximizer_type == "TPV":
+            # Track TPV shards
+            for row in chunk.rows:
+                shard_slug = self._extract_shard_from_row(row)
+                if shard_slug:
+                    self.received_shards[client_id].add(shard_slug)
+            logging.info(
+                f"action: tpv_tracking | client_id:{client_id} | shards_seen:{len(self.received_shards[client_id])} | shards:{sorted(self.received_shards[client_id])}"
+            )
 
         self.working_state.mark_processed(chunk.message_id())
         self._save_state(chunk.message_id())
@@ -384,6 +421,8 @@ class Maximizer:
             return TableType.TRANSACTION_ITEMS
         if self.maximizer_type == "TOP3":
             return TableType.PURCHASES_PER_USER_STORE
+        if self.maximizer_type == "TPV":
+            return TableType.TPV
         raise ValueError(f"Tipo de maximizer inválido: {self.maximizer_type}")
 
     def _is_valid_table_type(self, table_type: TableType, *, for_end: bool) -> bool:
@@ -418,6 +457,10 @@ class Maximizer:
         shard_field = getattr(row, "shard", None)
         if shard_field:
             return str(shard_field)
+        # Try explicit shard_id field (TPV)
+        shard_id_field = getattr(row, "shard_id", None)
+        if shard_id_field:
+            return str(shard_id_field)
         return None
     
     def shutdown(self, signum=None, frame=None):
@@ -488,6 +531,25 @@ class Maximizer:
         Actualiza los máximos relativos o absolutos.
         """
         updated_count = 0
+        if self.maximizer_type == "TOP3":
+            self.update_top3(client_id, rows)
+            return True
+        elif self.maximizer_type == "TPV":
+            # TPV Logic: Sum final_amount (or tpv) by store and year_half
+            for row in rows:
+                store_id = getattr(row, 'store_id', None)
+                year_half = getattr(row, 'year_half', None)
+                tpv = getattr(row, 'tpv', 0.0)
+                
+                if store_id is None or year_half is None:
+                    logging.warning(f"action: invalid_tpv_row | row:{row}")
+                    continue
+                
+                self.working_state.update_tpv(client_id, store_id, year_half, tpv)
+                updated_count += 1
+            
+            return True
+        
         client_sellings = self.working_state.get_sellings_max(client_id)
         client_profit = self.working_state.get_profit_max(client_id)
 
@@ -537,21 +599,11 @@ class Maximizer:
                 purchase_count = int(row.purchases_made)
 
                 if store_id not in client_top3:
-                    client_top3[store_id] = []
+                    client_top3[store_id] = defaultdict(int)
 
-                heap = client_top3[store_id]
-                if len(heap) < 3:
-                    heapq.heappush(heap, (purchase_count, user_id))
-                    logging.debug(f"action: push | store:{store_id} | user:{user_id} | count:{purchase_count}")
-                else:
-                    root_count, root_user = heap[0]
-                    # Compara ambos campos sobre el mínimo del heap
-                    if (purchase_count, user_id) > (root_count, root_user):
-                        heapq.heapreplace(heap, (purchase_count, user_id))
-                        logging.debug(
-                            f"action: replace | store:{store_id} | user:{user_id} "
-                            f"| count:{purchase_count} | replaced:{(root_count, root_user)}"
-                        )
+                # Accumulate counts instead of maintaining a heap of partials
+                client_top3[store_id][user_id] += purchase_count
+                logging.debug(f"action: accumulate_top3 | store:{store_id} | user:{user_id} | added:{purchase_count} | new_total:{client_top3[store_id][user_id]}")
 
         logging.info(f"action: top3_result | type:{self.maximizer_type} | client_id:{client_id}  | stores_processed:{len(client_top3)} | stores_after:{list(client_top3.keys())}")
 
@@ -578,9 +630,9 @@ class Maximizer:
         elif self.maximizer_type == "TOP3":
             self.update_top3(client_id, chunk.rows)
             return True
-        else:
-            logging.error(f"Maximizador desconocido: {self.maximizer_type}")
-            return False
+        elif self.maximizer_type == "TPV":
+            self.update_max(client_id, chunk.rows)
+            return True
     
     def publish_partial_max_results(self, client_id: int) -> int:
         """
@@ -644,11 +696,13 @@ class Maximizer:
         marker_date = datetime.date(2024, 1, 1)  # Fecha marca
         client_top3 = self.working_state.get_top3_by_store(client_id)
         
-        for store_id, top3_heap in client_top3.items():
-            # Convertir heap a lista ordenada (mayor a menor)
-            top3_list = sorted(top3_heap, key=lambda x: x[0], reverse=True)
+        for store_id, user_counts in client_top3.items():
+            # Calculate Top 3 from accumulated counts
+            # user_counts is dict {user_id: count}
+            # We want top 3 by count, then by user_id
+            top3_list = heapq.nlargest(3, user_counts.items(), key=lambda x: (x[1], x[0]))
             
-            for rank, (purchase_count, user_id) in enumerate(top3_list, 1):
+            for rank, (user_id, purchase_count) in enumerate(top3_list, 1):
                 # Usar PurchasesPerUserStoreRow para enviar los datos al TOP3 absoluto
                 row = PurchasesPerUserStoreRow(
                     store_id=store_id,
@@ -694,11 +748,13 @@ class Maximizer:
         
         # Los datos ya vienen procesados de los maximizers parciales
         # Solo necesitamos reenviarlos al joiner
-        for store_id, top3_heap in client_top3.items():
-            logging.debug(f"action: processing_store_for_forward | client_id:{client_id} | store_id:{store_id} | heap_size:{len(top3_heap)}")
+        for store_id, user_counts in client_top3.items():
+            logging.debug(f"action: processing_store_for_forward | client_id:{client_id} | store_id:{store_id} | users_count:{len(user_counts)}")
             
-            # Los datos ya están como TOP3 por store
-            for purchase_count, user_id in top3_heap:
+            # Calculate Top 3 from accumulated counts
+            top3_list = heapq.nlargest(3, user_counts.items(), key=lambda x: (x[1], x[0]))
+
+            for user_id, purchase_count in top3_list:
                 row = PurchasesPerUserStoreRow(
                     store_id=store_id,
                     store_name="",  # Placeholder - lo llena el joiner
@@ -720,6 +776,42 @@ class Maximizer:
             return 1
         else:
             logging.warning(f"action: no_absolute_top3_results | client_id:{client_id}")
+            return 0
+
+    def publish_tpv_results(self, client_id: int) -> int:
+        """
+        Publica los resultados de TPV agregados hacia el joiner de stores TPV.
+        """
+        results = self.working_state.get_tpv_results(client_id)
+        if not results:
+            logging.info(f"action: no_tpv_results | client_id:{client_id}")
+            return 0
+
+        output_rows = []
+        for (store_id, year_half), tpv in results.items():
+            output_rows.append(
+                TPVProcessRow(
+                    store_id=store_id,
+                    tpv=tpv,
+                    year_half=year_half,
+                    shard_id=self.shard_id if self.shard_id else DEFAULT_SHARD,
+                )
+            )
+
+        from utils.processing.process_chunk import ProcessChunkHeader as PCH
+        # Use deterministic UUID to prevent duplicates on retry/restart
+        msg_id = uuid.uuid5(uuid.NAMESPACE_DNS, f"tpv-final-{client_id}")
+        logging.info(f"action: generated_tpv_msg_id | client_id:{client_id} | msg_id:{msg_id}")
+        header = PCH(client_id=client_id, table_type=TableType.TPV, message_id=msg_id)
+        chunk = ProcessChunk(header, output_rows)
+        try:
+            self.data_sender.send(chunk.serialize())
+            logging.info(
+                f"action: publish_tpv_results | client_id:{client_id} | rows:{len(output_rows)} | keys:{len(results)} | queue:{self.data_sender.queue_name} | msg_id:{msg_id} | DEBUGGING_QUERY_3"
+            )
+            return 1
+        except Exception as e:
+            logging.error(f"action: publish_tpv_results_error | client_id:{client_id} | error:{e}")
             return 0
 
     def publish_absolute_max_results(self, client_id: int) -> int:
@@ -801,29 +893,6 @@ class Maximizer:
         if os.environ.get("CRASH_POINT") == point_name:
             logging.critical(f"Simulating crash at {point_name}")
             sys.exit(1)
-
-    def _handle_barrier_forward(self, raw_msg: bytes):
-        try:
-            data = json.loads(raw_msg)
-            if data.get("type") != MSG_BARRIER_FORWARD:
-                return
-            stage = data.get("stage")
-            if stage != self.stage:
-                return
-            shard = data.get("shard", DEFAULT_SHARD)
-            if shard != self.shard_id:
-                return
-            client_id = data.get("client_id")
-            key = (client_id, stage, shard)
-            if key in self.barrier_forwarded:
-                return
-            logging.info(f"action: barrier_forward_received | type:{self.maximizer_type} | stage:{stage} | client_id:{client_id}")
-            # Barrier forward means upstream finished; process end if not already
-            expected_table = self._expected_table_type()
-            self.process_client_end(client_id, expected_table)
-            self.barrier_forwarded.add(key)
-        except Exception as e:
-            logging.error(f"action: barrier_forward_error | type:{self.maximizer_type} | error:{e}")
 
     def _recover_state(self):
         state_data = self.persistence.recover_working_state()

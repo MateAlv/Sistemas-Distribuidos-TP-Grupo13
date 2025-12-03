@@ -298,19 +298,22 @@ class PurchasesPerUserStoreRow(TableProcessRow):
 #       - store_id: int
 #       - tpv: float (total payment value)
 #       - year_half: YearHalf
+#       - shard_id: str (optional, for tracking)
 # =========================================
 class TPVProcessRow(TableProcessRow):
-    def __init__(self, store_id: int, tpv: float, year_half: YearHalf):
+    def __init__(self, store_id: int, tpv: float, year_half: YearHalf, shard_id: str = None):
         self.store_id = store_id
         self.tpv = tpv
         self.year_half = year_half
+        self.shard_id = shard_id
         
     def serialize(self) -> bytes:
         store_id_str = str(self.store_id) if self.store_id is not None else ""
         tpv_str = str(self.tpv) if self.tpv is not None else ""
         year_half_str = str(self.year_half) if self.year_half is not None else ""
+        shard_id_str = self.shard_id if self.shard_id is not None else ""
 
-        return f"{store_id_str},{tpv_str},{year_half_str}\n".encode("utf-8")
+        return f"{store_id_str},{tpv_str},{year_half_str},{shard_id_str}\n".encode("utf-8")
 
     @staticmethod
     def from_file_row(file_row):
@@ -326,8 +329,9 @@ class TPVProcessRow(TableProcessRow):
         store_id = int(float(parts[0])) if len(parts[0]) > 0 else None
         tpv = float(parts[1]) if len(parts[1]) > 0 else None
         year_half = YearHalf.from_str(parts[2]) if len(parts[2]) > 0 else None
+        shard_id = parts[3] if len(parts) > 3 and len(parts[3]) > 0 else None
 
-        row = TPVProcessRow(store_id, tpv, year_half)
+        row = TPVProcessRow(store_id, tpv, year_half, shard_id)
         
         consumed = len(line.encode("utf-8")) + 1
         return row, consumed

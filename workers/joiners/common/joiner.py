@@ -16,9 +16,7 @@ from utils.protocol import (
     COORDINATION_EXCHANGE,
     MSG_WORKER_END,
     MSG_WORKER_STATS,
-    MSG_BARRIER_FORWARD,
     DEFAULT_SHARD,
-    STAGE_AGG_TPV,
     STAGE_JOIN_ITEMS,
     STAGE_JOIN_STORES_TPV,
     STAGE_JOIN_STORES_TOP3,
@@ -69,7 +67,6 @@ class Joiner:
         # Iniciar hilos para manejar data y join_data (eliminamos end_message_handler_thread)
         self.data_handler_thread = threading.Thread(target=self.handle_data, name="DataHandler")
         self.join_data_handler_thread = threading.Thread(target=self.handle_join_data, name="JoinDataHandler")
-        self.barrier_forwarded = set()
 
         # Persistence
         # Main persistence (Maximizer data)
@@ -158,6 +155,9 @@ class Joiner:
                             # Si ya tenemos END de datos principales, intentar procesar ahora
                             self._process_client_if_ready(end_message.client_id)
                     else:
+                        logging.info(
+                            f"action: join_data_received | type:{self.joiner_type} | bytes:{len(data)}"
+                        )
                         self._handle_join_chunk_bytes(data)
                 except ValueError as e:
                     logging.error(f"action: error_parsing_join_data | type:{self.joiner_type} | error:{e} | error_type:{type(e).__name__} | data_preview:{data[:100] if len(data) > 100 else data}")
@@ -183,14 +183,10 @@ class Joiner:
     def handle_data(self):
         """Maneja datos del maximizer y END messages del exchange"""
         results = deque()
-        coord_results = deque()
         
         def callback(msg): results.append(msg)
-        def coord_callback(msg): coord_results.append(msg)
         def stop():
             self.data_receiver.stop_consuming()
-        def coord_stop():
-            self.middleware_coordination.stop_consuming()
 
         while self.__running:
 
@@ -200,11 +196,6 @@ class Joiner:
                 self.data_receiver.start_consuming(callback)
             except (OSError, RuntimeError, MessageMiddlewareMessageError) as e:
                 logging.error(f"Error en consumo: {e}")
-            try:
-                self.middleware_coordination.connection.call_later(TIMEOUT, coord_stop)
-                self.middleware_coordination.start_consuming(coord_callback)
-            except (OSError, RuntimeError, MessageMiddlewareMessageError) as e:
-                logging.error(f"Error en consumo coordination: {e}")
 
             # Procesar datos del maximizer
             while results:
@@ -237,6 +228,9 @@ class Joiner:
                                     logging.info(f"action: waiting_for_more_senders | type:{self.joiner_type} | client_id:{client_id} | finished:{finished_count} | expected:{self.expected_inputs}")
 
                     else:
+                        logging.info(
+                            f"action: maximizer_data_received | type:{self.joiner_type} | bytes:{len(data)}"
+                        )
                         self._handle_data_chunk(data)
                     
                     # Enviar END messages para clientes recién completados
@@ -288,20 +282,15 @@ class Joiner:
                 except Exception as e:
                     logging.error(f"action: unexpected_error | type:{self.joiner_type} | error:{e} | error_type:{type(e).__name__} | error_traceback:", exc_info=True)
 
-            while coord_results:
-                cmsg = coord_results.popleft()
-                try:
-                    self._handle_barrier_forward(cmsg)
-                except Exception as e:
-                    logging.error(f"action: error_processing_coord | type:{self.joiner_type} | error:{e} | error_type:{type(e).__name__} | error_traceback:", exc_info=True)
-
     def _handle_data_chunk(self, data: bytes):
         self._check_crash_point("CRASH_BEFORE_PROCESS")
         chunk = ProcessBatchReader.from_bytes(data)
         
         with self.lock:
             # Idempotency
-            if self.working_state_main.is_processed(chunk.message_id()):
+            is_proc = self.working_state_main.is_processed(chunk.message_id())
+            logging.info(f"action: check_idempotency | type:{self.joiner_type} | msg_id:{chunk.message_id()} | is_processed:{is_proc}")
+            if is_proc:
                 return
 
             self.persistence_main.commit_processing_chunk(chunk)
@@ -325,78 +314,6 @@ class Joiner:
         if os.environ.get("CRASH_POINT") == point_name:
             logging.critical(f"Simulating crash at {point_name}")
             sys.exit(1)
-
-    def _handle_barrier_forward(self, raw_msg: bytes):
-        try:
-            data = json.loads(raw_msg)
-            if data.get("type") != MSG_BARRIER_FORWARD:
-                return
-    
-            stage = data.get("stage")
-            client_id = data.get("client_id")
-            shard = data.get("shard", DEFAULT_SHARD)
-    
-            # Para joiners no shardeados distintos de TPV, solo aceptamos global
-            if self.stage != STAGE_JOIN_STORES_TPV:
-                if stage != self.stage or shard != DEFAULT_SHARD:
-                    return
-    
-                key = (client_id, stage, shard)
-                if key in self.barrier_forwarded:
-                    return
-    
-                logging.info(
-                    f"action: barrier_forward_received | type:{self.joiner_type} "
-                    f"| stage:{stage} | client_id:{client_id}"
-                )
-    
-                with self.lock:
-                    self.working_state_main.mark_end_message_received(client_id)
-                    self.working_state_main.mark_sender_finished(client_id, "monitor")
-                    self.working_state_main.add_expected_chunks(
-                        client_id, data.get("total_chunks", 0)
-                    )
-    
-                self._process_client_if_ready(client_id)
-                self.barrier_forwarded.add(key)
-    
-            else:
-                # Joiner TPV: esperar barreras de todos los shards de agg_tpv
-                if stage != STAGE_AGG_TPV:
-                    return
-    
-                key = (client_id, stage, shard)
-                if key in self.barrier_forwarded:
-                    return
-    
-                logging.info(
-                    f"action: barrier_forward_received | type:{self.joiner_type} "
-                    f"| stage:{stage} | client_id:{client_id} | shard:{shard}"
-                )
-    
-                try:
-                    self.received_shards[client_id].add(shard)
-                except Exception:
-                    self.received_shards = getattr(self, "received_shards", {}) or {}
-                    self.received_shards.setdefault(client_id, set()).add(shard)
-    
-                if len(self.received_shards.get(client_id, set())) >= getattr(
-                    self, "expected_shards", 1
-                ):
-                    with self.lock:
-                        self.working_state_main.mark_end_message_received(client_id)
-                        self.working_state_main.mark_sender_finished(client_id, "monitor")
-                        self.working_state_main.add_expected_chunks(
-                            client_id, data.get("total_chunks", 0)
-                        )
-    
-                    self._process_client_if_ready(client_id)
-                    self.barrier_forwarded.add(key)
-    
-        except Exception as e:
-            logging.error(
-                f"action: barrier_forward_error | type:{self.joiner_type} | error:{e}"
-            )
 
     def save_data(self, chunk) -> bool:
         """
