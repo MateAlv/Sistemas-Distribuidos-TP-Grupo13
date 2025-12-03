@@ -452,6 +452,8 @@ class Aggregator:
         # Even if we haven't processed everything, we update Monitor.
         # If we HAVE processed everything, Monitor will see processed >= expected (if expected is known)
         self._send_stats_to_monitor(client_id, table_type)
+        # Also announce END to Monitor so it can count upstream finishers
+        self._send_end_to_monitor(client_id, table_type, total_expected)
 
         # Removed: self._can_send_end_message check
 
@@ -575,6 +577,28 @@ class Aggregator:
             logging.info(f"DEBUG: stats_sent_to_monitor | stage:{self.stage} | cli_id:{client_id} | processed:{processed}")
         except Exception as e:
             logging.error(f"action: stats_send_error | stage:{self.stage} | cli_id:{client_id} | error:{e}")
+
+    def _send_end_to_monitor(self, client_id, table_type, expected_from_upstream):
+        """Publish END to Monitor for barrier tracking."""
+        try:
+            processed = self.working_state.get_processed_for_aggregator(client_id, table_type, self.aggregator_id)
+            payload = {
+                "type": MSG_WORKER_END,
+                "id": str(self.aggregator_id),
+                "client_id": client_id,
+                "stage": self.stage,
+                "shard": self.shard_id or DEFAULT_SHARD,
+                "expected": expected_from_upstream,
+                "chunks": processed,
+                "sender": str(self.aggregator_id),
+            }
+            rk = f"coordination.barrier.{self.stage}.{self.shard_id or DEFAULT_SHARD}"
+            self.middleware_coordination.send(json.dumps(payload).encode("utf-8"), routing_key=rk)
+            logging.info(
+                f"DEBUG: end_sent_to_monitor | stage:{self.stage} | cli_id:{client_id} | expected:{expected_from_upstream} | processed:{processed}"
+            )
+        except Exception as e:
+            logging.error(f"action: end_send_error | stage:{self.stage} | cli_id:{client_id} | error:{e}")
             
 
     def _send_end_message(self, client_id, table_type):

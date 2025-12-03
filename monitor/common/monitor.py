@@ -33,20 +33,30 @@ class BarrierTracker:
         self.agg_expected = None
         self.agg_processed = 0
         self.expected_senders = set()
+        self.expected_logged = False
+        self.expected_by_sender = {}
 
     def apply_expected(self, expected, sender_id=None, expected_filters=None):
         """Updates expected count from upstream (e.g. Filters telling Aggregators)."""
-        if expected is not None:
-            # Use max to avoid regression if out-of-order messages arrive
-            self.agg_expected = max(self.agg_expected or 0, expected)
-            if sender_id is not None:
-                self.expected_senders.add(str(sender_id))
-            # Always log with a clear counter
-            expected_total = expected_filters if expected_filters is not None else "?"
+        if expected is None:
+            return
+        sender_key = str(sender_id) if sender_id is not None else "unknown"
+        self.expected_by_sender[sender_key] = expected
+        # Sum all sender expectations (multiple filters feed the same shard)
+        self.agg_expected = sum(self.expected_by_sender.values())
+        if sender_id is not None:
+            self.expected_senders.add(str(sender_id))
+        # Always log with a clear counter
+        expected_total = expected_filters if expected_filters is not None else "?"
+        logging.info(
+            f"Aggregator Barrier Expected update from {sender_id}: "
+            f"{len(self.expected_senders)}/{expected_total} reports | agg_expected:{self.agg_expected}"
+        )
+        if expected_filters is not None and len(self.expected_senders) >= expected_filters and not self.expected_logged:
             logging.info(
-                f"Aggregator Barrier Expected update from {sender_id}: "
-                f"{len(self.expected_senders)}/{expected_total} reports | agg_expected:{self.agg_expected}"
+                f"OKAY I GOT THE GLOBAL AMOUNT OF EXPECTED CHUNKS! upstream_expected_filters={expected_filters} | agg_expected={self.agg_expected}"
             )
+            self.expected_logged = True
 
     def apply_stats(self, chunks, processed, expected=None, sender_id=None, expected_filters=None):
         """Updates stats from a worker."""
@@ -55,7 +65,7 @@ class BarrierTracker:
             
         # For Aggregators, 'processed' is what matters against 'agg_expected'
         self.agg_processed = max(self.agg_processed, processed)
-        logging.info(f"Aggregator Barrier Processed Chunks so far: {self.agg_processed}")
+        logging.info(f"Aggregator Barrier Processed Chunks so far: {self.agg_processed} | EXPECTED:{self.agg_expected}")
 
     def apply_end(self, sender_id, chunks, expected_filters=None):
         """Handles an END message."""
@@ -99,6 +109,7 @@ class BarrierTracker:
             'agg_expected': self.agg_expected,
             'agg_processed': self.agg_processed,
             'expected_senders': list(self.expected_senders),
+            'expected_by_sender': self.expected_by_sender,
         }
 
     @classmethod
@@ -112,6 +123,7 @@ class BarrierTracker:
         t.agg_expected = data.get('agg_expected')
         t.agg_processed = data.get('agg_processed', 0)
         t.expected_senders = set(data.get('expected_senders', []))
+        t.expected_by_sender = data.get('expected_by_sender', {})
         # Ignore legacy fields if present in old state files
         return t
 
@@ -344,8 +356,6 @@ class MonitorNode:
         """Periodically forward barrier completion messages downstream"""
         while self.running:
             time.sleep(1)
-            if not self.is_leader:
-                continue
             
             now = time.time()
             forwards_to_send = []
@@ -360,16 +370,19 @@ class MonitorNode:
                             continue
 
                         for shard, tracker in list(shards.items()):
-                            # Determine upstream expected count
-                            upstream_count = 0
+                            # Determine upstream expected count: prefer actual senders, fallback to config
+                            configured = 0
                             if stage == STAGE_AGG_PRODUCTS:
-                                upstream_count = self.stage_expected.get(STAGE_FILTER_YEAR, 1)
+                                configured = self.stage_expected.get(STAGE_FILTER_YEAR, 1)
                             elif stage == STAGE_AGG_PURCHASES:
-                                upstream_count = self.stage_expected.get(STAGE_FILTER_YEAR, 1)
+                                configured = self.stage_expected.get(STAGE_FILTER_YEAR, 1)
                             elif stage == STAGE_AGG_TPV:
-                                upstream_count = self.stage_expected.get(STAGE_FILTER_HOUR, 1)
+                                configured = self.stage_expected.get(STAGE_FILTER_HOUR, 1)
+                            upstream_count = len(tracker.expected_by_sender) if len(tracker.expected_by_sender) > 0 else configured or 1
+                            # For END safety, aggregators are 1 per shard
+                            end_threshold = 1
 
-                            complete, reason = tracker.is_complete(stage, now, self.forward_interval, upstream_count)
+                            complete, reason = tracker.is_complete(stage, now, self.forward_interval, end_threshold)
                             
                             if complete:
                                 tracker.forwarded = True
@@ -399,13 +412,16 @@ class MonitorNode:
             msg_type = data.get('type')
             
             # Determine upstream expected count for logging (filters feeding each aggregator stage)
-            upstream_count = 0
+            upstream_config = 0
             if stage == STAGE_AGG_PRODUCTS:
-                upstream_count = self.stage_expected.get(STAGE_FILTER_YEAR, 1)
+                upstream_config = self.stage_expected.get(STAGE_FILTER_YEAR, 1)
             elif stage == STAGE_AGG_PURCHASES:
-                upstream_count = self.stage_expected.get(STAGE_FILTER_YEAR, 1)
+                upstream_config = self.stage_expected.get(STAGE_FILTER_YEAR, 1)
             elif stage == STAGE_AGG_TPV:
-                upstream_count = self.stage_expected.get(STAGE_FILTER_HOUR, 1)
+                upstream_config = self.stage_expected.get(STAGE_FILTER_HOUR, 1)
+            tracker = self.state.get_tracker(client_id, stage, shard)
+            # Prefer real senders if present, fallback to config, never below 1
+            upstream_count = len(tracker.expected_by_sender) if len(tracker.expected_by_sender) > 0 else upstream_config or 1
             
             # Only process Aggregator stages
             if stage not in [STAGE_AGG_PRODUCTS, STAGE_AGG_TPV, STAGE_AGG_PURCHASES]:
@@ -431,6 +447,11 @@ class MonitorNode:
                                  f"AggProcessed:{tracker.agg_processed} | AggExpected:{tracker.agg_expected} | "
                                  f"ExpectedReports:{len(tracker.expected_senders)}/{upstream_count} | "
                                  f"Ends:{tracker.received_end}")
+                    logging.info(
+                        f"Barrier State | client:{client_id} | stage:{stage} | shard:{shard} | "
+                        f"processed:{tracker.agg_processed} | expected:{tracker.agg_expected} | "
+                        f"ends:{tracker.received_end}/1"
+                    )
                 
             self._save_state()
         except Exception as e:
