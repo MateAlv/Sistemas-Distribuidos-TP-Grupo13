@@ -271,16 +271,13 @@ class Maximizer:
                      self.process_client_end(client_id, table_type)
                 
                 elif self.maximizer_type == "TPV":
-                     # TPV Absolute logic: Wait for all ACTIVE shards to finish
-                     # We use received_shards to know which shards are active.
-                     # If finished_count >= len(received_shards) AND finished_count > 0, we are done.
-                     # (Assuming we won't receive new shards late if we have seen some activity)
-                     active_shards_count = len(self.received_shards[client_id])
-                     if finished_count >= active_shards_count and finished_count > 0:
-                         logging.info(f"action: tpv_finished | client_id:{client_id} | finished:{finished_count} | active:{active_shards_count}")
+                     # TPV Absolute logic: Wait for all configured shards to finish
+                     # We use expected_shards from configuration.
+                     if finished_count >= self.expected_shards:
+                         logging.info(f"action: tpv_finished | client_id:{client_id} | finished:{finished_count} | expected:{self.expected_shards}")
                          self.process_client_end(client_id, table_type)
                      else:
-                         logging.info(f"action: tpv_waiting | client_id:{client_id} | finished:{finished_count} | active:{active_shards_count}")
+                         logging.info(f"action: tpv_waiting | client_id:{client_id} | finished:{finished_count} | expected:{self.expected_shards}")
 
                 else:
                     # Partial Maximizer logic
