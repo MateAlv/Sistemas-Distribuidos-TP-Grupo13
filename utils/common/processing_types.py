@@ -8,6 +8,17 @@ class YearHalf:
 
     def __str__(self):
         return f"{self.year}-H{self.half}"
+    
+    def __repr__(self):
+        return f"YearHalf(year={self.year}, half={self.half})"
+
+    def __eq__(self, other):
+        if not isinstance(other, YearHalf):
+            return False
+        return self.year == other.year and self.half == other.half
+
+    def __hash__(self):
+        return hash((self.year, self.half))
 
     @staticmethod
     def from_date(date: datetime.date):

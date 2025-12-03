@@ -94,7 +94,9 @@ class StoresTpvJoiner(Joiner):
             client_queue = MessageMiddlewareQueue("rabbitmq", f"to_merge_data_{client_id}")
             client_queue.send(query3_chunk.serialize())
             client_queue.close()
-            logging.info(f"action: sent_result_message | type:{self.joiner_type} | client_id:{client_id}")
+            logging.info(
+                f"action: sent_result_message | type:{self.joiner_type} | client_id:{client_id} | rows:{len(query3_results)} | queue:to_merge_data_{client_id} | DEBUGGING_QUERY_4"
+            )
         else:
             logging.info(f"action: no_results_to_send | type:{self.joiner_type} | client_id:{client_id}")
 

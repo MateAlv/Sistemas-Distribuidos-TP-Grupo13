@@ -524,6 +524,9 @@ class Filter:
                     logging.debug(f"action: sending_to_queue | type:{self.filter_type} | queue:{queue_name} | rows:{len(filtered_rows)/len(chunk.rows):.2%} | cli_id:{chunk.client_id()} | shard:{shard_id}")
                     self.middleware_queue_sender[queue_name].send(ProcessChunk(chunk.header, filtered_rows).serialize())
                     self.shard_chunks_sent[(STAGE_AGG_TPV, client_id, table_type, shard_id)] += 1
+                    logging.info(
+                        f"DEBUGGING_QUERY_4 | filter_hour_to_agg_tpv | cli_id:{client_id} | shard:{shard_id} | rows_out:{len(filtered_rows)} | shard_total:{self.shard_chunks_sent[(STAGE_AGG_TPV, client_id, table_type, shard_id)]}"
+                    )
 
             elif self.filter_type == "amount":
                 converted_rows = [Query1ResultRow(tx.transaction_id, tx.final_amount) for tx in filtered_rows]

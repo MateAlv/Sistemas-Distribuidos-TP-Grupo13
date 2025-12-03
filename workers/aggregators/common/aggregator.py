@@ -420,7 +420,7 @@ class Aggregator:
                 # self.delete_client_data(...)
                 
         except Exception as e:
-            logging.error(f"action: barrier_forward_error | type:{self.aggregator_type} | error:{e}")
+            logging.error(f"action: barrier_forward_error | type:{self.aggregator_type} | error:{e}", exc_info=True)
         except Exception as e:
             logging.error(f"action: barrier_forward_error | type:{self.aggregator_type} | error:{e}")
 
@@ -534,6 +534,10 @@ class Aggregator:
                     f"| client_id:{client_id} | table_type:{table_type} | payload_size:{len(payload)}"
                 )
                 self.middleware_data_exchange.send(data_msg.encode())
+                if self.aggregator_type == "TPV":
+                    logging.info(
+                        f"DEBUGGING_QUERY_4 | agg_tpv_payload_sent | cli_id:{client_id} | rows:{len(aggregated_chunk.rows)} | accumulated_keys:{len(self.working_state.get_tpv_accumulator(client_id))}"
+                    )
                 self.persistence.commit_send_ack(client_id, chunk.message_id())
             except Exception as e:
                 logging.error(f"action: error_sending_data_message | error:{e}")
@@ -649,22 +653,12 @@ class Aggregator:
         except Exception as e:
             logging.error(f"action: error_sending_end_message | error:{e}")
 
-        self.delete_client_data(client_id)
+        self.delete_client_data(client_id, table_type)
         
-    def delete_client_data(self, client_id):
-        self.working_state.delete_client_data(client_id, self.aggregator_type)
-        logging.info(f"action: client_data_deleted | client_id:{client_id}")
-
-    def delete_client_data(self, stats_end: AggregatorStatsEndMessage):
-        client_id = stats_end.client_id
-        table_type = stats_end.table_type
+    def delete_client_data(self, client_id, table_type):
         accumulator_key = self._accumulator_key()
-        
         self.working_state.delete_client_data(client_id, table_type, accumulator_key)
-
-        logging.info(
-            f"action: cleanup_state | client_id:{client_id} | table_type:{table_type} | aggregator_id:{self.aggregator_id}"
-        )
+        logging.info(f"action: client_data_deleted | client_id:{client_id} | table_type:{table_type}")
 
     def _check_crash_point(self, point_name):
         if os.environ.get("CRASH_POINT") == point_name:
@@ -702,7 +696,7 @@ class Aggregator:
         for row in aggregated_chunk.rows:
             store_id = int(row.store_id)
             user_id = int(row.user_id)
-            count = int(row.final_amount)
+            count = int(row.purchases_made)
             data[store_id][user_id] += count
 
     def accumulate_tpv(self, client_id, aggregated_chunk: ProcessChunk):
@@ -735,7 +729,7 @@ class Aggregator:
     def _build_purchases_payload(self, aggregated_chunk: ProcessChunk):
         return {
             "purchases": [
-                [int(row.store_id), int(row.user_id), int(row.final_amount)]
+                [int(row.store_id), int(row.user_id), int(row.purchases_made)]
                 for row in aggregated_chunk.rows
             ]
         }
@@ -778,7 +772,11 @@ class Aggregator:
             rows = []
             marker_date = DateTime(datetime.date(2024, 1, 1), datetime.time(0, 0))
             for store_id, user_id, count in payload.get("purchases", []):
-                rows.append(TransactionsProcessRow("", int(store_id), int(user_id), int(count), marker_date))
+                rows.append(
+                    PurchasesPerUserStoreRow(
+                        int(store_id), "", int(user_id), marker_date.date, int(count)
+                    )
+                )
             if rows:
                 self.accumulate_purchases(client_id, SimpleNamespace(rows=rows))
 
@@ -895,6 +893,9 @@ class Aggregator:
         # TPV aggregation
         # Send to TPV Maximizer
         queue = self.middleware_queue_sender["to_absolute_tpv_max"]
+        logging.info(
+            f"DEBUGGING_QUERY_4 | agg_tpv_publish_final | cli_id:{client_id} | rows:{len(rows)} | keys:{len(data)} | queue:{queue.queue_name}"
+        )
         queue.send(chunk.serialize())
         logging.info(f"action: sent_tpv_chunk | client_id:{client_id} | rows:{len(chunk.rows)}")
 
