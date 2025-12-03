@@ -350,9 +350,6 @@ class Maximizer:
             logging.info(
                 f"action: absolute_max_tracking | client_id:{client_id} | shards_seen:{len(self.received_shards[client_id])}/{self.expected_shards} | shards:{sorted(self.received_shards[client_id])}"
             )
-            if len(self.received_shards[client_id]) >= self.expected_shards:
-                logging.info(f"action: absolute_max_ready | client_id:{client_id} | all_shards_received")
-                self.process_client_end(client_id, table_type)
         elif self.maximizer_type == "TOP3" and self.is_absolute_top3():
             for row in chunk.rows:
                 shard_slug = self._extract_shard_from_row(row)
@@ -361,9 +358,6 @@ class Maximizer:
             logging.info(
                 f"action: absolute_top3_tracking | client_id:{client_id} | shards_seen:{len(self.received_shards[client_id])}/{self.expected_shards} | shards:{sorted(self.received_shards[client_id])}"
             )
-            if len(self.received_shards[client_id]) >= self.expected_shards:
-                logging.info(f"action: absolute_top3_ready | client_id:{client_id} | all_shards_received")
-                self.process_client_end(client_id, table_type)
         elif self.maximizer_type == "TPV":
             # Track TPV shards
             for row in chunk.rows:
