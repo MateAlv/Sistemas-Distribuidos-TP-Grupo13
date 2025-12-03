@@ -202,6 +202,9 @@ class MonitorNode:
     def start(self):
         logging.info(f"Starting MonitorNode {self.node_id}")
         logging.info(f"Barrier expected counts: {self.stage_expected}")
+        # Pequeño delay inicial para permitir que todos arranquen y luego forzar elección
+        time.sleep(5)
+        self._start_election()
         self.sender_thread.start()
         self.listener_thread.start()
         self.checker_thread.start()

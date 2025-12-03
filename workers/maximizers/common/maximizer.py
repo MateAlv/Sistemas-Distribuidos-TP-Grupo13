@@ -620,30 +620,8 @@ class Maximizer:
             self.update_top3(client_id, chunk.rows)
             return True
         elif self.maximizer_type == "TPV":
-            # Send aggregated TPVs to Joiner
-            results = self.working_state.get_tpv_results(client_id)
-            if results:
-                # Convert to TPVProcessRow
-                from utils.processing.process_table import TPVProcessRow
-                from utils.results.result_chunk import ResultChunkHeader
-                from utils.processing.process_chunk import ProcessChunkHeader as PCH
-                
-                output_rows = [
-                    TPVProcessRow(store_id, tpv, year_half)
-                    for (store_id, year_half), tpv in results.items()
-                ]
-                
-                # Send in chunks
-                batch_size = 1000
-                for i in range(0, len(output_rows), batch_size):
-                    batch = output_rows[i:i+batch_size]
-                    # Use a generic header or correct one. Joiner expects ProcessChunk.
-                    header = PCH(client_id, str(uuid.uuid4()), TableType.TPV)
-                    chunk = ProcessChunk(header, batch)
-                    self.data_sender.send(chunk.serialize())
-                    logging.info(f"action: sent_tpv_chunk | client_id:{client_id} | rows:{len(batch)}")
-            else:
-                logging.info(f"action: no_tpv_results | client_id:{client_id}")
+            self.update_max(client_id, chunk.rows)
+            return True
     
     def publish_partial_max_results(self, client_id: int) -> int:
         """
