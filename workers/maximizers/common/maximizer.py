@@ -164,7 +164,7 @@ class Maximizer:
             chunks_sent = self.publish_tpv_results(client_id)
             self._send_end_message(client_id, TableType.TPV, "joiner", chunks_sent, sender_id or "absolute")
 
-        logging.info(f"action: maximizer_finished | type:{self.maximizer_type} | range:{self.maximizer_range} | client_id:{client_id}")
+            logging.info(f"action: maximizer_finished | type:{self.maximizer_type} | range:{self.maximizer_range} | client_id:{client_id}")
         self.delete_client_data(client_id)
     
     def run(self):
@@ -383,6 +383,10 @@ class Maximizer:
     def _send_end_message(self, client_id: int, table_type: TableType, target: str, count: int, sender_id: str):
         try:
             logging.info(f"action: sending_end_message_to_{target} | client_id:{client_id} | chunks:{count} | sender_id:{sender_id}")
+            label = f"end-{self.stage}"
+            if self.working_state.end_already_sent(client_id, label):
+                logging.info(f"action: skip_end_already_sent | client_id:{client_id} | label:{label}")
+                return
             end_msg = MessageEnd(client_id, table_type, count, sender_id)
             self.data_sender.send(end_msg.encode())
             logging.info(f"action: sent_end_message_to_{target} | client_id:{client_id} | format:END;{client_id};{table_type.value};{count};{sender_id}")
@@ -421,6 +425,8 @@ class Maximizer:
                 logging.debug(f"action: coordination_stats_sent | stage:{self.stage} | cli_id:{client_id} | chunks:{count}")
             except Exception as e:
                 logging.error(f"action: coordination_stats_send_error | stage:{self.stage} | cli_id:{client_id} | error:{e}")
+            self.working_state.mark_end_sent(client_id, label)
+            self._save_state(uuid.uuid4())
         except Exception as e:
             logging.error(f"action: error_sending_end_to_{target} | client_id:{client_id} | error:{e}")
 
@@ -646,6 +652,11 @@ class Maximizer:
         """
         Los maximizers parciales envían sus máximos locales al absolute max.
         """
+        label = "max-partial"
+        if self.working_state.results_already_sent(client_id, label):
+            logging.info(f"action: skip_partial_max_already_sent | client_id:{client_id}")
+            return 0
+
         accumulated_results = []
         client_sellings = self.working_state.get_sellings_max(client_id)
         client_profit = self.working_state.get_profit_max(client_id)
@@ -694,6 +705,8 @@ class Maximizer:
             # If called from handle_data_chunk, we save state after return.
             
             logging.info(f"action: publish_partial_max_results | shard:{self.shard_id} | client_id:{client_id} | rows_sent:{len(accumulated_results)} | selling_entries:{len(client_sellings)} | profit_entries:{len(client_profit)} | bytes_sent:{len(chunk_data)} | queue:{self.data_sender.queue_name}")
+            self.working_state.mark_results_sent(client_id, label)
+            self._save_state(uuid.uuid4())
             return 1
         else:
             logging.warning(f"action: no_partial_results_to_send | shard:{self.shard_id} | client_id:{client_id}")
@@ -704,6 +717,11 @@ class Maximizer:
         """
         Publica los resultados parciales de TOP3 al TOP3 absoluto después del END message.
         """
+        label = "top3-partial"
+        if self.working_state.results_already_sent(client_id, label):
+            logging.info(f"action: skip_partial_top3_already_sent | client_id:{client_id}")
+            return 0
+
         accumulated_results = []
         marker_date = datetime.date(2024, 1, 1)  # Fecha marca
         client_top3 = self.working_state.get_top3_by_store(client_id)
@@ -742,6 +760,8 @@ class Maximizer:
             logging.info(
                 f"action: publish_partial_top3_results | shard:{self.shard_id} | client_id:{client_id} | stores:{len(client_top3)} | total_clients:{len(accumulated_results)}"
             )
+            self.working_state.mark_results_sent(client_id, label)
+            self._save_state(uuid.uuid4())
             return 1
         else:
             logging.warning(f"action: no_partial_top3_results_to_send | shard:{self.shard_id} | client_id:{client_id}")
@@ -752,6 +772,11 @@ class Maximizer:
         Publica los resultados finales del TOP3 absoluto.
         Los maximizers parciales ya enviaron su TOP3 calculado, solo necesitamos reenviarlos.
         """
+        label = "top3-absolute"
+        if self.working_state.results_already_sent(client_id, label):
+            logging.info(f"action: skip_absolute_top3_already_sent | client_id:{client_id}")
+            return 0
+
         client_top3 = self.working_state.get_top3_by_store(client_id)
         logging.info(f"action: forwarding_top3_results | client_id:{client_id} | stores_processed:{len(client_top3)} | stores_list:{list(client_top3.keys())}")
         
@@ -793,6 +818,8 @@ class Maximizer:
             self.data_sender.send(chunk.serialize())
             
             logging.info(f"action: publish_absolute_top3_results | result: success | client_id:{client_id} | stores_processed:{len(client_top3)} | total_results_forwarded:{len(accumulated_results)}")
+            self.working_state.mark_results_sent(client_id, label)
+            self._save_state(uuid.uuid4())
             return 1
         else:
             logging.warning(f"action: no_absolute_top3_results | client_id:{client_id}")
@@ -802,6 +829,11 @@ class Maximizer:
         """
         Publica los resultados de TPV agregados hacia el joiner de stores TPV.
         """
+        label = "tpv-absolute"
+        if self.working_state.results_already_sent(client_id, label):
+            logging.info(f"action: skip_tpv_already_sent | client_id:{client_id}")
+            return 0
+
         results = self.working_state.get_tpv_results(client_id)
         if not results:
             logging.info(f"action: no_tpv_results | client_id:{client_id}")
@@ -829,6 +861,8 @@ class Maximizer:
             logging.info(
                 f"action: publish_tpv_results | client_id:{client_id} | rows:{len(output_rows)} | keys:{len(results)} | queue:{self.data_sender.queue_name} | msg_id:{msg_id} | DEBUGGING_QUERY_3"
             )
+            self.working_state.mark_results_sent(client_id, label)
+            self._save_state(uuid.uuid4())
             return 1
         except Exception as e:
             logging.error(f"action: publish_tpv_results_error | client_id:{client_id} | error:{e}")
@@ -839,6 +873,11 @@ class Maximizer:
         Publica los resultados de máximos absolutos por mes.
         Solo los máximos de cada mes para Q2.
         """
+        label = "max-absolute"
+        if self.working_state.results_already_sent(client_id, label):
+            logging.info(f"action: skip_absolute_max_already_sent | client_id:{client_id}")
+            return 0
+
         client_sellings = self.working_state.get_sellings_max(client_id)
         client_profit = self.working_state.get_profit_max(client_id)
         logging.info(f"action: calculating_absolute_max | client_id:{client_id} | selling_entries:{len(client_sellings)} | profit_entries:{len(client_profit)}")
@@ -908,6 +947,8 @@ class Maximizer:
             self.data_sender.send(chunk.serialize())
             
             logging.info(f"action: publish_absolute_max_results | result: success | client_id:{client_id} | months_selling:{len(monthly_max_selling)} | months_profit:{len(monthly_max_profit)} | total_rows:{len(accumulated_results)}")
+            self.working_state.mark_results_sent(client_id, label)
+            self._save_state(uuid.uuid4())
             return 1
         else:
             logging.warning(f"action: no_absolute_max_results | client_id:{client_id}")
