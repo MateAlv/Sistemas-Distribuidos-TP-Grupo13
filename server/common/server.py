@@ -213,15 +213,28 @@ class Server:
                     for table_type, count in number_of_chunks_per_file.items():
                         # Use chunks actually sent per client/table/shard (if available) instead of file count
                         # Broadcast END a todos los shards de year para que propaguen su propio total
-                        for sid in range(1, self.filter_year_shards + 1):
-                            chunk_total = chunks_sent_per_shard.get((client_id, table_type, sid), count)
+                        if table_type == TableType.TRANSACTIONS or table_type == TableType.TRANSACTION_ITEMS:
+                            # Sharded tables: Send END only to shards that received data
+                            for sid in range(1, self.filter_year_shards + 1):
+                                chunk_total = chunks_sent_per_shard.get((client_id, table_type, sid), 0)
+                                if chunk_total > 0:
+                                    message = MessageEnd(client_id, table_type=table_type, count=chunk_total).encode()
+                                    queue_name = f"to_filter_year_shard_{sid}"
+                                    logging.debug("action: sending_end_message | peer:%s | client_id:%s | table_type:%s | shard:%s | count:%d", 
+                                               peer, client_id, table_type.name, sid, chunk_total)
+                                    middleware_queue_senders[queue_name].send(message)
+                                else:
+                                    logging.debug("action: skip_end_empty_shard | peer:%s | client_id:%s | table_type:%s | shard:%s", 
+                                               peer, client_id, table_type.name, sid)
+                        
+                        else:
+                            # Non-sharded tables: Send END once
+                            chunk_total = count
                             message = MessageEnd(client_id, table_type=table_type, count=chunk_total).encode()
-                            logging.debug("action: sending_end_message | peer:%s | client_id:%s | table_type:%s | shard:%s | count:%d", 
-                                       peer, client_id, table_type.name, sid, chunk_total)
-                            if table_type == TableType.TRANSACTIONS or table_type == TableType.TRANSACTION_ITEMS:
-                                queue_name = f"to_filter_year_shard_{sid}"
-                                middleware_queue_senders[queue_name].send(message)
-                            elif table_type == TableType.STORES:
+                            logging.debug("action: sending_end_message_broadcast | peer:%s | client_id:%s | table_type:%s | count:%d", 
+                                       peer, client_id, table_type.name, chunk_total)
+                            
+                            if table_type == TableType.STORES:
                                 middleware_queue_senders["to_join_stores_tpv"].send(message)
                                 middleware_queue_senders["to_join_stores_top3"].send(message)
                                 middleware_queue_senders["to_top3"].send(message)

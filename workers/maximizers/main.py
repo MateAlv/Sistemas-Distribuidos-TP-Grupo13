@@ -25,9 +25,12 @@ def initialize_config():
             raise ValueError(f"Tipo de maximizer inválido: {max_type}")
 
         # Validar que sea uno de los tipos válidos
-        valid_types = ["MAX", "TOP3"]
+        valid_types = ["MAX", "TOP3", "TPV"]
         if max_type not in valid_types:
             raise ValueError(f"Tipo de maximizer inválido: {max_type}")
+
+        if max_type == "TPV":
+             return (logging_level, max_type, "absolute", None, [])
 
         if max_type == "MAX":
             shard_env = "MAX_SHARD_ID"

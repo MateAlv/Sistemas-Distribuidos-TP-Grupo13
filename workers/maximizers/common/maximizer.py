@@ -33,6 +33,7 @@ from utils.protocol import (
     STAGE_MAX_ABSOLUTE,
     STAGE_TOP3_PARTIALS,
     STAGE_TOP3_ABSOLUTE,
+    STAGE_MAX_TPV,
 )
 
 TIMEOUT = 3
@@ -70,8 +71,10 @@ class Maximizer:
         # Stage name and shard for centralized barrier
         if self.maximizer_type == "MAX":
             self.stage = STAGE_MAX_ABSOLUTE if self.is_absolute_max() else STAGE_MAX_PARTIALS
-        else:
+        elif self.maximizer_type == "TOP3":
             self.stage = STAGE_TOP3_ABSOLUTE if self.is_absolute_top3() else STAGE_TOP3_PARTIALS
+        elif self.maximizer_type == "TPV":
+            self.stage = STAGE_MAX_TPV
         self.shard_id = self.shard_slug if self.shard_slug else DEFAULT_SHARD
         
         if self.maximizer_type == "MAX":
@@ -89,6 +92,13 @@ class Maximizer:
             self.data_receiver = MessageMiddlewareQueue("rabbitmq", "to_top3_absolute")
             self.middleware_exchange_sender = MessageMiddlewareExchange("rabbitmq", "end_exchange_maximizer_TOP3", [""], exchange_type="fanout")
             self.middleware_exchange_receiver = None  # No necesita escuchar END de nadie
+        elif self.maximizer_type == "TPV":
+            # TPV absoluto - recibe de aggregators shardeados
+            # Output: Joiner Stores TPV
+            self.data_sender = MessageMiddlewareQueue("rabbitmq", "to_absolute_tpv") # Joiner queue name
+            self.data_receiver = MessageMiddlewareQueue("rabbitmq", "to_absolute_tpv_max") # New queue for max
+            self.middleware_exchange_sender = MessageMiddlewareExchange("rabbitmq", "end_exchange_maximizer_TPV", [""], exchange_type="fanout")
+            self.middleware_exchange_receiver = None
         else:
             raise ValueError(f"Tipo de maximizer inválido: {self.maximizer_type}")
 
@@ -122,8 +132,20 @@ class Maximizer:
             logging.debug(f"action: end_already_processed | type:{self.maximizer_type} | range:{self.maximizer_range} | client_id:{client_id}")
             return
 
-        if not self._is_valid_table_type(table_type, for_end=True):
-            expected_table = self._expected_table_type()
+        expected_table = self._expected_table_type()
+        if self.maximizer_type == "TOP3" and not self.is_absolute_top3():
+            if table_type == TableType.TRANSACTIONS:
+                 # Partial TOP3 receives TRANSACTIONS end from aggregator
+                 pass
+            elif table_type != expected_table:
+                 logging.debug(f"action: ignoring_end_wrong_table | expected:{expected_table} | received:{table_type} | client_id:{client_id}")
+                 return
+        elif self.maximizer_type == "TPV":
+            # TPV receives TPV end from aggregator
+            if table_type != TableType.TPV:
+                 logging.debug(f"action: ignoring_end_wrong_table | expected:{expected_table} | received:{table_type} | client_id:{client_id}")
+                 return
+        elif table_type != expected_table:
             logging.debug(f"action: ignoring_end_wrong_table | expected:{expected_table} | received:{table_type} | client_id:{client_id}")
             return
 
@@ -210,10 +232,13 @@ class Maximizer:
                     logging.error(f"action: error_processing_coord | type:{self.maximizer_type} | range:{self.maximizer_range} | error:{e}")
 
     def _handle_end_message(self, raw_message: bytes):
-        logging.info(f"DEBUG: _handle_end_message called with {raw_message}")
+        logging.info(f"action: recv_end_raw | type:{self.maximizer_type} | range:{self.maximizer_range} | raw:{raw_message}")
         try:
             end_message = MessageEnd.decode(raw_message)
-            logging.info(f"DEBUG: decoded end_message: client_id={end_message.client_id()}, table_type={end_message.table_type()}, sender_id={end_message.sender_id()}")
+            logging.info(
+                f"action: end_decoded | type:{self.maximizer_type} | range:{self.maximizer_range} | client_id:{end_message.client_id()} "
+                f"| table:{end_message.table_type()} | sender_id:{end_message.sender_id()} | count:{end_message.total_chunks()}"
+            )
         except Exception as e:
             logging.error(f"action: error_decoding_end_message | error:{e}")
             return
@@ -239,7 +264,11 @@ class Maximizer:
             self.working_state.add_expected_chunks(client_id, count)
             
             finished_count = self.working_state.get_finished_senders_count(client_id)
-            logging.info(f"action: end_received | client_id:{client_id} | sender_id:{sender_id} | count:{count} | finished:{finished_count}/{self.expected_inputs}")
+            total_expected = self.working_state.get_total_expected_chunks(client_id)
+            logging.info(
+                f"action: end_received | type:{self.maximizer_type} | range:{self.maximizer_range} | client_id:{client_id} "
+                f"| sender_id:{sender_id} | count:{count} | finished:{finished_count}/{self.expected_inputs} | total_expected_chunks:{total_expected}"
+            )
             
             if finished_count >= self.expected_inputs:
                 logging.info(f"action: all_inputs_finished | client_id:{client_id}")
@@ -262,6 +291,18 @@ class Maximizer:
                      # Absolute Top3 logic
                      self.process_client_end(client_id, table_type)
                 
+                elif self.maximizer_type == "TPV":
+                     # TPV Absolute logic: Wait for all ACTIVE shards to finish
+                     # We use received_shards to know which shards are active.
+                     # If finished_count >= len(received_shards) AND finished_count > 0, we are done.
+                     # (Assuming we won't receive new shards late if we have seen some activity)
+                     active_shards_count = len(self.received_shards[client_id])
+                     if finished_count >= active_shards_count and finished_count > 0:
+                         logging.info(f"action: tpv_finished | client_id:{client_id} | finished:{finished_count} | active:{active_shards_count}")
+                         self.process_client_end(client_id, table_type)
+                     else:
+                         logging.info(f"action: tpv_waiting | client_id:{client_id} | finished:{finished_count} | active:{active_shards_count}")
+
                 else:
                     # Partial Maximizer logic
                     # We received END from all Aggregators.
@@ -331,6 +372,15 @@ class Maximizer:
             if len(self.received_shards[client_id]) >= self.expected_shards:
                 logging.info(f"action: absolute_top3_ready | client_id:{client_id} | all_shards_received")
                 self.process_client_end(client_id, table_type)
+        elif self.maximizer_type == "TPV":
+            # Track TPV shards
+            for row in chunk.rows:
+                shard_slug = self._extract_shard_from_row(row)
+                if shard_slug:
+                    self.received_shards[client_id].add(shard_slug)
+            logging.info(
+                f"action: tpv_tracking | client_id:{client_id} | shards_seen:{len(self.received_shards[client_id])} | shards:{sorted(self.received_shards[client_id])}"
+            )
 
         self.working_state.mark_processed(chunk.message_id())
         self._save_state(chunk.message_id())
@@ -384,6 +434,8 @@ class Maximizer:
             return TableType.TRANSACTION_ITEMS
         if self.maximizer_type == "TOP3":
             return TableType.PURCHASES_PER_USER_STORE
+        if self.maximizer_type == "TPV":
+            return TableType.TPV
         raise ValueError(f"Tipo de maximizer inválido: {self.maximizer_type}")
 
     def _is_valid_table_type(self, table_type: TableType, *, for_end: bool) -> bool:
@@ -418,6 +470,10 @@ class Maximizer:
         shard_field = getattr(row, "shard", None)
         if shard_field:
             return str(shard_field)
+        # Try explicit shard_id field (TPV)
+        shard_id_field = getattr(row, "shard_id", None)
+        if shard_id_field:
+            return str(shard_id_field)
         return None
     
     def shutdown(self, signum=None, frame=None):
@@ -488,6 +544,25 @@ class Maximizer:
         Actualiza los máximos relativos o absolutos.
         """
         updated_count = 0
+        if self.maximizer_type == "TOP3":
+            self.update_top3(client_id, rows)
+            return True
+        elif self.maximizer_type == "TPV":
+            # TPV Logic: Sum final_amount (or tpv) by store and year_half
+            for row in rows:
+                store_id = getattr(row, 'store_id', None)
+                year_half = getattr(row, 'year_half', None)
+                tpv = getattr(row, 'tpv', 0.0)
+                
+                if store_id is None or year_half is None:
+                    logging.warning(f"action: invalid_tpv_row | row:{row}")
+                    continue
+                
+                self.working_state.update_tpv(client_id, store_id, year_half, tpv)
+                updated_count += 1
+            
+            return True
+        
         client_sellings = self.working_state.get_sellings_max(client_id)
         client_profit = self.working_state.get_profit_max(client_id)
 
@@ -578,9 +653,31 @@ class Maximizer:
         elif self.maximizer_type == "TOP3":
             self.update_top3(client_id, chunk.rows)
             return True
-        else:
-            logging.error(f"Maximizador desconocido: {self.maximizer_type}")
-            return False
+        elif self.maximizer_type == "TPV":
+            # Send aggregated TPVs to Joiner
+            results = self.working_state.get_tpv_results(client_id)
+            if results:
+                # Convert to TPVProcessRow
+                from utils.processing.process_table import TPVProcessRow
+                from utils.results.result_chunk import ResultChunkHeader
+                from utils.processing.process_chunk import ProcessChunkHeader as PCH
+                
+                output_rows = [
+                    TPVProcessRow(store_id, tpv, year_half)
+                    for (store_id, year_half), tpv in results.items()
+                ]
+                
+                # Send in chunks
+                batch_size = 1000
+                for i in range(0, len(output_rows), batch_size):
+                    batch = output_rows[i:i+batch_size]
+                    # Use a generic header or correct one. Joiner expects ProcessChunk.
+                    header = PCH(client_id, str(uuid.uuid4()), TableType.TPV)
+                    chunk = ProcessChunk(header, batch)
+                    self.data_sender.send(chunk.serialize())
+                    logging.info(f"action: sent_tpv_chunk | client_id:{client_id} | rows:{len(batch)}")
+            else:
+                logging.info(f"action: no_tpv_results | client_id:{client_id}")
     
     def publish_partial_max_results(self, client_id: int) -> int:
         """

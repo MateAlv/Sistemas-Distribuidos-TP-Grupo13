@@ -153,7 +153,7 @@ class Aggregator:
                 raise ShardingConfigError("AGGREGATOR_SHARD_ID must be set for TPV aggregator")
             self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", f"to_agg_tpv_shard_{self.shard_id}")
             # Send aggregated partials to TPV absolute (to be consumed by max/joiner)
-            self.middleware_queue_sender["to_absolute_tpv"] = MessageMiddlewareQueue("rabbitmq", "to_absolute_tpv")
+            self.middleware_queue_sender["to_absolute_tpv_max"] = MessageMiddlewareQueue("rabbitmq", "to_absolute_tpv_max")
             self.stage = STAGE_AGG_TPV
         else:
             raise ValueError(f"Tipo de agregador inválido: {self.aggregator_type}")
@@ -384,7 +384,11 @@ class Aggregator:
                     f"action: stats_end_received | type:{self.aggregator_type} | agg_id:{stats_end.aggregator_id} "
                     f"| cli_id:{stats_end.client_id} | table_type:{stats_end.table_type}"
                 )
-                self.delete_client_data(stats_end)
+                # Registrar el mensaje para evitar reprocesos
+                self.working_state.mark_processed(stats_end.message_id)
+                # Solo limpiamos nuestro estado si el END es propio; si es de un par, lo ignoramos.
+                if stats_end.aggregator_id == self.aggregator_id:
+                    self.delete_client_data(stats_end)
                 return
 
             stats = AggregatorStatsMessage.decode(raw_msg)
@@ -410,6 +414,9 @@ class Aggregator:
             stats.table_type,
             stats.aggregator_id,
             stats.chunks_processed,
+        )
+        logging.debug(
+            f"action: stats_message_applied | type:{self.aggregator_type} | from_agg:{stats.aggregator_id} | cli_id:{stats.client_id} | table:{stats.table_type} | recv:{stats.chunks_received} | proc:{stats.chunks_processed} | total_expected:{stats.total_expected}"
         )
 
         self.working_state.mark_processed(stats.message_id)
@@ -606,23 +613,27 @@ class Aggregator:
         received = self.working_state.get_received_for_aggregator(client_id, table_type, self.aggregator_id)
         processed = self.working_state.get_processed_for_aggregator(client_id, table_type, self.aggregator_id)
     
+        send_table_type = table_type
+        if self.aggregator_type == "TPV":
+            send_table_type = TableType.TPV
+
         stats_msg = AggregatorStatsMessage(
             self.aggregator_id,
             client_id,
-            table_type,
+            send_table_type,
             total_expected,
             received,
             processed,
         )
         # Evitar spam: solo loggear en DEBUG cuando hay cambios o force
-        if force or not self.working_state.was_stats_sent(client_id, table_type, (received, processed, total_expected)):
+        if force or not self.working_state.was_stats_sent(client_id, send_table_type, (received, processed, total_expected)):
             logging.debug(
                 f"action: aggregator_stats_sent | type:{self.aggregator_type} | agg_id:{self.aggregator_id} "
-                f"| client_id:{client_id} | table_type:{table_type} | received:{received} | processed:{processed} | expected:{total_expected}"
+                f"| client_id:{client_id} | table_type:{send_table_type} | received:{received} | processed:{processed} | expected:{total_expected}"
             )
             self.middleware_stats_exchange.send(stats_msg.encode())
-            self.working_state.mark_stats_sent(client_id, table_type, (received, processed, total_expected))
-            self.working_state.set_last_stats_sent_time(client_id, table_type, time.time())
+            self.working_state.mark_stats_sent(client_id, send_table_type, (received, processed, total_expected))
+            self.working_state.set_last_stats_sent_time(client_id, send_table_type, time.time())
             
             # Publish coordination stats (throttled by was_stats_sent logic implicitly via this block)
             try:
@@ -658,6 +669,9 @@ class Aggregator:
         # 1. Check if we have received the global total expected (from upstream)
         global_total = self.working_state.get_global_total_expected(client_id, table_type)
         if global_total is None:
+            logging.debug(
+                f"action: end_gate_blocked_no_global_total | type:{self.aggregator_type} | cli_id:{client_id} | table:{table_type}"
+            )
             return False
 
         # 2. Check if we have processed everything we received locally
@@ -665,16 +679,20 @@ class Aggregator:
         processed = self.working_state.get_processed_for_aggregator(client_id, table_type, self.aggregator_id)
         
         if processed < received:
-             logging.debug(f"action: waiting_local_processing | type:{self.aggregator_type} | client_id:{client_id} | processed:{processed} | received:{received}")
-             return False
+            logging.debug(
+                f"action: waiting_local_processing | type:{self.aggregator_type} | client_id:{client_id} | table:{table_type} | processed:{processed} | received:{received}"
+            )
+            return False
 
         # 3. Check if all peers have processed their part
         # Sum of processed chunks from all aggregators (including self)
         total_processed_global = self.working_state.get_total_processed_global(client_id, table_type)
         
         if total_processed_global < global_total:
-             logging.debug(f"action: waiting_global_processing | type:{self.aggregator_type} | client_id:{client_id} | global_processed:{total_processed_global} | global_expected:{global_total}")
-             return False
+            logging.debug(
+                f"action: waiting_global_processing | type:{self.aggregator_type} | client_id:{client_id} | table:{table_type} | global_processed:{total_processed_global} | global_expected:{global_total}"
+            )
+            return False
              
         # 4. Check accumulation consistency (processed vs accumulated)
         total_accumulated = self.working_state.get_total_accumulated(client_id, table_type)
@@ -687,10 +705,14 @@ class Aggregator:
         # So get_total_accumulated returns sum of accumulated chunks for all aggregators.
         
         if total_processed_global != total_accumulated:
-             logging.debug(f"action: waiting_accumulation_consistency | type:{self.aggregator_type} | client_id:{client_id} | global_processed:{total_processed_global} | global_accumulated:{total_accumulated}")
-             return False
+            logging.debug(
+                f"action: waiting_accumulation_consistency | type:{self.aggregator_type} | client_id:{client_id} | table:{table_type} | global_processed:{total_processed_global} | global_accumulated:{total_accumulated}"
+            )
+            return False
 
-        logging.info(f"action: symmetric_termination_condition_met | type:{self.aggregator_type} | client_id:{client_id} | global_total:{global_total}")
+        logging.info(
+            f"action: symmetric_termination_condition_met | type:{self.aggregator_type} | client_id:{client_id} | table:{table_type} | global_total:{global_total} | processed:{total_processed_global}"
+        )
         return True
 
     def _send_end_message(self, client_id, table_type):
@@ -739,13 +761,17 @@ class Aggregator:
             # So Sum(OwnProcessed) = GlobalTotalProcessed = GlobalTotalExpected.
             # This maintains consistency!
             
+            send_table_type = table_type
+            if self.aggregator_type == "TPV":
+                send_table_type = TableType.TPV
+
             my_processed = self.working_state.get_processed_for_aggregator(client_id, table_type, self.aggregator_id)
-            end_msg = MessageEnd(client_id, table_type, my_processed, str(self.aggregator_id))
+            end_msg = MessageEnd(client_id, send_table_type, my_processed, str(self.aggregator_id))
             
             for queue in self.middleware_queue_sender.values():
                 queue.send(end_msg.encode())
             logging.info(
-                f"action: sent_end_to_next_stage | type:{self.aggregator_type} | cli_id:{client_id} | my_processed:{my_processed}"
+                f"action: sent_end_to_next_stage | type:{self.aggregator_type} | cli_id:{client_id} | table:{send_table_type} | my_processed:{my_processed} | expected_global:{self.working_state.get_chunks_to_receive(client_id, table_type)}"
             )
             # Publish coordination END
             try:
@@ -767,7 +793,9 @@ class Aggregator:
         except Exception as e:
             logging.error(f"action: error_sending_end_message | error:{e}")
 
-        stats_end = AggregatorStatsEndMessage(self.aggregator_id, client_id, table_type)
+        # Emit stats_end with the downstream table type (TPV for tpv aggregators)
+        stats_end_table = TableType.TPV if self.aggregator_type == "TPV" else table_type
+        stats_end = AggregatorStatsEndMessage(self.aggregator_id, client_id, stats_end_table)
         self.middleware_stats_exchange.send(stats_end.encode())
         self.delete_client_data(stats_end)
 
@@ -1003,14 +1031,16 @@ class Aggregator:
         rows = []
         for (year, semester, store_id), total in data.items():
             year_half = YearHalf(year, semester)
-            rows.append(TPVProcessRow(store_id=store_id, tpv=total, year_half=year_half))
+            row = TPVProcessRow(store_id=store_id, tpv=total, year_half=year_half, shard_id=str(self.shard_id))
+            rows.append(row)
 
         header = ProcessChunkHeader(client_id=client_id, table_type=TableType.TPV)
         chunk = ProcessChunk(header, rows)
-        self.middleware_queue_sender["to_absolute_tpv"].send(chunk.serialize())
-        logging.info(
-            f"action: publish_final_tpv | client_id:{client_id} | rows:{len(rows)}"
-        )
+        # TPV aggregation
+        # Send to TPV Maximizer
+        queue = self.middleware_queue_sender["to_absolute_tpv_max"]
+        queue.send(chunk.serialize())
+        logging.info(f"action: sent_tpv_chunk | client_id:{client_id} | rows:{len(chunk.rows)}")
 
     def apply_products(self, chunk):
         YEARS = {2024, 2025}
