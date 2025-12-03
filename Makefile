@@ -23,6 +23,15 @@ default: docker-image
 
 all: docker-image
 
+init:
+	# Create results directory
+	mkdir -p .results
+	# Create persistence directory
+	mkdir -p data/persistence
+	# Download datasets
+	./scripts/generar-data.sh
+.PHONY: init
+
 docker-image:
 	# Server & Client
 	docker build -f ./server/Dockerfile -t "server:latest" ./server
@@ -48,7 +57,6 @@ build:
 up:
 	make clean-results
 	make down
-	-docker run --rm -v $(PWD)/data/persistence:/persistence alpine sh -c 'rm -rf /persistence/*'
 	python3  $(COMPOSE_SCRIPT) --config=${CONFIG}
 	docker compose -f ${DOCKER} up -d --build
 	@echo "Running tests... Logs redirected to logs.txt"
@@ -60,7 +68,6 @@ test:
 	# Run the docker-compose setup
 	make clean-results
 	make down
-	-docker run --rm -v $(PWD)/data/persistence:/persistence alpine sh -c 'rm -rf /persistence/*'
 	python3  $(COMPOSE_SCRIPT) --config=config/config-test.ini
 	@echo "Running tests... Logs redirected to logs.txt"
 	@bash -c ' \
@@ -109,6 +116,7 @@ test-small:
 .PHONY: test-small
 
 down:
+	-docker run --rm -v $(PWD)/data/persistence:/persistence alpine sh -c 'rm -rf /persistence/*'
 	docker compose -f ${DOCKER} stop -t 1
 	docker compose -f ${DOCKER} down -v --remove-orphans
 .PHONY: docker-compose-down
