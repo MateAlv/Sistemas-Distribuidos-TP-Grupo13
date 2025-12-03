@@ -362,14 +362,14 @@ class Maximizer:
                 logging.info(f"action: absolute_top3_ready | client_id:{client_id} | all_shards_received")
                 self.process_client_end(client_id, table_type)
         elif self.maximizer_type == "TPV":
-        # Track TPV shards
-        for row in chunk.rows:
-            shard_slug = self._extract_shard_from_row(row)
-            if shard_slug:
-                self.received_shards[client_id].add(shard_slug)
-            logging.info(
-                f"action: tpv_tracking | client_id:{client_id} | shards_seen:{len(self.received_shards[client_id])} | shards:{sorted(self.received_shards[client_id])}"
-            )
+            # Track TPV shards
+            for row in chunk.rows:
+                shard_slug = self._extract_shard_from_row(row)
+                if shard_slug:
+                    self.received_shards[client_id].add(shard_slug)
+                logging.info(
+                    f"action: tpv_tracking | client_id:{client_id} | shards_seen:{len(self.received_shards[client_id])} | shards:{sorted(self.received_shards[client_id])}"
+                )
 
         self.working_state.mark_processed(chunk.message_id())
         self._save_state(chunk.message_id())
