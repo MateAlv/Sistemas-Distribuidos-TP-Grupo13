@@ -13,4 +13,7 @@ requirements.txt
 
 docker-compose.yaml
 docker-compose-*.yaml
+persistence_processing_commit
+persistence_state
+persistence_send_commit
 previous_implementations/

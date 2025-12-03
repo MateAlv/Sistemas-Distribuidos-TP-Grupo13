@@ -23,6 +23,8 @@ class FilterWorkingState(WorkingState):
         self.already_sent_stats = {}
         # processed message ids
         self.processed_ids = set()
+        # global processed ids across all replicas of the same filter type
+        self.global_processed_ids = set()
 
     def _ensure_filter_entry(self, dictionary, client_id, table_type, filter_id, default=0):
         """Ensure nested dict structure exists for filter tracking"""
@@ -179,7 +181,8 @@ class FilterWorkingState(WorkingState):
             "number_of_chunks_to_receive",
             "end_message_received",
             "already_sent_stats",
-            "processed_ids"
+            "processed_ids",
+            "global_processed_ids"
         ]:
             try:
                 obj = getattr(self, attr, None)

@@ -1,6 +1,7 @@
 import logging
 import json
 import os
+import uuid
 from collections import deque, defaultdict
 from utils.processing.process_table import TableProcessRow
 from utils.processing.process_chunk import ProcessChunk
@@ -61,16 +62,6 @@ class Filter:
         # Track how many chunks we actually sent to each shard so END carries correct per-shard expected count
         # Key: (stage, client_id, table_type, shard_id) -> chunks_sent
         self.shard_chunks_sent = defaultdict(int)
-        # Global dedup across replicas per filter type
-        self.global_dedup_path = f"/data/persistence/filter_{self.filter_type}_global_processed"
-        self.global_processed_ids = set()
-        try:
-            if os.path.exists(self.global_dedup_path):
-                with open(self.global_dedup_path, "r", encoding="utf-8") as fh:
-                    for line in fh:
-                        self.global_processed_ids.add(line.strip())
-        except Exception as e:
-            logging.warning(f"action: global_dedup_load_failed | type:{self.filter_type} | error:{e}")
 
         self.middleware_end_exchange = MessageMiddlewareExchange("rabbitmq", 
                                                                  f"end_exchange_filter_{self.filter_type}", 
@@ -106,10 +97,25 @@ class Filter:
                      )
 
         logging.info("Verificando recuperación de procesamiento previo")
-        self.persistence_service = PersistenceService(f"/data/persistence/filter_{self.filter_type}_{self.id}")
+        # Support PERSISTENCE_DIR for testing (defaults to /data/persistence for production)
+        persistence_dir = os.getenv("PERSISTENCE_DIR", "/data/persistence")
+        self.persistence_service = PersistenceService(f"{persistence_dir}/filter_{self.filter_type}_{self.id}")
+        self.handle_processing_recovery()
 
     def handle_processing_recovery(self):
 
+        # First, recover the working state (processed_ids, global_processed_ids, etc.)
+        recovered_state_bytes = self.persistence_service.recover_working_state()
+        if recovered_state_bytes:
+            try:
+                # Deserialize and restore working state
+                self.working_state = self.working_state.__class__.from_bytes(recovered_state_bytes)
+                logging.info(f"Working state recovered: {len(self.working_state.processed_ids)} processed chunks, "
+                           f"{len(self.working_state.global_processed_ids)} global processed")
+            except Exception as e:
+                logging.warning(f"Could not recover working state: {e}")
+        
+        # Then, recover any last processing chunk that was interrupted
         last_processing_chunk = self.persistence_service.recover_last_processing_chunk()
 
         if last_processing_chunk:
@@ -119,24 +125,64 @@ class Filter:
             table_type = last_processing_chunk.table_type()
             message_id = last_processing_chunk.message_id()
 
-            chunk_was_sent = self.process_chunk(last_processing_chunk)
-            # Se actualiza el working state según si el chunk fue enviado o no
-            if self.persistence_service.process_has_been_counted(last_processing_chunk):
-                if chunk_was_sent:
+            filtered_rows = self.process_chunk(last_processing_chunk, force=True)
+            # Se actualiza el working state solo si el chunk NO fue contado previamente
+            if not self.persistence_service.process_has_been_counted(last_processing_chunk.message_id()):
+                if filtered_rows:
                     self.working_state.increase_received_chunks(client_id, table_type, self.id, 1)
                 else:
                     self.working_state.increase_not_sent_chunks(client_id, table_type, self.id, 1)
             # Se commitea el working state
             self.persistence_service.commit_working_state(self.working_state.to_bytes(), message_id)
 
+            # Send filtered rows (crucial for recovery if crash happened before send)
+            self.send_filtered_rows(filtered_rows, last_processing_chunk, client_id, table_type, message_id)
+
+            # Check if we need to send END/Stats (logic copied from _handle_process_message)
+            # This is needed if we crashed after processing the last chunk but before sending END
+            if self.working_state.end_is_received(client_id, table_type):
+                total_expected = self.working_state.get_total_chunks_to_receive(client_id, table_type)
+                
+                # Send OWN stats (not the sum of all filters)
+                own_received = self.working_state.get_own_chunks_received(client_id, table_type, self.id)
+                own_not_sent = self.working_state.get_own_chunks_not_sent(client_id, table_type, self.id)
+
+                if self.working_state.should_send_stats(client_id, table_type, own_received, own_not_sent):
+                    stats_msg = FilterStatsMessage(self.id, client_id, table_type, total_expected, own_received, own_not_sent)
+                    self.middleware_end_exchange.send(stats_msg.encode())
+                    self.working_state.mark_stats_sent(client_id, table_type, own_received, own_not_sent)
+
+                if self.working_state.can_send_end_message(client_id, table_type, total_expected, self.id):
+                    total_not_sent = self.working_state.get_total_not_sent_chunks(client_id, table_type)
+                    self._send_end_message(client_id, table_type, total_expected, total_not_sent)
+
     def run(self):
         logging.info(f"Filtro iniciado. Tipo: {self.filter_type}, ID: {self.id}")
 
-        self.handle_processing_recovery()
-
         results = deque()
         stats_results = deque()
-        def callback(msg): results.append(msg)
+        def callback(msg):
+            if msg.startswith(b"END;"):
+                end_message = MessageEnd.decode(msg)
+                client_id = end_message.client_id()
+                table_type = end_message.table_type()
+                self.working_state.end_received(client_id, table_type)
+                self.persistence_service.commit_working_state(self.working_state.to_bytes(), uuid.uuid4())
+                # REVISAR LÓGICA DE PERSISTENCIA Y RECOVERY DE END
+            else:
+                # Crash point for testing: before commit_processing_chunk
+                if os.getenv("CRASH_POINT") == "CRASH_BEFORE_COMMIT_PROCESSING":
+                    raise SystemExit("Simulated crash before commit_processing_chunk")
+                
+                chunk = ProcessBatchReader.from_bytes(msg)
+                # Se commitea el chunk a procesar
+                self.persistence_service.commit_processing_chunk(chunk)
+                
+                # Crash point for testing: after commit_processing_chunk
+                if os.getenv("CRASH_POINT") == "CRASH_AFTER_COMMIT_PROCESSING":
+                    raise SystemExit("Simulated crash after commit_processing_chunk")
+            results.append(msg)
+            
         def stats_callback(msg): stats_results.append(msg)
         def stop():
             if not self.middleware_queue_receiver.connection or not self.middleware_queue_receiver.connection.is_open:
@@ -151,17 +197,22 @@ class Filter:
         while self.__running:
 
 
-            try:
-                self.stats_timer = self.middleware_end_exchange.connection.call_later(TIMEOUT, stats_stop)
-                self.middleware_end_exchange.start_consuming(stats_callback)
-            except (OSError, RuntimeError, MessageMiddlewareMessageError) as e:
-                logging.error(f"Error en consumo: {e}")
+            # Skip end_exchange consumption in test mode (no downstream workers)
+            test_mode = os.getenv("TEST_MODE", "false").lower() == "true"
+            if not test_mode:
+                try:
+                    self.stats_timer = self.middleware_end_exchange.connection.call_later(TIMEOUT, stats_stop)
+                    self.middleware_end_exchange.start_consuming(stats_callback)
+                except (OSError, RuntimeError, MessageMiddlewareMessageError) as e:
+                    logging.error(f"Error en consumo: {e}")
 
-            try:
-                self.consume_timer = self.middleware_queue_receiver.connection.call_later(TIMEOUT, stop)
-                self.middleware_queue_receiver.start_consuming(callback)
-            except (OSError, RuntimeError, MessageMiddlewareMessageError) as e:
-                logging.error(f"Error en consumo: {e}")
+            # Skip coordination exchange in test mode (no coordination infrastructure)
+            if not test_mode:
+                try:
+                    self.consume_timer = self.middleware_queue_receiver.connection.call_later(TIMEOUT, stop)
+                    self.middleware_queue_receiver.start_consuming(callback)
+                except (OSError, RuntimeError, MessageMiddlewareMessageError) as e:
+                     logging.error(f"Error en consumo: {e}")
 
             while stats_results:
 
@@ -178,6 +229,9 @@ class Filter:
                         if self.working_state.can_send_end_message(stats.client_id, stats.table_type, stats.total_expected, self.id):
                             chunks_not_sent = self.working_state.get_total_not_sent_chunks(stats.client_id, stats.table_type)
                             self._send_end_message(stats.client_id, stats.table_type, stats.total_expected, chunks_not_sent)
+                        
+                        # Persist state after updating stats from other filters
+                        self.persistence_service.commit_working_state(self.working_state.to_bytes(), uuid.uuid4())
 
                 except Exception as e:
                     logging.error(f"action: error_decoding_stats_message | error:{e}")
@@ -199,6 +253,7 @@ class Filter:
         chunk = ProcessBatchReader.from_bytes(msg)
         client_id = chunk.client_id()
         table_type = chunk.table_type()
+        message_id = chunk.message_id()
 
         # Idempotency check
         msg_id = chunk.message_id()
@@ -207,29 +262,30 @@ class Filter:
             logging.info(f"action: duplicate_chunk_ignored | message_id:{msg_id}")
             return
         # Global dedup across replicas per filter type
-        if msg_id_str in self.global_processed_ids:
+        if msg_id_str in self.working_state.global_processed_ids:
             logging.info(f"action: global_duplicate_chunk_ignored | message_id:{msg_id}")
             return
 
-        # Se commitea el chunk a procesar
-        self.persistence_service.commit_processing_chunk(chunk)
-        # Se procesa el chunk
-        chunk_was_sent = self.process_chunk(chunk)
+        # 1. Apply filter - returns filtered rows
+        filtered_rows = self.process_chunk(chunk)
 
-        if chunk_was_sent:
+        # 2. Update working state (in-memory)
+        if filtered_rows:
             self.working_state.increase_received_chunks(client_id, table_type, self.id, 1)
         else:
             self.working_state.increase_not_sent_chunks(client_id, table_type, self.id, 1)
 
         # Se commitea el working state
         self.working_state.processed_ids.add(msg_id)
-        try:
-            self.global_processed_ids.add(msg_id_str)
-            with open(self.global_dedup_path, "a", encoding="utf-8") as fh:
-                fh.write(f"{msg_id_str}\n")
-        except Exception as e:
-            logging.warning(f"action: global_dedup_save_failed | type:{self.filter_type} | message_id:{msg_id} | error:{e}")
+        self.working_state.global_processed_ids.add(msg_id_str)
+        
+        # Crash point for testing: before commit_working_state
+        if os.getenv("CRASH_POINT") == "CRASH_BEFORE_COMMIT_WORKING_STATE":
+            raise SystemExit("Simulated crash before commit_working_state")
         self.persistence_service.commit_working_state(self.working_state.to_bytes(), msg_id)
+
+        # 4. Send to next stage (only if there are filtered rows)
+        self.send_filtered_rows(filtered_rows, chunk, client_id, table_type, message_id)
 
         if self.working_state.end_is_received(client_id, table_type):
             total_expected = self.working_state.get_total_chunks_to_receive(client_id, table_type)
@@ -255,6 +311,74 @@ class Filter:
             if self.working_state.can_send_end_message(client_id, table_type, total_expected, self.id):
                 self._send_end_message(client_id, table_type, total_expected, total_not_sent)
 
+    def send_filtered_rows(self, filtered_rows, chunk, client_id, table_type, message_id):
+        
+        if filtered_rows:
+            # Dispatch according to filter type and destination
+            if self.filter_type == "year":
+                if table_type == TableType.TRANSACTIONS:
+                    queue = self.middleware_queue_sender["to_filter_hour"]
+                    logging.debug(f"action: sending_to_queue | type:{self.filter_type} | queue:{queue.queue_name} | rows:{len(filtered_rows)/len(chunk.rows):.2%} | cli_id:{chunk.client_id()} | shard:{self.shard_id}")
+                    queue.send(ProcessChunk(chunk.header, filtered_rows).serialize())
+
+                if table_type == TableType.TRANSACTION_ITEMS:
+                    # Q2: route items to products aggregator shards
+                    shard_id = self._next_shard("agg_products", client_id, table_type, self.products_shards)
+                    queue_name = f"to_agg_products_shard_{shard_id}"
+                    if queue_name not in self.middleware_queue_sender:
+                        self.middleware_queue_sender[queue_name] = MessageMiddlewareQueue("rabbitmq", queue_name)
+                    logging.debug(f"action: sending_to_queue | type:{self.filter_type} | queue:{queue_name} | rows:{len(filtered_rows)/len(chunk.rows):.2%} | cli_id:{chunk.client_id()} | shard:{shard_id}")
+                    self.middleware_queue_sender[queue_name].send(ProcessChunk(chunk.header, filtered_rows).serialize())
+                    self.shard_chunks_sent[(STAGE_AGG_PRODUCTS, client_id, table_type, shard_id)] += 1
+                elif table_type == TableType.TRANSACTIONS:
+                    # Q4: route transactions to purchases aggregator shards
+                    shard_id = self._next_shard("agg_purchases", client_id, table_type, self.purchases_shards)
+                    queue_name = f"to_agg_purchases_shard_{shard_id}"
+                    if queue_name not in self.middleware_queue_sender:
+                        self.middleware_queue_sender[queue_name] = MessageMiddlewareQueue("rabbitmq", queue_name)
+                    logging.debug(f"action: sending_to_queue | type:{self.filter_type} | queue:{queue_name} | rows:{len(filtered_rows)/len(chunk.rows):.2%} | cli_id:{chunk.client_id()} | shard:{shard_id}")
+                    self.middleware_queue_sender[queue_name].send(ProcessChunk(chunk.header, filtered_rows).serialize())
+                    self.shard_chunks_sent[(STAGE_AGG_PURCHASES, client_id, table_type, shard_id)] += 1
+
+            elif self.filter_type == "hour":
+                # Forward to amount filter for Q1
+                queue = self.middleware_queue_sender["to_filter_amount"]
+                logging.debug(f"action: sending_to_queue | type:{self.filter_type} | queue:{queue.queue_name} | rows:{len(filtered_rows)/len(chunk.rows):.2%} | cli_id:{chunk.client_id()} | shard:{self.shard_id}")
+                queue.send(ProcessChunk(chunk.header, filtered_rows).serialize())
+
+                if table_type == TableType.TRANSACTIONS:
+                    # Q3: route transactions to TPV aggregator shards
+                    shard_id = self._next_shard("agg_tpv", client_id, table_type, self.tpv_shards)
+                    queue_name = f"to_agg_tpv_shard_{shard_id}"
+                    if queue_name not in self.middleware_queue_sender:
+                        self.middleware_queue_sender[queue_name] = MessageMiddlewareQueue("rabbitmq", queue_name)
+                    logging.debug(f"action: sending_to_queue | type:{self.filter_type} | queue:{queue_name} | rows:{len(filtered_rows)/len(chunk.rows):.2%} | cli_id:{chunk.client_id()} | shard:{shard_id}")
+                    self.middleware_queue_sender[queue_name].send(ProcessChunk(chunk.header, filtered_rows).serialize())
+                    self.shard_chunks_sent[(STAGE_AGG_TPV, client_id, table_type, shard_id)] += 1
+                    logging.info(
+                        f"DEBUGGING_QUERY_3 | filter_hour_to_agg_tpv | cli_id:{client_id} | shard:{shard_id} | rows_out:{len(filtered_rows)} | shard_total:{self.shard_chunks_sent[(STAGE_AGG_TPV, client_id, table_type, shard_id)]}"
+                    )
+
+            elif self.filter_type == "amount":
+                converted_rows = [Query1ResultRow(tx.transaction_id, tx.final_amount) for tx in filtered_rows]
+                # Amount filter only sends to merge queue per client
+                queue_name = f"to_merge_data_{client_id}"
+                if queue_name in self.middleware_queue_sender:
+                    queue = self.middleware_queue_sender[queue_name]
+                    logging.debug(f"action: sending_to_queue | type:{self.filter_type} | queue:{queue_name} | rows:{len(filtered_rows)/len(chunk.rows):.2%} | cli_id:{chunk.client_id()}")
+                    queue.send(ResultChunk(ResultChunkHeader(client_id, ResultTableType.QUERY_1), converted_rows).serialize())
+                else:
+                    logging.error(f"action: queue_not_found | queue:{queue_name} | cli_id:{client_id}")
+
+            logging.info(f"action: rows_sent | type:{self.filter_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()} | rows_out:{len(filtered_rows)}")
+        else:
+            logging.info(f"action: no_rows_to_send | type:{self.filter_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()}")
+
+        # Se commitea el envío del chunk procesado (incluso si no hubo filas, para marcarlo como completado)
+        self.persistence_service.commit_send_ack(client_id, message_id)
+        return True
+
+
     def _handle_end_message(self, msg):
         end_message = MessageEnd.decode(msg)
         client_id = end_message.client_id()
@@ -272,7 +396,6 @@ class Filter:
 
         sender_id = end_message.sender_id()
 
-        self.working_state.end_received(client_id, table_type)
         logging.info(
             "action: end_message_received | type:%s | cli_id:%s | file_type:%s | sender_id:%s | chunks_received:%d | chunks_not_sent:%d | chunks_expected:%d",
             self.filter_type, client_id, table_type, sender_id,
@@ -281,6 +404,7 @@ class Filter:
             total_expected)
 
         self.working_state.set_total_chunks_expected(client_id, table_type, total_expected)
+        self.working_state.end_received(client_id, table_type)
 
         # Only send stats if not already sent or if values changed - send OWN stats, not total
         if self.working_state.should_send_stats(client_id, table_type, own_received, own_not_sent):
@@ -310,6 +434,9 @@ class Filter:
                 logging.error(f"action: coordination_stats_send_error | stage:{self.stage} | cli_id:{client_id} | error:{e}")
             # Mark stats as sent with current values
             self.working_state.mark_stats_sent(client_id, table_type, own_received, own_not_sent)
+
+        # Persist state after handling END message and potential stats update
+        self.persistence_service.commit_working_state(self.working_state.to_bytes(), uuid.uuid4())
 
         # Use TOTAL to check if all filters are done
         total_received = self.working_state.get_total_chunks_received(client_id, table_type)
@@ -465,11 +592,15 @@ class Filter:
         logging.error(f"Filtro desconocido: {self.filter_type}")
         return False
 
-    def process_chunk(self, chunk: ProcessChunk):
+    def process_chunk(self, chunk: ProcessChunk, force=False):
+        """
+        Applies the filter to the chunk and returns filtered rows.
+        Does NOT send the rows - that's handled by the caller after state commits.
+        """
         client_id = chunk.client_id()
         message_id = chunk.message_id()
 
-        if self.working_state.is_processed(message_id):
+        if not force and self.working_state.is_processed(message_id):
             logging.info(f"action: duplicate_chunk_ignored | message_id:{message_id}")
             return
 
@@ -482,71 +613,7 @@ class Filter:
         logging.debug(f"action: filter | type:{self.filter_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()} | rows_in:{len(chunk.rows)}")
         filtered_rows = [tx for tx in chunk.rows if self.apply(tx)]
         logging.debug(f"action: filter_result | type:{self.filter_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()} | rows_out:{len(filtered_rows)}")
-        if filtered_rows:
-            # Dispatch according to filter type and destination
-            if self.filter_type == "year":
-                if table_type == TableType.TRANSACTIONS:
-                    queue = self.middleware_queue_sender["to_filter_hour"]
-                    logging.debug(f"action: sending_to_queue | type:{self.filter_type} | queue:{queue.queue_name} | rows:{len(filtered_rows)/len(chunk.rows):.2%} | cli_id:{chunk.client_id()} | shard:{self.shard_id}")
-                    queue.send(ProcessChunk(chunk.header, filtered_rows).serialize())
-
-                if table_type == TableType.TRANSACTION_ITEMS:
-                    # Q2: route items to products aggregator shards
-                    shard_id = self._next_shard("agg_products", client_id, table_type, self.products_shards)
-                    queue_name = f"to_agg_products_shard_{shard_id}"
-                    if queue_name not in self.middleware_queue_sender:
-                        self.middleware_queue_sender[queue_name] = MessageMiddlewareQueue("rabbitmq", queue_name)
-                    logging.debug(f"action: sending_to_queue | type:{self.filter_type} | queue:{queue_name} | rows:{len(filtered_rows)/len(chunk.rows):.2%} | cli_id:{chunk.client_id()} | shard:{shard_id}")
-                    self.middleware_queue_sender[queue_name].send(ProcessChunk(chunk.header, filtered_rows).serialize())
-                    self.shard_chunks_sent[(STAGE_AGG_PRODUCTS, client_id, table_type, shard_id)] += 1
-                elif table_type == TableType.TRANSACTIONS:
-                    # Q4: route transactions to purchases aggregator shards
-                    shard_id = self._next_shard("agg_purchases", client_id, table_type, self.purchases_shards)
-                    queue_name = f"to_agg_purchases_shard_{shard_id}"
-                    if queue_name not in self.middleware_queue_sender:
-                        self.middleware_queue_sender[queue_name] = MessageMiddlewareQueue("rabbitmq", queue_name)
-                    logging.debug(f"action: sending_to_queue | type:{self.filter_type} | queue:{queue_name} | rows:{len(filtered_rows)/len(chunk.rows):.2%} | cli_id:{chunk.client_id()} | shard:{shard_id}")
-                    self.middleware_queue_sender[queue_name].send(ProcessChunk(chunk.header, filtered_rows).serialize())
-                    self.shard_chunks_sent[(STAGE_AGG_PURCHASES, client_id, table_type, shard_id)] += 1
-
-            elif self.filter_type == "hour":
-                # Forward to amount filter for Q1
-                queue = self.middleware_queue_sender["to_filter_amount"]
-                logging.debug(f"action: sending_to_queue | type:{self.filter_type} | queue:{queue.queue_name} | rows:{len(filtered_rows)/len(chunk.rows):.2%} | cli_id:{chunk.client_id()} | shard:{self.shard_id}")
-                queue.send(ProcessChunk(chunk.header, filtered_rows).serialize())
-
-                if table_type == TableType.TRANSACTIONS:
-                    # Q3: route transactions to TPV aggregator shards
-                    shard_id = self._next_shard("agg_tpv", client_id, table_type, self.tpv_shards)
-                    queue_name = f"to_agg_tpv_shard_{shard_id}"
-                    if queue_name not in self.middleware_queue_sender:
-                        self.middleware_queue_sender[queue_name] = MessageMiddlewareQueue("rabbitmq", queue_name)
-                    logging.debug(f"action: sending_to_queue | type:{self.filter_type} | queue:{queue_name} | rows:{len(filtered_rows)/len(chunk.rows):.2%} | cli_id:{chunk.client_id()} | shard:{shard_id}")
-                    self.middleware_queue_sender[queue_name].send(ProcessChunk(chunk.header, filtered_rows).serialize())
-                    self.shard_chunks_sent[(STAGE_AGG_TPV, client_id, table_type, shard_id)] += 1
-                    logging.info(
-                        f"DEBUGGING_QUERY_3 | filter_hour_to_agg_tpv | cli_id:{client_id} | shard:{shard_id} | rows_out:{len(filtered_rows)} | shard_total:{self.shard_chunks_sent[(STAGE_AGG_TPV, client_id, table_type, shard_id)]}"
-                    )
-
-            elif self.filter_type == "amount":
-                converted_rows = [Query1ResultRow(tx.transaction_id, tx.final_amount) for tx in filtered_rows]
-                # Amount filter only sends to merge queue per client
-                queue_name = f"to_merge_data_{client_id}"
-                if queue_name in self.middleware_queue_sender:
-                    queue = self.middleware_queue_sender[queue_name]
-                    logging.debug(f"action: sending_to_queue | type:{self.filter_type} | queue:{queue_name} | rows:{len(filtered_rows)/len(chunk.rows):.2%} | cli_id:{chunk.client_id()}")
-                    queue.send(ResultChunk(ResultChunkHeader(client_id, ResultTableType.QUERY_1), converted_rows).serialize())
-                else:
-                    logging.error(f"action: queue_not_found | queue:{queue_name} | cli_id:{client_id}")
-
-            logging.info(f"action: rows_sent | type:{self.filter_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()} | rows_out:{len(filtered_rows)}")
-            # Se commitea el envío del chunk procesado
-            self.persistence_service.commit_send_ack(client_id, message_id)
-        else:
-            logging.info(f"action: no_rows_to_send | type:{self.filter_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()}")
-            return False
-
-        return True
+        return filtered_rows
 
 
     def _should_skip_queue(self, table_type: TableType, queue_name: str, client_id: int) -> bool:
