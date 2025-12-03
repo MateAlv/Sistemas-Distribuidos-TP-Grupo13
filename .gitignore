@@ -13,3 +13,4 @@ requirements.txt
 
 docker-compose.yaml
 docker-compose-*.yaml
+previous_implementations/

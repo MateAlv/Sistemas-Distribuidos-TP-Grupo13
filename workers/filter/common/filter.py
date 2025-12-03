@@ -11,8 +11,6 @@ from utils.protocol import (
     COORDINATION_EXCHANGE,
     MSG_WORKER_END,
     MSG_WORKER_STATS,
-    MSG_BARRIER_FORWARD,
-    DEFAULT_SHARD,
     STAGE_FILTER_YEAR,
     STAGE_FILTER_HOUR,
     STAGE_FILTER_AMOUNT,
@@ -88,8 +86,6 @@ class Filter:
         )
         self.stats_timer = None
         self.consume_timer = None
-        self.coord_timer = None
-        self.barrier_forwarded = set()
         
         if self.filter_type == "year":
             self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", f"to_filter_year_shard_{self.shard_id}")
@@ -142,7 +138,6 @@ class Filter:
         stats_results = deque()
         def callback(msg): results.append(msg)
         def stats_callback(msg): stats_results.append(msg)
-        def coord_callback(msg): results.append((b"BARRIER", msg))
         def stop():
             if not self.middleware_queue_receiver.connection or not self.middleware_queue_receiver.connection.is_open:
                 return
@@ -152,11 +147,6 @@ class Filter:
             if not self.middleware_end_exchange.connection or not self.middleware_end_exchange.connection.is_open:
                 return
             self.middleware_end_exchange.stop_consuming()
-
-        def coord_stop():
-            if not self.middleware_coordination.connection or not self.middleware_coordination.connection.is_open:
-                return
-            self.middleware_coordination.stop_consuming()
 
         while self.__running:
 
@@ -171,13 +161,7 @@ class Filter:
                 self.consume_timer = self.middleware_queue_receiver.connection.call_later(TIMEOUT, stop)
                 self.middleware_queue_receiver.start_consuming(callback)
             except (OSError, RuntimeError, MessageMiddlewareMessageError) as e:
-                 logging.error(f"Error en consumo: {e}")
-
-            try:
-                self.coord_timer = self.middleware_coordination.connection.call_later(TIMEOUT, coord_stop)
-                self.middleware_coordination.start_consuming(coord_callback)
-            except (OSError, RuntimeError, MessageMiddlewareMessageError) as e:
-                logging.error(f"Error en consumo coordination: {e}")
+                logging.error(f"Error en consumo: {e}")
 
             while stats_results:
 
@@ -188,9 +172,6 @@ class Filter:
                         continue
                     else:
                         stats = FilterStatsMessage.decode(stats_msg)
-                        # Ignore peer stats to avoid mixing replicas
-                        if stats.filter_id != self.id:
-                            continue
 
                         self.working_state.update_stats_received(stats.client_id, stats.table_type, stats)
 
@@ -205,9 +186,7 @@ class Filter:
 
                 msg = results.popleft()
                 try:
-                    if isinstance(msg, tuple) and msg[0] == b"BARRIER":
-                        self._handle_barrier_forward(msg[1])
-                    elif msg.startswith(b"END;"):
+                    if msg.startswith(b"END;"):
                         self._handle_end_message(msg)
 
                     else:
@@ -466,49 +445,6 @@ class Filter:
         else:
             return MessageQueryEnd(client_id, ResultTableType.QUERY_1, total_expected - total_not_sent)
 
-    def _handle_barrier_forward(self, raw_msg):
-        try:
-            data = json.loads(raw_msg)
-            if data.get("type") != MSG_BARRIER_FORWARD:
-                return
-            client_id = data.get("client_id")
-            stage = data.get("stage")
-            shard = data.get("shard", DEFAULT_SHARD)
-            if stage != self.stage:
-                return
-            if str(shard) != str(self.shard_id):
-                return
-            key = (client_id, stage, shard)
-            if key in self.barrier_forwarded:
-                return
-            total_chunks = data.get("total_chunks", 0)
-            total_expected = total_chunks
-            # Send stats to monitor to record expected
-            try:
-                own_received = self.working_state.get_own_chunks_received(client_id, TableType.TRANSACTIONS, self.id)
-                own_not_sent = self.working_state.get_own_chunks_not_sent(client_id, TableType.TRANSACTIONS, self.id)
-                payload = {
-                    "type": MSG_WORKER_STATS,
-                    "id": str(self.id),
-                    "client_id": client_id,
-                    "stage": self.stage,
-                    "expected": total_expected,
-                    "chunks": own_received,
-                    "not_sent": own_not_sent,
-                    "sender": str(self.id),
-                    "shard": shard,
-                }
-                rk = f"coordination.barrier.{self.stage}.shard.{shard}"
-                self.middleware_coordination.send(json.dumps(payload).encode("utf-8"), routing_key=rk)
-            except Exception as e:
-                logging.error(f"action: coordination_stats_send_error | stage:{self.stage} | cli_id:{client_id} | error:{e}")
-            # Forward END downstream
-            self._send_end_message(client_id, TableType.TRANSACTIONS, total_expected, 0)
-            self.barrier_forwarded.add(key)
-            logging.info(f"action: barrier_forward_consumed | stage:{self.stage} | cli_id:{client_id} | total_chunks:{total_chunks}")
-        except Exception as e:
-            logging.error(f"action: barrier_forward_error | stage:{self.stage} | error:{e}")
-            
     def apply(self, tx: TableProcessRow) -> bool:
         """
         Aplica el filtro según el tipo configurado.

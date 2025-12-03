@@ -455,12 +455,6 @@ class Server:
         Escucha resultados de la cola to_merge_data para este cliente específico.
         Envía resultados en lotes y detecta fin automáticamente.
         """
-        # Additionally, listen for monitor BARRIER_FORWARD for server_results
-        coord_results = []
-        def coord_callback(msg): coord_results.append(msg)
-        def coord_stop():
-            middleware_coordination.stop_consuming()
-        
         maximum_chunks = self._max_number_of_chunks_in_batch()
         all_data_received = False
         all_data_received_per_query = {
@@ -501,11 +495,6 @@ class Server:
             middleware_queue.stop_consuming()
 
         while not all_data_received:
-            try:
-                middleware_coordination.connection.call_later(TIMEOUT, coord_stop)
-                middleware_coordination.start_consuming(coord_callback)
-            except Exception as e:
-                logging.error(f"action: server_coordination_consume_error | error:{e}")
             middleware_queue.connection.call_later(TIMEOUT, stop)
             middleware_queue.start_consuming(callback)
 
@@ -582,19 +571,6 @@ class Server:
                 finally:
                     if msg in results_for_client:
                         results_for_client.remove(msg)
-
-            # Process barrier_forward signals
-            for raw_coord in list(coord_results):
-                try:
-                    data = json.loads(raw_coord)
-                    if data.get("type") == "BARRIER_FORWARD" and data.get("stage") == STAGE_SERVER_RESULTS and data.get("shard", DEFAULT_SHARD) == DEFAULT_SHARD:
-                        logging.info(f"action: barrier_forward_received_server | client_id:{client_id}")
-                        all_data_received = True
-                except Exception as e:
-                    logging.error(f"action: error_processing_server_barrier | error:{e}")
-                finally:
-                    if raw_coord in coord_results:
-                        coord_results.remove(raw_coord)
 
             all_data_received = all(all_data_received_per_query.values())
 
