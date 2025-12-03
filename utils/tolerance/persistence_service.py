@@ -5,10 +5,13 @@ import tempfile
 
 from utils.processing.process_batch_reader import ProcessBatchReader
 from utils.processing.process_chunk import ProcessChunk, ProcessChunkHeader
+from utils.tolerance.chunk_buffer import ChunkBuffer
 
 STATE_COMMIT_FILE = "persistence_state"
 SEND_COMMIT_FILE = "persistence_send_commit"
 PROCESSING_DATA_COMMIT_FILE = "persistence_processing_commit"
+CHUNK_BUFFER_FILE = "persistence_chunk_buffer"
+DEFAULT_COMMIT_INTERVAL = 10  # Commit state every N chunks
 
 def ensure_directory_exists(directory: str):
     if not os.path.exists(directory):
@@ -175,13 +178,20 @@ class PersistenceService:
             raise
 
 
-    def __init__(self, directory: str = "./"):
+    def __init__(self, directory: str = "./", commit_interval: int = DEFAULT_COMMIT_INTERVAL):
         # path directories
         ensure_directory_exists(directory)
 
         self.state_commit_path = os.path.join(directory, STATE_COMMIT_FILE)
         self.processing_data_commit_path = os.path.join(directory, PROCESSING_DATA_COMMIT_FILE)
         self.send_commit_path = os.path.join(directory, SEND_COMMIT_FILE)
+        self.chunk_buffer_path = os.path.join(directory, CHUNK_BUFFER_FILE)
+        
+        # Chunk buffering configuration
+        self.commit_interval = commit_interval
+        self.chunks_since_last_commit = 0
+        self.chunk_buffer = ChunkBuffer(self.chunk_buffer_path)
+        
         # recover data
         self.messages_sent_by_user = self._recover_send_commits()
         self.working_state = self._recover_working_state_commit()
@@ -229,6 +239,10 @@ class PersistenceService:
         try:
             state_commit = StateCommit(state_data, last_processed_id)
             atomic_file_upsert(self.state_commit_path, state_commit.serialize())
+            
+            # Clear chunk buffer after successful state commit
+            self._clear_chunk_buffer()
+            self.chunks_since_last_commit = 0
         except Exception:
             logging.exception("Failed to commit working state.")
             raise
@@ -279,3 +293,42 @@ class PersistenceService:
             raise
 
         logging.info("Persistence Service shut down completed.")
+    
+    # Chunk buffering methods
+    
+    def append_chunk_to_buffer(self, chunk: ProcessChunk):
+        """Append a chunk to the buffer file and increment counter."""
+        try:
+            self.chunk_buffer.append_chunk(chunk)
+            self.chunks_since_last_commit += 1
+            logging.debug(f"Buffered chunk | msg_id:{chunk.message_id()} | chunks_since_commit:{self.chunks_since_last_commit}")
+        except Exception:
+            logging.exception("Failed to append chunk to buffer.")
+            raise
+    
+    def recover_buffered_chunks(self) -> list:
+        """Recover all buffered chunks from the buffer file."""
+        try:
+            chunks = self.chunk_buffer.read_all_chunks()
+            if chunks:
+                logging.info(f"Recovered {len(chunks)} buffered chunks")
+            return chunks
+        except Exception:
+            logging.exception("Failed to recover buffered chunks.")
+            return []
+    
+    def should_commit_state(self) -> bool:
+        """Check if working state should be committed based on chunk count."""
+        should_commit = self.chunks_since_last_commit >= self.commit_interval
+        if should_commit:
+            logging.debug(f"State commit threshold reached | chunks:{self.chunks_since_last_commit} | interval:{self.commit_interval}")
+        return should_commit
+    
+    def _clear_chunk_buffer(self):
+        """Clear the chunk buffer file (called after state commit)."""
+        try:
+            self.chunk_buffer.clear()
+            logging.debug("Chunk buffer cleared after state commit")
+        except Exception:
+            logging.exception("Failed to clear chunk buffer.")
+            raise
