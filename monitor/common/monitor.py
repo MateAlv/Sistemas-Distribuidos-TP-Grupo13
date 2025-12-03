@@ -38,6 +38,7 @@ class BarrierTracker:
         if expected is not None:
             # Use max to avoid regression if out-of-order messages arrive
             self.agg_expected = max(self.agg_expected or 0, expected)
+            logging.info(f"Aggregator Barrier Expected Chunks to be Processed: {self.agg_expected}")
 
     def apply_stats(self, chunks, processed, expected=None):
         """Updates stats from a worker."""
@@ -46,6 +47,7 @@ class BarrierTracker:
             
         # For Aggregators, 'processed' is what matters against 'agg_expected'
         self.agg_processed = max(self.agg_processed, processed)
+        logging.info(f"Aggregator Barrier Processed Chunks so far: {self.agg_processed}")
 
     def apply_end(self, sender_id, chunks):
         """Handles an END message."""
@@ -53,6 +55,7 @@ class BarrierTracker:
             self.received_end += 1
             self.end_sender_ids.add(sender_id)
         self.total_chunks += chunks
+        logging.info(f"Aggregator Barrier Received END from {sender_id}: {self.received_end}/{expected_filters}")
 
     def is_complete(self, stage_type, now, forward_interval, expected_filters):
         """

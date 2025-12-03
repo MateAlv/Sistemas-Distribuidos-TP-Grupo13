@@ -395,7 +395,7 @@ class Filter:
                     msg_to_send = self._end_message_to_send(client_id, table_type, shard_total, 0)
                     self.middleware_queue_sender[queue_name].send(msg_to_send.encode())
 
-        # Publish to coordination for centralized barrier
+        # Publish to coordination for centralized barrier - MONITOR
         try:
             payload = {
                 "type": MSG_WORKER_END,
@@ -413,7 +413,7 @@ class Filter:
         except Exception as e:
             logging.error(f"action: coordination_end_send_error | stage:{self.stage} | cli_id:{client_id} | error:{e}")
         
-        # [NEW] Send explicit stats for the NEXT stage (Aggregator) to Monitor
+        # Send explicit stats for the NEXT stage (Aggregator) to Monitor
         # This allows Monitor to know 'agg_expected'
         if self.filter_type in ["year", "hour"]:
              # Determine next stage name
@@ -429,8 +429,7 @@ class Filter:
                  # self.shard_chunks_sent tracks chunks sent to each shard
                  # We iterate over shards and send stats to Monitor
                  # The 'chunks' field in stats will be the expected count for that shard
-                 
-                 # Which shards?
+
                  target_shards = 0
                  if next_stage == STAGE_AGG_PRODUCTS: target_shards = self.products_shards
                  elif next_stage == STAGE_AGG_PURCHASES: target_shards = self.purchases_shards
@@ -445,11 +444,10 @@ class Filter:
                             "client_id": client_id,
                             "stage": next_stage, # Target stage
                             "shard": str(i),     # Target shard
-                            "expected": 0,       # Irrelevant for this message? No, we want to set agg_expected.
-                            # In Monitor: if 'not_sent' in data -> agg_expected = data['chunks']
-                            # So we must include 'not_sent' (dummy) and set 'chunks' to shard_total
+                            "expected": shard_total, # Tell Monitor how many chunks to expect for this shard
                             "chunks": shard_total,
-                            "not_sent": 0,       # Signal to Monitor that this is a filter update
+                            "processed": 0,      # Explicitly 0 so we don't update agg_processed in Monitor
+                            "not_sent": 0,
                             "sender": str(self.id),
                         }
                         rk = f"coordination.stats.{next_stage}.{i}"
