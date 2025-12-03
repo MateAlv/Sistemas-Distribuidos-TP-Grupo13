@@ -1005,7 +1005,7 @@ class Aggregator:
 
         from utils.processing.process_chunk import ProcessChunkHeader
 
-        header = ProcessChunkHeader(client_id=chunk.header.client_id, table_type=TableType.TRANSACTIONS)
+        header = ProcessChunkHeader(client_id=chunk.header.client_id, table_type=TableType.TPV)
         return ProcessChunk(header, rows)
 
     def apply_tpv(self, chunk):

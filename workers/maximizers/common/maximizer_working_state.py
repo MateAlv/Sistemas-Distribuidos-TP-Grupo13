@@ -2,7 +2,7 @@ from collections import defaultdict
 from utils.tolerance.working_state import WorkingState
 
 def default_top3_value():
-    return defaultdict(list)
+    return defaultdict(int)
 
 class MaximizerWorkingState(WorkingState):
     def __init__(self):

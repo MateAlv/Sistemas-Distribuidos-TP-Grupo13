@@ -591,21 +591,11 @@ class Maximizer:
                 purchase_count = int(row.purchases_made)
 
                 if store_id not in client_top3:
-                    client_top3[store_id] = []
+                    client_top3[store_id] = defaultdict(int)
 
-                heap = client_top3[store_id]
-                if len(heap) < 3:
-                    heapq.heappush(heap, (purchase_count, user_id))
-                    logging.debug(f"action: push | store:{store_id} | user:{user_id} | count:{purchase_count}")
-                else:
-                    root_count, root_user = heap[0]
-                    # Compara ambos campos sobre el mínimo del heap
-                    if (purchase_count, user_id) > (root_count, root_user):
-                        heapq.heapreplace(heap, (purchase_count, user_id))
-                        logging.debug(
-                            f"action: replace | store:{store_id} | user:{user_id} "
-                            f"| count:{purchase_count} | replaced:{(root_count, root_user)}"
-                        )
+                # Accumulate counts instead of maintaining a heap of partials
+                client_top3[store_id][user_id] += purchase_count
+                logging.debug(f"action: accumulate_top3 | store:{store_id} | user:{user_id} | added:{purchase_count} | new_total:{client_top3[store_id][user_id]}")
 
         logging.info(f"action: top3_result | type:{self.maximizer_type} | client_id:{client_id}  | stores_processed:{len(client_top3)} | stores_after:{list(client_top3.keys())}")
 
@@ -720,11 +710,13 @@ class Maximizer:
         marker_date = datetime.date(2024, 1, 1)  # Fecha marca
         client_top3 = self.working_state.get_top3_by_store(client_id)
         
-        for store_id, top3_heap in client_top3.items():
-            # Convertir heap a lista ordenada (mayor a menor)
-            top3_list = sorted(top3_heap, key=lambda x: x[0], reverse=True)
+        for store_id, user_counts in client_top3.items():
+            # Calculate Top 3 from accumulated counts
+            # user_counts is dict {user_id: count}
+            # We want top 3 by count, then by user_id
+            top3_list = heapq.nlargest(3, user_counts.items(), key=lambda x: (x[1], x[0]))
             
-            for rank, (purchase_count, user_id) in enumerate(top3_list, 1):
+            for rank, (user_id, purchase_count) in enumerate(top3_list, 1):
                 # Usar PurchasesPerUserStoreRow para enviar los datos al TOP3 absoluto
                 row = PurchasesPerUserStoreRow(
                     store_id=store_id,
@@ -770,11 +762,13 @@ class Maximizer:
         
         # Los datos ya vienen procesados de los maximizers parciales
         # Solo necesitamos reenviarlos al joiner
-        for store_id, top3_heap in client_top3.items():
-            logging.debug(f"action: processing_store_for_forward | client_id:{client_id} | store_id:{store_id} | heap_size:{len(top3_heap)}")
+        for store_id, user_counts in client_top3.items():
+            logging.debug(f"action: processing_store_for_forward | client_id:{client_id} | store_id:{store_id} | users_count:{len(user_counts)}")
             
-            # Los datos ya están como TOP3 por store
-            for purchase_count, user_id in top3_heap:
+            # Calculate Top 3 from accumulated counts
+            top3_list = heapq.nlargest(3, user_counts.items(), key=lambda x: (x[1], x[0]))
+
+            for user_id, purchase_count in top3_list:
                 row = PurchasesPerUserStoreRow(
                     store_id=store_id,
                     store_name="",  # Placeholder - lo llena el joiner
