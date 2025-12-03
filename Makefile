@@ -58,9 +58,7 @@ up:
 	make clean-results
 	make down
 	python3  $(COMPOSE_SCRIPT) --config=${CONFIG}
-	docker compose -f ${DOCKER} up -d --build
-	@echo "Running tests... Logs redirected to logs.txt"
-	@bash -c 'docker compose -f ${DOCKER} up --build > logs.txt 2>&1'
+	docker compose -f ${DOCKER} up --build > logs.txt 2>&1
 .PHONY: docker-compose-up
 
 

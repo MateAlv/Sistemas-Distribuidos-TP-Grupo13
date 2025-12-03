@@ -27,6 +27,10 @@ class MaximizerWorkingState(WorkingState):
         self.finished_senders = defaultdict(set) # client_id -> set(sender_id)
         self.total_expected_chunks = defaultdict(int) # client_id -> total_chunks
 
+        # Publish flags (idempotent resend)
+        self.results_sent = set()  # (client_id, label)
+        self.end_sent = set()      # (client_id, label)
+
     def is_processed(self, message_id):
         return message_id in self.processed_ids
 
@@ -101,6 +105,11 @@ class MaximizerWorkingState(WorkingState):
         # Cleanup multi-sender state
         self.finished_senders.pop(client_id, None)
         self.total_expected_chunks.pop(client_id, None)
+        # Cleanup publish flags for this client
+        to_remove_results = {(cid, lbl) for (cid, lbl) in self.results_sent if cid == client_id}
+        to_remove_end = {(cid, lbl) for (cid, lbl) in self.end_sent if cid == client_id}
+        self.results_sent -= to_remove_results
+        self.end_sent -= to_remove_end
 
     # Multi-Sender Tracking Methods
     def is_sender_finished(self, client_id, sender_id):
@@ -117,3 +126,16 @@ class MaximizerWorkingState(WorkingState):
 
     def get_total_expected_chunks(self, client_id):
         return self.total_expected_chunks[client_id]
+
+    # Publish flag helpers
+    def mark_results_sent(self, client_id, label):
+        self.results_sent.add((client_id, label))
+
+    def results_already_sent(self, client_id, label):
+        return (client_id, label) in self.results_sent
+
+    def mark_end_sent(self, client_id, label):
+        self.end_sent.add((client_id, label))
+
+    def end_already_sent(self, client_id, label):
+        return (client_id, label) in self.end_sent
