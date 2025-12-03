@@ -3,14 +3,25 @@ import os
 import socket
 import threading
 import logging
+import json
+from collections import defaultdict
 from typing import Tuple, Optional
 from utils.communication.socket_utils import ensure_socket, recv_exact, sendall
 from utils.processing.process_batch_reader import ProcessBatchReader
+from utils.processing.process_batch_reader import ProcessBatchReader
 from utils.results.result_batch_reader import ResultBatchReader
+from utils.results.result_chunk import ResultChunk, ResultChunkHeader
 from utils.file_utils.file_chunk import FileChunk
 from utils.file_utils.table_type import TableType, ResultTableType
 from utils.eof_protocol.end_messages import MessageEnd, MessageQueryEnd
-from middleware.middleware_interface import MessageMiddlewareQueue, TIMEOUT
+from utils.protocol import (
+    COORDINATION_EXCHANGE,
+    MSG_WORKER_END,
+    MSG_WORKER_STATS,
+    STAGE_SERVER_RESULTS,
+    DEFAULT_SHARD,
+)
+from middleware.middleware_interface import MessageMiddlewareQueue, MessageMiddlewareExchange, TIMEOUT
 
 # Delimitadores / framing
 _MESSAGE_DELIM = b"\n"
@@ -54,6 +65,9 @@ class Server:
     """
 
     def __init__(self, port: int, listen_backlog: int, max_number_of_chunks_in_batch: int, monitor=None) -> None:
+
+        logging.getLogger('pika').setLevel(logging.CRITICAL)
+        
         self.port = int(port)
         self.listen_backlog = int(listen_backlog)
         self.host = DEFAULT_BIND_IP
@@ -77,6 +91,10 @@ class Server:
             "action: fd_open | result: success | kind: listen_socket | fd:%s | ip:%s | port:%s",
             self._server_socket.fileno(), self.host, self.port
         )
+        # Shard config for filters (used to route incoming chunks)
+        self.filter_year_shards = int(os.getenv("FILTER_YEAR_SHARDS", "1"))
+        self.filter_hour_shards = int(os.getenv("FILTER_HOUR_SHARDS", "1"))
+        self.filter_amount_shards = int(os.getenv("FILTER_AMOUNT_SHARDS", "1"))
 
         self._threads = []
 
@@ -138,10 +156,15 @@ class Server:
         Mantiene el socket abierto y escucha resultados después del finish.
         """
         peer = f"{addr[0]}:{addr[1]}"
-        client_id = self.generate_id()
+        client_id = None
+        # Tracks files received (for END) and chunks sent per shard (for accurate expected)
         number_of_chunks_per_file = {}
+        chunks_sent_per_shard = defaultdict(int)  # key: (client_id, table_type, shard_id)
         middleware_queue_senders = {}
-        middleware_queue_senders["to_filter_1"] = MessageMiddlewareQueue("rabbitmq", "to_filter_1")
+        # Sharded filter queues (year stage)
+        shard_counters = defaultdict(int)
+        for sid in range(1, self.filter_year_shards + 1):
+            middleware_queue_senders[f"to_filter_year_shard_{sid}"] = MessageMiddlewareQueue("rabbitmq", f"to_filter_year_shard_{sid}")
         middleware_queue_senders["to_join_stores_tpv"] = MessageMiddlewareQueue("rabbitmq", "stores_for_tpv_joiner")
         middleware_queue_senders["to_join_stores_top3"] = MessageMiddlewareQueue("rabbitmq", "stores_for_top3_joiner")
         middleware_queue_senders["to_join_stores"] = MessageMiddlewareQueue("rabbitmq", "to_join_stores")
@@ -149,13 +172,23 @@ class Server:
         middleware_queue_senders["to_join_menu_items"] = MessageMiddlewareQueue("rabbitmq", "to_join_menu_items")
         middleware_queue_senders["to_top3"] = MessageMiddlewareQueue("rabbitmq", "to_top3")
         middleware_queue_receiver = None
+        middleware_coordination = None
         
         try:
             sock.settimeout(DEFAULT_IO_TIMEOUT)
             logging.debug("action: client_connected | peer:%s", peer)
 
             # -------- Handshake obligatorio --------
-            self._do_handshake(sock)
+            client_id = self._do_handshake(sock)
+            
+            # Initialize coordination middleware with unique ID per client thread
+            middleware_coordination = MessageMiddlewareExchange(
+                "rabbitmq",
+                COORDINATION_EXCHANGE,
+                f"server_{client_id}",
+                "topic",
+                routing_keys=[f"coordination.barrier.{STAGE_SERVER_RESULTS}.{DEFAULT_SHARD}"],
+            )
 
             # -------- Recepción de archivos --------
             files_received = 0
@@ -166,7 +199,7 @@ class Server:
 
                 if header == H_ID_DATA:
                     # Recibe y procesa chunk
-                    self._handle_file_chunks(sock, peer, middleware_queue_senders, number_of_chunks_per_file, client_id)
+                    self._handle_file_chunks(sock, peer, middleware_queue_senders, number_of_chunks_per_file, chunks_sent_per_shard, client_id, shard_counters)
                     if middleware_queue_receiver is None and client_id is not None:
                         middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", f"to_merge_data_{client_id}")
                     files_received += 1
@@ -178,25 +211,73 @@ class Server:
                     logging.debug("action: recv_finished | peer:%s | client_id:%s | files:%d", 
                                peer, client_id, files_received)
                     for table_type, count in number_of_chunks_per_file.items():
-                        message = MessageEnd(client_id, table_type=table_type, count=count).encode()
-                        logging.debug("action: sending_end_message | peer:%s | client_id:%s | table_type:%s | count:%d", 
-                                   peer, client_id, table_type.name, count)
+                        # Use chunks actually sent per client/table/shard (if available) instead of file count
+                        # Broadcast END a todos los shards de year para que propaguen su propio total
                         if table_type == TableType.TRANSACTIONS or table_type == TableType.TRANSACTION_ITEMS:
-                            middleware_queue_senders["to_filter_1"].send(message)
-                        elif table_type == TableType.STORES:
-                            middleware_queue_senders["to_join_stores_tpv"].send(message)
-                            middleware_queue_senders["to_join_stores_top3"].send(message)
-                            middleware_queue_senders["to_top3"].send(message)
-                        elif table_type == TableType.USERS:
-                            middleware_queue_senders["to_join_users"].send(message)
-                        elif table_type == TableType.MENU_ITEMS:
-                            middleware_queue_senders["to_join_menu_items"].send(message)
+                            # Sharded tables: Send END only to shards that received data
+                            for sid in range(1, self.filter_year_shards + 1):
+                                chunk_total = chunks_sent_per_shard.get((client_id, table_type, sid), 0)
+                                if chunk_total > 0:
+                                    message = MessageEnd(client_id, table_type=table_type, count=chunk_total).encode()
+                                    queue_name = f"to_filter_year_shard_{sid}"
+                                    logging.debug("action: sending_end_message | peer:%s | client_id:%s | table_type:%s | shard:%s | count:%d", 
+                                               peer, client_id, table_type.name, sid, chunk_total)
+                                    middleware_queue_senders[queue_name].send(message)
+                                else:
+                                    logging.debug("action: skip_end_empty_shard | peer:%s | client_id:%s | table_type:%s | shard:%s", 
+                                               peer, client_id, table_type.name, sid)
+                        
+                        else:
+                            # Non-sharded tables: Send END once
+                            chunk_total = count
+                            message = MessageEnd(client_id, table_type=table_type, count=chunk_total).encode()
+                            logging.debug("action: sending_end_message_broadcast | peer:%s | client_id:%s | table_type:%s | count:%d", 
+                                       peer, client_id, table_type.name, chunk_total)
+                            
+                            if table_type == TableType.STORES:
+                                middleware_queue_senders["to_join_stores_tpv"].send(message)
+                                middleware_queue_senders["to_join_stores_top3"].send(message)
+                                middleware_queue_senders["to_top3"].send(message)
+                            elif table_type == TableType.USERS:
+                                middleware_queue_senders["to_join_users"].send(message)
+                            elif table_type == TableType.MENU_ITEMS:
+                                middleware_queue_senders["to_join_menu_items"].send(message)
                         
                     sendall(sock, self.header_id_to_bytes(H_ID_OK))
+                    # Publish coordination END + STATS for server ingestion stage
+                    try:
+                        total_chunks = sum(number_of_chunks_per_file.values())
+                        payload_end = {
+                            "type": MSG_WORKER_END,
+                            "id": "server",
+                            "client_id": client_id,
+                            "stage": STAGE_SERVER_RESULTS,
+                            "shard": DEFAULT_SHARD,
+                            "expected": 1,
+                            "chunks": total_chunks,
+                            "sender": "server",
+                        }
+                        payload_stats = {
+                            "type": MSG_WORKER_STATS,
+                            "id": "server",
+                            "client_id": client_id,
+                            "stage": STAGE_SERVER_RESULTS,
+                            "shard": DEFAULT_SHARD,
+                            "expected": total_chunks,
+                            "chunks": total_chunks,
+                            "processed": total_chunks,
+                            "sender": "server",
+                        }
+                        rk = f"coordination.server.{STAGE_SERVER_RESULTS}.{DEFAULT_SHARD}"
+                        middleware_coordination.send(json.dumps(payload_end).encode("utf-8"), routing_key=rk)
+                        middleware_coordination.send(json.dumps(payload_stats).encode("utf-8"), routing_key=rk)
+                        logging.debug("action: coordination_end_stats_sent | stage:server | cli_id:%s | chunks:%s", client_id, total_chunks)
+                    except Exception as e:
+                        logging.error("action: coordination_end_send_error | stage:server | cli_id:%s | error:%s", client_id, e)
                     
                     if client_id is not None:
                         logging.debug("action: waiting_for_results | peer:%s | client_id:%s", peer, client_id)
-                        self._listen_and_send_results(sock, client_id, peer, middleware_queue_receiver)
+                        self._listen_and_send_results(sock, client_id, peer, middleware_queue_receiver, middleware_coordination)
                     break
                 
                 else:
@@ -223,6 +304,12 @@ class Server:
                 except Exception as e:
                     logging.warning("action: queue_delete_error | peer:%s | queue:%s | error:%r", peer, "to_merge_data", e)
 
+            if middleware_coordination is not None:
+                try:
+                    middleware_coordination.close()
+                except Exception as e:
+                    logging.warning("action: coordination_close_error | peer:%s | error:%r", peer, e)
+
             current_thread = threading.current_thread()
             with self.clients_lock:
                 if client_id is not None and client_id in self.client_threads:
@@ -246,77 +333,98 @@ class Server:
     # Handshake / Lectura / Escritura
     # ---------------------------------------------------------------------
 
-    def _do_handshake(self, sock: socket.socket) -> None:
+    def _do_handshake(self, sock: socket.socket) -> int:
         """
-        Espera un solo byte 'H'. Responde 'O'.
+        Espera 'H' + 1 byte ID. Responde 'O'.
+        Retorna el client_id recibido.
         """
         sock.settimeout(3.0)
         logging.debug("action: handshake_wait | timeout:3s")
         header = self._recv_header_id(sock)
         logging.debug("action: handshake_recv | byte:%r", header)
-        sock.settimeout(DEFAULT_IO_TIMEOUT)
-
+        
         if not header:
             raise RuntimeError("handshake_empty")
 
         if header != H_ID_HANDSHAKE:
             raise RuntimeError(f"handshake_invalid: {header!r}")
 
-        logging.debug("action: handshake_ok | byte:%r", header)
-        sendall(sock, self.header_id_to_bytes(H_ID_OK))
+        # Receive Client ID
+        id_byte = recv_exact(sock, 1)
+        client_id = int.from_bytes(id_byte, byteorder='big')
 
-    def _handle_file_chunks(self, sock: socket.socket, peer: str, middleware_queue_senders: dict, number_of_chunks_per_file: dict, client_id: int) :
+        logging.debug("action: handshake_ok | byte:%r | client_id:%s", header, client_id)
+        sendall(sock, self.header_id_to_bytes(H_ID_OK))
+        
+        sock.settimeout(DEFAULT_IO_TIMEOUT)
+        return client_id
+
+    def _handle_file_chunks(self, sock: socket.socket, peer: str, middleware_queue_senders: dict, number_of_chunks_per_file: dict, chunks_sent_per_shard: dict, client_id: int, shard_counters: dict) :
         """
         Recibe y procesa un FileChunk del cliente.
         Retorna el client_id.
         """
-        # Recibir el FileChunk
-        chunk = FileChunk.recv(sock)
-        
-        logging.debug("action: recv_file_chunk | cli_id:%s | file:%s | bytes:%s ", client_id, chunk.path(), chunk.payload_size())
-        
-        # Deserializar el batch para convertirlo en ProcessChunk
-        process_chunk = ProcessBatchReader.from_file_rows(chunk.payload(), chunk.path(), client_id)
-        
-        # Enrutar según el tipo de tabla
-        table_type = process_chunk.table_type()
-        
-        if table_type == TableType.TRANSACTIONS or table_type == TableType.TRANSACTION_ITEMS:
-            logging.debug("action: send_to_filter1 | peer:%s | cli_id:%s | file:%s | table:%s",
-                         peer, client_id, chunk.path(), table_type)
-            middleware_queue_senders["to_filter_1"].send(process_chunk.serialize())
-
-        elif table_type == TableType.STORES:
-            logging.debug("action: send_to_join_stores_tpv | peer:%s | cli_id:%s | file:%s | table:%s",
-                         peer, client_id, chunk.path(), table_type)
-            middleware_queue_senders["to_join_stores_tpv"].send(process_chunk.serialize())
+        try:
+            # Recibir el FileChunk
+            chunk = FileChunk.recv(sock)
             
-            logging.debug("action: send_to_join_stores_top3 | peer:%s | cli_id:%s | file:%s | table:%s",
-                         peer, client_id, chunk.path(), table_type)
-            middleware_queue_senders["to_join_stores_top3"].send(process_chunk.serialize())
+            logging.debug("action: recv_file_chunk | cli_id:%s | file:%s | bytes:%s ", client_id, chunk.path(), chunk.payload_size())
             
-            logging.debug("action: send_to_top3 | peer:%s | cli_id:%s | file:%s | table:%s",
-                         peer, client_id, chunk.path(), table_type)
-            middleware_queue_senders["to_top3"].send(process_chunk.serialize())
+            # Deserializar el batch para convertirlo en ProcessChunk
+            process_chunk = ProcessBatchReader.from_file_rows(chunk.payload(), chunk.path(), client_id)
+            
+            # Enrutar según el tipo de tabla
+            table_type = process_chunk.table_type()
+            
+            # Determinar shard de filtro year de forma determinística por orden de chunk
+            def select_filter_shard(stage_shards: int):
+                key = (client_id, table_type)
+                idx = shard_counters[key]
+                shard_counters[key] += 1
+                return (idx % stage_shards) + 1
+            
+            if table_type == TableType.TRANSACTIONS or table_type == TableType.TRANSACTION_ITEMS:
+                shard_id = select_filter_shard(self.filter_year_shards)
+                queue_name = f"to_filter_year_shard_{shard_id}"
+                logging.debug("action: send_to_filter_year_shard | peer:%s | cli_id:%s | file:%s | table:%s | shard:%s | msg_id:%s",
+                             peer, client_id, chunk.path(), table_type, shard_id, process_chunk.message_id())
+                middleware_queue_senders[queue_name].send(process_chunk.serialize())
+                chunks_sent_per_shard[(client_id, table_type, shard_id)] = chunks_sent_per_shard.get((client_id, table_type, shard_id), 0) + 1
 
-        elif table_type == TableType.USERS:
-            logging.debug("action: send_to_join_users | peer:%s | cli_id:%s | file:%s | table:%s",
-                         peer, client_id, chunk.path(), table_type)
-            middleware_queue_senders["to_join_users"].send(process_chunk.serialize())
+            elif table_type == TableType.STORES:
+                logging.debug("action: send_to_join_stores_tpv | peer:%s | cli_id:%s | file:%s | table:%s",
+                             peer, client_id, chunk.path(), table_type)
+                middleware_queue_senders["to_join_stores_tpv"].send(process_chunk.serialize())
+                
+                logging.debug("action: send_to_join_stores_top3 | peer:%s | cli_id:%s | file:%s | table:%s",
+                             peer, client_id, chunk.path(), table_type)
+                middleware_queue_senders["to_join_stores_top3"].send(process_chunk.serialize())
+                
+                logging.debug("action: send_to_top3 | peer:%s | cli_id:%s | file:%s | table:%s",
+                             peer, client_id, chunk.path(), table_type)
+                middleware_queue_senders["to_top3"].send(process_chunk.serialize())
 
-        elif table_type == TableType.MENU_ITEMS:
-            logging.debug("action: send_to_join_menu_items | peer:%s | cli_id:%s | file:%s | table:%s",
-                         peer, client_id, chunk.path(), table_type)
-            middleware_queue_senders["to_join_menu_items"].send(process_chunk.serialize())
-        
-        else:
-            logging.warning("action: unknown_table_type | peer:%s | cli_id:%s | file:%s | table:%s",
-                           peer, client_id, chunk.path(), table_type)
-        
-        if table_type in (TableType.TRANSACTIONS, TableType.TRANSACTION_ITEMS, TableType.STORES, TableType.USERS, TableType.MENU_ITEMS):
-            if table_type not in number_of_chunks_per_file:
-                number_of_chunks_per_file[table_type] = 0
-            number_of_chunks_per_file[table_type] += 1
+            elif table_type == TableType.USERS:
+                logging.debug("action: send_to_join_users | peer:%s | cli_id:%s | file:%s | table:%s",
+                             peer, client_id, chunk.path(), table_type)
+                middleware_queue_senders["to_join_users"].send(process_chunk.serialize())
+
+            elif table_type == TableType.MENU_ITEMS:
+                logging.debug("action: send_to_join_menu_items | peer:%s | cli_id:%s | file:%s | table:%s",
+                             peer, client_id, chunk.path(), table_type)
+                middleware_queue_senders["to_join_menu_items"].send(process_chunk.serialize())
+            
+            else:
+                logging.warning("action: unknown_table_type | peer:%s | cli_id:%s | file:%s | table:%s",
+                               peer, client_id, chunk.path(), table_type)
+            
+            if table_type in (TableType.TRANSACTIONS, TableType.TRANSACTION_ITEMS, TableType.STORES, TableType.USERS, TableType.MENU_ITEMS):
+                if table_type not in number_of_chunks_per_file:
+                    number_of_chunks_per_file[table_type] = 0
+                number_of_chunks_per_file[table_type] += 1
+        except Exception as e:
+            logging.error(f"action: handle_file_chunk_error | peer:{peer} | cli_id:{client_id} | error:{e}")
+            raise
     
     # ---------------- Internos ----------------
     
@@ -342,11 +450,16 @@ class Server:
 
     # ---------------------------------------------------------------------
 
-    def _listen_and_send_results(self, sock: socket.socket, client_id: int, peer: str, middleware_queue) -> None:
+    def _listen_and_send_results(self, sock: socket.socket, client_id: int, peer: str, middleware_queue, middleware_coordination) -> None:
         """
         Escucha resultados de la cola to_merge_data para este cliente específico.
         Envía resultados en lotes y detecta fin automáticamente.
         """
+        # Additionally, listen for monitor BARRIER_FORWARD for server_results
+        coord_results = []
+        def coord_callback(msg): coord_results.append(msg)
+        def coord_stop():
+            middleware_coordination.stop_consuming()
         
         maximum_chunks = self._max_number_of_chunks_in_batch()
         all_data_received = False
@@ -379,6 +492,7 @@ class Server:
             ResultTableType.QUERY_3: None,
             ResultTableType.QUERY_4: None,
         }
+        processed_results = set()
 
         def callback(msg):
             results_for_client.append(msg)
@@ -387,6 +501,11 @@ class Server:
             middleware_queue.stop_consuming()
 
         while not all_data_received:
+            try:
+                middleware_coordination.connection.call_later(TIMEOUT, coord_stop)
+                middleware_coordination.start_consuming(coord_callback)
+            except Exception as e:
+                logging.error(f"action: server_coordination_consume_error | error:{e}")
             middleware_queue.connection.call_later(TIMEOUT, stop)
             middleware_queue.start_consuming(callback)
 
@@ -396,9 +515,11 @@ class Server:
                         query_end_message = MessageQueryEnd.decode(msg)
                         query = query_end_message.query()
                         total_chunks = query_end_message.total_chunks()
-                        expected_total_chunks[query] = total_chunks
+                        if expected_total_chunks[query] is None:
+                            expected_total_chunks[query] = 0
+                        expected_total_chunks[query] += total_chunks
 
-                        if number_of_chunks_received[query] == total_chunks:
+                        if number_of_chunks_received[query] >= expected_total_chunks[query]:
                             all_data_received_per_query[query] = True
                             logging.debug(
                                 "action: all_data_received_for_query | client_id:%s | query:%s",
@@ -409,18 +530,47 @@ class Server:
                                 self._send_batch_results_to_client(sock, client_id, chunks_received[query])
                                 chunks_received[query] = []
                     else:
+                        # ResultChunk
+                        # Use ResultBatchReader to deserialize the full chunk
                         result_chunk = ResultBatchReader.from_bytes(msg)
                         query = result_chunk.query_type()
-                        number_of_chunks_received[query] += 1
-                        chunks_received[query].append(result_chunk)
-                        logging.debug(f"action: result_receiver | client_id:{client_id} | rows:{len(result_chunk.rows)} | query:{query.name}")
+                        
+                        # Filter duplicates before adding
+                        new_rows = []
+                        for row in result_chunk.rows:
+                            # Assuming row has transaction_id or similar unique key.
+                            # For Q1: transaction_id. For others: might be store_id/user_id etc.
+                            # Use tuple of all fields as key if no explicit ID.
+                            if query == ResultTableType.QUERY_1:
+                                key = (query, row.transaction_id)
+                            else:
+                                # Fallback for other queries (using string rep or tuple)
+                                key = (query, str(row))
+                            
+                            if key not in processed_results:
+                                processed_results.add(key)
+                                new_rows.append(row)
+                            else:
+                                logging.debug(f"action: duplicate_result_ignored | query:{query} | key:{key}")
+
+                        if new_rows:
+                            # Create new header
+                            new_header = ResultChunkHeader(client_id, query)
+                            filtered_chunk = ResultChunk(new_header, new_rows)
+                            chunks_received[query].append(filtered_chunk)
+                            number_of_chunks_received[query] += 1
+                            logging.debug(f"action: result_receiver | client_id:{client_id} | rows:{len(new_rows)} | query:{query.name}")
+                        else:
+                            logging.debug(f"action: empty_chunk_after_dedup | client_id:{client_id} | query:{query.name}")
+                            # Still count the chunk as received because it was a valid protocol message.
+                            number_of_chunks_received[query] += 1
 
                         if len(chunks_received[query]) >= maximum_chunks:
                             self._send_batch_results_to_client(sock, client_id, chunks_received[query])
                             chunks_received[query] = []
-                            logging.debug(f"action: result_sent | client_id:{client_id} | rows:{len(result_chunk.rows)} | query:{query.name}")
+                            logging.debug(f"action: result_sent | client_id:{client_id} | query:{query.name}")
 
-                        if expected_total_chunks[query] is not None and number_of_chunks_received[query] == expected_total_chunks[query]:
+                        if expected_total_chunks[query] is not None and number_of_chunks_received[query] >= expected_total_chunks[query]:
                             all_data_received_per_query[query] = True
                             logging.debug(f"action: all_data_received_for_query | client_id:{client_id} | query:{query.name}")
                             if chunks_received[query]:
@@ -432,6 +582,19 @@ class Server:
                 finally:
                     if msg in results_for_client:
                         results_for_client.remove(msg)
+
+            # Process barrier_forward signals
+            for raw_coord in list(coord_results):
+                try:
+                    data = json.loads(raw_coord)
+                    if data.get("type") == "BARRIER_FORWARD" and data.get("stage") == STAGE_SERVER_RESULTS and data.get("shard", DEFAULT_SHARD) == DEFAULT_SHARD:
+                        logging.info(f"action: barrier_forward_received_server | client_id:{client_id}")
+                        all_data_received = True
+                except Exception as e:
+                    logging.error(f"action: error_processing_server_barrier | error:{e}")
+                finally:
+                    if raw_coord in coord_results:
+                        coord_results.remove(raw_coord)
 
             all_data_received = all(all_data_received_per_query.values())
 
@@ -470,7 +633,7 @@ class Server:
                 fd = self._server_socket.fileno()
                 self._server_socket.close()
                 logging.debug("action: fd_close | result: success | kind: listen_socket | fd:%s", fd)
-                
+            
             # Esperar a que terminen los threads de cliente
             with self.clients_lock:
                 active_threads = list(self.client_threads.values())

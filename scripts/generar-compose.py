@@ -110,10 +110,13 @@ def define_rabbitmq(compose: dict):
             "timeout": "5s",
             "retries": 10,
         },
+        "volumes": [
+            "./rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro"
+        ],
         "networks": ["testing_net"]
     }
 
-def define_server(compose: dict, client_amount: int):
+def define_server(compose: dict, client_amount: int, nodes: dict):
     compose["services"]["server"] = {
         "container_name": "server",
         "build": {
@@ -125,12 +128,22 @@ def define_server(compose: dict, client_amount: int):
             "PYTHONUNBUFFERED=1",
             f"CLI_CLIENTS={client_amount}",
             "CONTAINER_NAME=server",
+            # Shard counts for filters (used to route incoming chunks)
+            f"FILTER_YEAR_SHARDS={nodes.get('FILTER_YEAR', 1)}",
+            f"FILTER_HOUR_SHARDS={nodes.get('FILTER_HOUR', 1)}",
+            f"FILTER_AMOUNT_SHARDS={nodes.get('FILTER_AMOUNT', 1)}",
         ],
         "volumes": [
             "./server/config.ini:/config.ini:ro",
         ],
         "networks": ["testing_net"],
-        "depends_on": {"rabbitmq": {"condition": "service_healthy"}}
+        "depends_on": {"rabbitmq": {"condition": "service_healthy"}},
+        "healthcheck": {
+            "test": FlowList(["CMD-SHELL", "python3 -c \"import socket; s=socket.socket(); s.connect(('localhost', 12345)); s.close()\""]),
+            "interval": "3s",
+            "timeout": "5s",
+            "retries": 5,
+        }
     }
 
 def define_network(compose: dict):
@@ -149,11 +162,13 @@ def get_filter_config_path(nodo: str):
 def is_filter(nodo: str):
     return nodo.startswith("FILTER_")
 
-def define_filter(meta: dict, compose: dict, nodo: str, worker_id: int):
+def define_filter(meta: dict, compose: dict, nodo: str, worker_id: int, nodes: dict):
     base_service_name = f"{nodo.lower()}_service"
     service_name = f"{base_service_name}-{worker_id}" if worker_id > 1 else base_service_name
     config_path = get_filter_config_path(nodo)
     filter_type = nodo.split("_")[1].lower()
+    # Sharding for filters: one replica per shard_id
+    shard_count = int(nodes.get(nodo, 1))
     
     compose["services"][service_name] = {
         "build": {
@@ -167,6 +182,12 @@ def define_filter(meta: dict, compose: dict, nodo: str, worker_id: int):
             f"LOGGING_LEVEL={meta['logging_level']}",
             f"WORKER_ID={worker_id}",
             f"CONTAINER_NAME={service_name}",
+            f"FILTER_SHARD_ID={worker_id}",
+            f"FILTER_SHARDS={shard_count}",
+            # Shard counts for downstream routing
+            f"PRODUCTS_SHARDS={nodes.get('AGGREGATOR_PRODUCTS', 1)}",
+            f"PURCHASES_SHARDS={nodes.get('AGGREGATOR_PURCHASES', 1)}",
+            f"TPV_SHARDS={nodes.get('AGGREGATOR_TPV', 1)}",
         ],
         "volumes": [
             f".{config_path}:{config_path}:ro",
@@ -174,8 +195,13 @@ def define_filter(meta: dict, compose: dict, nodo: str, worker_id: int):
         ],
         "networks": ["testing_net"],
         "depends_on": {
-            "server": {"condition": "service_started"},
-            "rabbitmq": {"condition": "service_healthy"},
+            "server": {"condition": "service_healthy"},
+        },
+        "healthcheck": {
+            "test": FlowList(["CMD-SHELL", "kill -0 1"]),
+            "interval": "5s",
+            "timeout": "5s",
+            "retries": 3,
         }
     }
     return service_name
@@ -183,7 +209,7 @@ def define_filter(meta: dict, compose: dict, nodo: str, worker_id: int):
 def is_aggregator(nodo: str):
     return nodo.startswith("AGGREGATOR_")
 
-def define_aggregator(meta: dict, compose: dict, nodo: str, worker_id: int):
+def define_aggregator(meta: dict, compose: dict, nodo: str, worker_id: int, nodes: dict):
     base_service_name = f"{nodo.lower()}_service"
     service_name = f"{base_service_name}-{worker_id}" if worker_id > 1 else base_service_name
     agg_type = nodo.split("_")[1].upper()
@@ -200,14 +226,21 @@ def define_aggregator(meta: dict, compose: dict, nodo: str, worker_id: int):
             f"AGGREGATOR_TYPE={agg_type}",
             f"WORKER_ID={worker_id}",
             f"CONTAINER_NAME={service_name}",
+            f"AGGREGATOR_SHARD_ID={worker_id}",
+            f"AGGREGATOR_SHARDS={nodes.get(nodo, 1)}",
         ],
         "volumes": [
             "./data/persistence:/data/persistence",
         ],
         "networks": ["testing_net"],
         "depends_on": {
-            "server": {"condition": "service_started"},
-            "rabbitmq": {"condition": "service_healthy"},
+            "server": {"condition": "service_healthy"},
+        },
+        "healthcheck": {
+            "test": FlowList(["CMD-SHELL", "kill -0 1"]),
+            "interval": "5s",
+            "timeout": "5s",
+            "retries": 3,
         }
     }
 
@@ -227,7 +260,7 @@ def define_aggregator(meta: dict, compose: dict, nodo: str, worker_id: int):
 def is_maximizer(nodo: str):
     return nodo.startswith("MAXIMIZER_")
 
-def define_maximizer(meta: dict, compose: dict, nodo: str, worker_id: int, max_shards, top3_shards):
+def define_maximizer(meta: dict, compose: dict, nodo: str, worker_id: int, max_shards, top3_shards, nodes: dict):
     parts = nodo.split("_")
     if len(parts) < 3:
         raise ValueError(f"Nombre de maximizer inválido: {nodo}")
@@ -244,6 +277,27 @@ def define_maximizer(meta: dict, compose: dict, nodo: str, worker_id: int, max_s
         f"WORKER_ID={worker_id}",
         f"CONTAINER_NAME={service_name}",
     ]
+
+    # Calculate expected inputs
+    expected_inputs = 1
+    if role == "PARTIAL":
+        if max_type == "MAX":
+            expected_inputs = nodes.get("AGGREGATOR_PRODUCTS", 1)
+        elif max_type == "TOP3":
+            expected_inputs = nodes.get("AGGREGATOR_PURCHASES", 1)
+    elif role == "ABSOLUTE":
+        if max_type == "MAX":
+             expected_inputs = nodes.get("AGGREGATOR_PRODUCTS", 1)
+        elif max_type == "TOP3":
+             expected_inputs = nodes.get("AGGREGATOR_PURCHASES", 1)
+    
+    env.append(f"EXPECTED_INPUTS={expected_inputs}")
+    # Aggregator shards count for absolutes to gate shards received
+    if role == "ABSOLUTE":
+        if max_type == "MAX":
+            env.append(f"AGGREGATOR_SHARDS={nodes.get('AGGREGATOR_PRODUCTS', 1)}")
+        elif max_type == "TOP3":
+            env.append(f"AGGREGATOR_SHARDS={nodes.get('AGGREGATOR_PURCHASES', 1)}")
 
     if role == "PARTIAL":
         if max_type == "MAX":
@@ -299,8 +353,13 @@ def define_maximizer(meta: dict, compose: dict, nodo: str, worker_id: int, max_s
         ],
         "networks": ["testing_net"],
         "depends_on": {
-            "server": {"condition": "service_started"},
-            "rabbitmq": {"condition": "service_healthy"},
+            "server": {"condition": "service_healthy"},
+        },
+        "healthcheck": {
+            "test": FlowList(["CMD-SHELL", "kill -0 1"]),
+            "interval": "5s",
+            "timeout": "5s",
+            "retries": 3,
         }
     }
     return service_name
@@ -319,7 +378,7 @@ def get_joiner_type(nodo: str):
     # JOINER_USERS -> USERS
     return nodo.split("_", 1)[1].upper()
 
-def define_joiner(meta: dict, compose: dict, nodo: str, worker_id: int):
+def define_joiner(meta: dict, compose: dict, nodo: str, worker_id: int, nodes: dict):
     base_service_name = f"{nodo.lower()}_service"
     service_name = f"{base_service_name}-{worker_id}" if worker_id > 1 else base_service_name
     compose["services"][service_name] = {
@@ -335,24 +394,54 @@ def define_joiner(meta: dict, compose: dict, nodo: str, worker_id: int):
             f"JOINER_TYPE={get_joiner_type(nodo)}",
             f"WORKER_ID={worker_id}",
             f"CONTAINER_NAME={service_name}",
+            f"AGGREGATOR_TPV={nodes.get('AGGREGATOR_TPV', 1)}",
+            # Para joiner TPV, alinear expected_inputs con shards de agg_tpv
+            f"EXPECTED_INPUTS={nodes.get('AGGREGATOR_TPV', 1) if nodo == 'JOINER_STORES_TPV' else 1}",
         ],
         "volumes": [
             "./data/persistence:/data/persistence",
         ],
         "networks": ["testing_net"],
         "depends_on": {
-            "server": {"condition": "service_started"},
-            "rabbitmq": {"condition": "service_healthy"},
+            "server": {"condition": "service_healthy"},
+        },
+        "healthcheck": {
+            "test": FlowList(["CMD-SHELL", "kill -0 1"]),
+            "interval": "5s",
+            "timeout": "5s",
+            "retries": 3,
         }
     }
+
+    # Calculate expected inputs
+    expected_inputs = 1
+    joiner_type = get_joiner_type(nodo)
+    if joiner_type == "STORES_TPV":
+        expected_inputs = nodes.get("AGGREGATOR_TPV", 1)
+    elif joiner_type == "STORES_TOP3":
+        # Receives from Absolute Top3 Maximizer (which is 1)
+        expected_inputs = nodes.get("MAXIMIZER_TOP3_ABSOLUTE", 1)
+    elif joiner_type == "ITEMS":
+        # Receives from Absolute Max Maximizer (which is 1)
+        expected_inputs = nodes.get("MAXIMIZER_MAX_ABSOLUTE", 1)
+    elif joiner_type == "USERS":
+        pass
+        
+    compose["services"][service_name]["environment"].append(f"EXPECTED_INPUTS={expected_inputs}")
+
     return service_name
 
 def is_client(nodo: str):
     return nodo == "CLIENT"
 
-def define_client(meta: dict, compose: dict, nodo: str, index: int):
+def define_client(meta: dict, compose: dict, nodo: str, index: int, monitor_services: list):
     service_name = f"{nodo.lower()}-{index}"
     output_path = meta.get("output_path", "../.results")
+    
+    depends_on = {}
+    for mon in monitor_services:
+        depends_on[mon] = {"condition": "service_healthy"}
+
     compose["services"][service_name] = {
         "build": {
             "context": ".",             # project root
@@ -373,12 +462,14 @@ def define_client(meta: dict, compose: dict, nodo: str, index: int):
             "./client/config.ini:/config.ini:ro",
         ],
         "networks": ["testing_net"],
-        "depends_on": {
-            "server": {"condition": "service_started"},
-        }
+        "depends_on": depends_on
     }
 
-def define_monitor(meta: dict, compose: dict, count: int):
+def define_monitor(meta: dict, compose: dict, count: int, worker_services: list):
+    depends_on = {}
+    for worker in worker_services:
+        depends_on[worker] = {"condition": "service_healthy"}
+        
     for i in range(1, count + 1):
         service_name = f"monitor_{i}"
         compose["services"][service_name] = {
@@ -391,13 +482,19 @@ def define_monitor(meta: dict, compose: dict, count: int):
                 "PYTHONUNBUFFERED=1",
                 f"CONTAINER_NAME={service_name}",
                 f"LOGGING_LEVEL={meta['logging_level']}",
+                "MONITOR_CONFIG_PATH=/monitor/config/config.ini",
             ],
             "volumes": [
                 "/var/run/docker.sock:/var/run/docker.sock",
+                f"./{meta['config_path']}:/monitor/config/config.ini:ro",
             ],
             "networks": ["testing_net"],
-            "depends_on": {
-                "rabbitmq": {"condition": "service_healthy"},
+            "depends_on": depends_on,
+            "healthcheck": {
+                "test": FlowList(["CMD-SHELL", "kill -0 1"]),
+                "interval": "5s",
+                "timeout": "5s",
+                "retries": 3,
             }
         }
 
@@ -435,29 +532,21 @@ def generate_compose(meta: dict, nodes: dict, services: dict = None):
     agg_products = nodes.get("AGGREGATOR_PRODUCTS", 0)
     agg_purchases = nodes.get("AGGREGATOR_PURCHASES", 0)
 
-    if agg_products > 0 and max_partials == 0:
-        raise ValueError("AGGREGATOR_PRODUCTS requiere MAXIMIZER_MAX_PARTIAL > 0.")
-    if max_partials > 0 and agg_products == 0:
-        raise ValueError("MAXIMIZER_MAX_PARTIAL definido pero AGGREGATOR_PRODUCTS es 0.")
-
-    if agg_purchases > 0 and top3_partials == 0:
-        raise ValueError("AGGREGATOR_PURCHASES requiere MAXIMIZER_TOP3_PARTIAL > 0.")
-    if top3_partials > 0 and agg_purchases == 0:
-        raise ValueError("MAXIMIZER_TOP3_PARTIAL definido pero AGGREGATOR_PURCHASES es 0.")
-
     max_shards_spec = meta.get("max_shards")
     top3_shards_spec = meta.get("top3_shards")
 
-    if not max_shards_spec and max_partials:
+    # Si no hay spec de shards para productos, la generamos con la cantidad de shards de aggregator_products
+    if not max_shards_spec and agg_products:
         try:
-            max_shards_spec = build_shard_spec(PRODUCT_ITEM_IDS, max_partials, "items")
+            max_shards_spec = build_shard_spec(PRODUCT_ITEM_IDS, agg_products, "items")
         except ValueError as exc:
             raise ValueError(f"No se puede generar MAX_SHARDS automáticamente: {exc}") from exc
         meta["max_shards"] = max_shards_spec
 
-    if not top3_shards_spec and top3_partials:
+    # Si no hay spec de shards para purchases, la generamos con la cantidad de shards de aggregator_purchases
+    if not top3_shards_spec and agg_purchases:
         try:
-            top3_shards_spec = build_shard_spec(PURCHASE_STORE_IDS, top3_partials, "stores")
+            top3_shards_spec = build_shard_spec(PURCHASE_STORE_IDS, agg_purchases, "stores")
         except ValueError as exc:
             raise ValueError(f"No se puede generar TOP3_SHARDS automáticamente: {exc}") from exc
         meta["top3_shards"] = top3_shards_spec
@@ -472,20 +561,15 @@ def generate_compose(meta: dict, nodes: dict, services: dict = None):
     except ShardingConfigError as exc:
         raise ValueError(f"TOP3_SHARDS inválido: {exc}") from exc
 
-    if nodes.get("MAXIMIZER_MAX_PARTIAL", 0) not in (0, len(max_shards)):
-        raise ValueError(
-            f"MAXIMIZER_MAX_PARTIAL debe coincidir con la cantidad de shards definidos ({len(max_shards)})."
-        )
-    if nodes.get("MAXIMIZER_TOP3_PARTIAL", 0) not in (0, len(top3_shards)):
-        raise ValueError(
-            f"MAXIMIZER_TOP3_PARTIAL debe coincidir con la cantidad de shards definidos ({len(top3_shards)})."
-        )
-
     define_rabbitmq(compose)
     client_amount = 0
     
     # Contadores independientes para cada tipo de worker
     worker_counters = {}
+    worker_services = []
+    
+    monitor_count = nodes.get("MONITORS", 3) # Default to 3 monitors
+    monitor_services = [f"monitor_{i}" for i in range(1, monitor_count + 1)]
     
     for nodo, cantidad in nodes.items():
         if cantidad == 0:
@@ -493,7 +577,7 @@ def generate_compose(meta: dict, nodes: dict, services: dict = None):
         
         if is_client(nodo):
             for i in range(1, cantidad + 1):
-                define_client(meta, compose, nodo, i)
+                define_client(meta, compose, nodo, i, monitor_services)
             client_amount = cantidad
         else: 
             # Inicializar contador para este tipo de worker si no existe
@@ -505,15 +589,17 @@ def generate_compose(meta: dict, nodes: dict, services: dict = None):
                 worker_id = worker_counters[nodo]
                 
                 if is_filter(nodo):
-                    service_name = define_filter(meta, compose, nodo, worker_id)
+                    service_name = define_filter(meta, compose, nodo, worker_id, nodes)
                 elif is_aggregator(nodo):
-                    service_name = define_aggregator(meta, compose, nodo, worker_id)
+                    service_name = define_aggregator(meta, compose, nodo, worker_id, nodes)
                 elif is_maximizer(nodo):
-                    service_name = define_maximizer(meta, compose, nodo, worker_id, max_shards, top3_shards)
+                    service_name = define_maximizer(meta, compose, nodo, worker_id, max_shards, top3_shards, nodes)
                 elif is_joiner(nodo):
-                    service_name = define_joiner(meta, compose, nodo, worker_id)
+                    service_name = define_joiner(meta, compose, nodo, worker_id, nodes)
                 else:
                     raise ValueError(f"Tipo de nodo inválido: {nodo}")
+                
+                worker_services.append(service_name)
                 
                 # Para scaling, necesitamos el nombre base del servicio
                 base_service_name = f"{nodo.lower()}_service"
@@ -522,10 +608,9 @@ def generate_compose(meta: dict, nodes: dict, services: dict = None):
                 services[base_service_name] += 1
     if client_amount == 0:
         raise ValueError("Debe haber al menos un cliente.")
-    define_server(compose, client_amount) 
+    define_server(compose, client_amount, nodes) 
     
-    monitor_count = nodes.get("MONITORS", 3) # Default to 3 monitors
-    define_monitor(meta, compose, monitor_count)
+    define_monitor(meta, compose, monitor_count, worker_services)
     services["monitor"] = monitor_count
 
     if meta.get("chaos_enabled", "false").lower() == "true":
@@ -550,11 +635,14 @@ def main():
     args = parser.parse_args()
 
     meta, nodes = read_config(args.config)
+    meta, nodes = apply_shard_overrides(meta, nodes)
+    meta['config_path'] = args.config
     
     output_file = meta.get("output_file", "docker-compose.yaml")
 
     services = {}
 
+    print(f"DEBUG: meta={meta}")
     compose, client_count = generate_compose(meta, nodes, services)
 
 
