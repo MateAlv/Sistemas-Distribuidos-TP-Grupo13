@@ -169,12 +169,16 @@ class Maximizer:
     
     def run(self):
         logging.info(f"Maximizer iniciado. Tipo: {self.maximizer_type}, Rango: {self.maximizer_range}, Receiver: {getattr(self.data_receiver, 'queue_name', 'unknown')}")
-        
-        messages = deque()
-        
         def callback(msg):
-            messages.append(msg)
+            """
+            Procesa el mensaje de forma síncrona antes de ACK. Si algo falla, la excepción
+            hará que el middleware NACKee y reencole.
+            """
             logging.info(f"action: data_received | type:{self.maximizer_type} | range:{self.maximizer_range} | size:{len(msg)}")
+            if msg.startswith(b"END;"):
+                self._handle_end_message(msg)
+            else:
+                self._handle_data_chunk(msg)
             
         def stop():
             try:
@@ -199,17 +203,6 @@ class Maximizer:
                 self.data_receiver.start_consuming(callback)
             except Exception as e:
                 logging.error(f"action: error_during_consumption | type:{self.maximizer_type} | range:{self.maximizer_range} | error:{e}")
-
-            while messages:
-
-                data = messages.popleft()
-                try:
-                    if data.startswith(b"END;"):
-                        self._handle_end_message(data)
-                    else:
-                        self._handle_data_chunk(data)
-                except Exception as e:
-                    logging.error(f"action: error_processing_message | type:{self.maximizer_type} | range:{self.maximizer_range} | error:{e}")
 
     def _handle_end_message(self, raw_message: bytes):
         logging.info(f"action: recv_end_raw | type:{self.maximizer_type} | range:{self.maximizer_range} | raw:{raw_message}")
@@ -299,12 +292,21 @@ class Maximizer:
 
         if self.working_state.is_processed(chunk.message_id()):
             logging.info(f"action: duplicate_chunk_ignored | message_id:{chunk.message_id()}")
+            # Clear any lingering processing commit to avoid recovery loops
+            try:
+                self.persistence.clear_processing_commit()
+            except Exception as e:
+                logging.error(f"action: clear_processing_commit_error | type:{self.maximizer_type} | range:{self.maximizer_range} | error:{e}")
             return
 
         self.persistence.commit_processing_chunk(chunk)
 
         if not self._is_valid_table_type(table_type, for_end=False):
             logging.debug(f"action: ignoring_chunk_wrong_table | expected:{expected_table} | received:{table_type} | client_id:{client_id}")
+            try:
+                self.persistence.clear_processing_commit()
+            except Exception as e:
+                logging.error(f"action: clear_processing_commit_error | type:{self.maximizer_type} | range:{self.maximizer_range} | error:{e}")
             return
 
         # Si llega un nuevo chunk para un cliente ya procesado, reabrir su ciclo
@@ -360,17 +362,22 @@ class Maximizer:
                 logging.info(f"action: absolute_top3_ready | client_id:{client_id} | all_shards_received")
                 self.process_client_end(client_id, table_type)
         elif self.maximizer_type == "TPV":
-            # Track TPV shards
-            for row in chunk.rows:
-                shard_slug = self._extract_shard_from_row(row)
-                if shard_slug:
-                    self.received_shards[client_id].add(shard_slug)
+        # Track TPV shards
+        for row in chunk.rows:
+            shard_slug = self._extract_shard_from_row(row)
+            if shard_slug:
+                self.received_shards[client_id].add(shard_slug)
             logging.info(
                 f"action: tpv_tracking | client_id:{client_id} | shards_seen:{len(self.received_shards[client_id])} | shards:{sorted(self.received_shards[client_id])}"
             )
 
         self.working_state.mark_processed(chunk.message_id())
         self._save_state(chunk.message_id())
+        # Clear processing commit after successful handling to avoid recovery loops
+        try:
+            self.persistence.clear_processing_commit()
+        except Exception as e:
+            logging.error(f"action: clear_processing_commit_error | type:{self.maximizer_type} | range:{self.maximizer_range} | error:{e}")
 
     def _send_end_message(self, client_id: int, table_type: TableType, target: str, count: int, sender_id: str):
         try:

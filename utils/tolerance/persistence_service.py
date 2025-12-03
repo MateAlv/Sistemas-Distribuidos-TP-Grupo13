@@ -334,3 +334,11 @@ class PersistenceService:
         except Exception:
             logging.exception("Failed to clear chunk buffer.")
             raise
+
+    def clear_processing_commit(self):
+        """Public helper to clear the processing commit file after successful handling."""
+        try:
+            self._clean_processing_commit()
+        except Exception:
+            logging.exception("Failed to clear processing commit file.")
+            raise
