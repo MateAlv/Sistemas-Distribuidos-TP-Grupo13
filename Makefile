@@ -57,8 +57,6 @@ build:
 up:
 	make clean-results
 	make down
-	-docker compose -f ${DOCKER} down -v --remove-orphans
-	-docker run --rm -v $(PWD)/data/persistence:/persistence alpine sh -c 'rm -rf /persistence/*'
 	python3  $(COMPOSE_SCRIPT) --config=${CONFIG}
 	docker compose -f ${DOCKER} up --build > logs.txt 2>&1
 .PHONY: docker-compose-up
@@ -68,7 +66,6 @@ test:
 	# Run the docker-compose setup
 	make clean-results
 	make down
-	-docker run --rm -v $(PWD)/data/persistence:/persistence alpine sh -c 'rm -rf /persistence/*'
 	python3  $(COMPOSE_SCRIPT) --config=config/config-test.ini
 	@echo "Running tests... Logs redirected to logs.txt"
 	@bash -c ' \
@@ -117,6 +114,7 @@ test-small:
 .PHONY: test-small
 
 down:
+	-docker run --rm -v $(PWD)/data/persistence:/persistence alpine sh -c 'rm -rf /persistence/*'
 	docker compose -f ${DOCKER} stop -t 1
 	docker compose -f ${DOCKER} down -v --remove-orphans
 .PHONY: docker-compose-down

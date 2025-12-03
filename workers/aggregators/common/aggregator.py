@@ -95,8 +95,18 @@ class Aggregator:
         self.shard_id = os.getenv("AGGREGATOR_SHARD_ID", None)
         self.shard_count = int(os.getenv("AGGREGATOR_SHARDS", "1"))
 
-        self.persistence = PersistenceService(f"/data/persistence/aggregator_{self.aggregator_type}_{self.aggregator_id}")
+        # Initialize persistence with chunk buffering
+        # Support PERSISTENCE_DIR for testing (defaults to /data/persistence for production)
+        persistence_dir = os.getenv("PERSISTENCE_DIR", "/data/persistence")
+        commit_interval = int(os.getenv("AGGREGATOR_COMMIT_INTERVAL", "50"))
+        self.persistence = PersistenceService(
+            f"{persistence_dir}/aggregator_{self.aggregator_type}_{self.aggregator_id}",
+            commit_interval=commit_interval
+        )
         self._recover_state()
+        
+        # Handle recovery of buffered chunks
+        self.handle_processing_recovery()
 
 
 
@@ -234,16 +244,46 @@ class Aggregator:
             f"Aggregator {self.aggregator_type} (ID: {self.aggregator_id}) cerrado correctamente."
         )
 
+    def handle_processing_recovery(self):
+        """
+        Recover processing state following the pattern:
+        1. Restore estado (working_state) from disk
+        2. Recover buffered chunks
+        3. Process buffered chunks and update estado
+        4. Commit working_state
+        """
+        logging.info(f"Starting processing recovery | type:{self.aggregator_type} | agg_id:{self.aggregator_id}")
+        
+        # 1. Estado already recovered in _recover_state() during __init__
+        # estado = estado.from_bytes(service.recover_working_state())
+        
+        # 2. [x] = service.recover_buffer_chunk() - busco último valor x commiteado en disco
+        buffered_chunks = self.persistence.recover_buffered_chunks()
+        
+        if buffered_chunks:
+            logging.info(f"Recovering {len(buffered_chunks)} buffered chunks...")
+            for chunk in buffered_chunks:
+                try:
+                    # 3. apply(x) - Procesar + actualizar estado(x)
+                    self._apply_and_update_state(chunk)
+                except Exception as e:
+                    logging.error(f"Error recovering buffered chunk: {e}")
+            
+            # 4. commit_working_state(self, estado.to_bytes, x.message_id())
+            if buffered_chunks:
+                last_chunk = buffered_chunks[-1]
+                self._save_state(last_chunk.message_id())
+                logging.info(f"Committed working state after recovery | chunks_recovered:{len(buffered_chunks)}")
+        else:
+            logging.info("No buffered chunks to recover")
+
     def run(self):
         logging.info(
             f"Agregador iniciado. Tipo: {self.aggregator_type}, ID: {self.aggregator_id}"
         )
 
         data_results = deque()
-        data_results = deque()
         # stats_results = deque() # Removed
-        data_chunks = deque()
-        coord_results = deque()
         data_chunks = deque()
         coord_results = deque()
 
@@ -254,7 +294,20 @@ class Aggregator:
         #     stats_results.append(msg)
 
         def chunk_callback(msg):
+            """
+            Callback pattern:
+            1. Pop de cola → x (done by RabbitMQ)
+            2. [CRASH POINT] SE ROMPE ANTES DEL COMMIT
+            3. append_chunk_to_buffer(x)
+            4. result.append(x)
+            5. [CRASH POINT] SE ROMPE ANTES DEL ACK
+            6. ACK a cola - RabbitMQ (handled automatically by pika)
+            7. [CRASH POINT] SE ROMPE DESPUÉS DEL COMMIT (before processing)
+            """
+            # 2. [CRASH POINT] SE ROMPE ANTES DEL COMMIT
+            
             if msg.startswith(b"END;"):
+                # END messages: persist immediately (no buffering)
                 end_message = MessageEnd.decode(msg)
                 client_id = end_message.client_id()
                 table_type = end_message.table_type()
@@ -262,11 +315,17 @@ class Aggregator:
                 self.working_state.mark_end_message_received(client_id, table_type)
                 self.working_state.set_chunks_to_receive(client_id, table_type, total_expected)
                 self._save_state(uuid.uuid4())
-                # REVISAR LÓGICA DE PERSISTENCIA Y RECOVERY DE END
             else:
+                # 3. append_chunk_to_buffer(x)
                 chunk = ProcessBatchReader.from_bytes(msg)
-                self.persistence.commit_processing_chunk(chunk)
+                self.persistence.append_chunk_to_buffer(chunk)
+            
+            # 4. result.append(x)
             data_chunks.append(msg)
+            
+            # 5. [CRASH POINT] SE ROMPE ANTES DEL ACK
+            # 6. ACK a cola - RabbitMQ (automatic after callback returns)
+            # 7. [CRASH POINT] SE ROMPE DESPUÉS DEL COMMIT
             
         def coord_callback(msg):
             coord_results.append(msg)
@@ -282,14 +341,6 @@ class Aggregator:
         def coord_stop():
             self.middleware_coordination.stop_consuming()
 
-        # Recover last processing chunk if exists
-        last_chunk = self.persistence.recover_last_processing_chunk()
-        if last_chunk:
-            logging.info("Recovering last processing chunk...")
-            try:
-                self._handle_data_chunk(last_chunk.serialize())
-            except Exception as e:
-                logging.error(f"Error recovering last chunk: {e}")
 
         while self._running:
             try:
@@ -469,22 +520,29 @@ class Aggregator:
 
         # Removed: self._can_send_end_message check
 
-    def _handle_data_chunk(self, raw_msg: bytes):
-        logging.info(f"DEBUG: _handle_data_chunk called | len:{len(raw_msg)}")
-        self._check_crash_point("CRASH_BEFORE_PROCESS")
-        chunk = ProcessBatchReader.from_bytes(raw_msg)
+    def _apply_and_update_state(self, chunk: ProcessChunk):
+        """
+        Apply aggregation and update working state for a chunk.
+        This is the core processing logic separated for clarity.
+        
+        Steps:
+        1. apply(x) - Process/aggregate the chunk
+        2. actualizar estado(x) - Update working state counters
+        """
         client_id = chunk.client_id()
         table_type = chunk.table_type()
-
+        
+        # Check idempotency
         if self.working_state.is_processed(chunk.message_id()):
             logging.info(f"action: duplicate_chunk_ignored | message_id:{chunk.message_id()}")
             return
-
+        
         logging.info(
             f"action: aggregate | type:{self.aggregator_type} | cli_id:{client_id} "
             f"| file_type:{table_type} | rows_in:{len(chunk.rows)}"
         )
 
+        # Update state: increment chunks received
         self.working_state.increment_chunks_received(
             client_id,
             table_type,
@@ -492,6 +550,7 @@ class Aggregator:
             1,
         )
 
+        # 1. apply(x) - Procesar
         has_output = False
         payload = None
 
@@ -520,6 +579,7 @@ class Aggregator:
                 f"| file_type:{table_type} | rows_in:{len(chunk.rows)}"
             )
 
+        # 2. actualizar estado(x)
         self.working_state.increment_chunks_processed(
             client_id,
             table_type,
@@ -527,9 +587,8 @@ class Aggregator:
             1,
         )
         self.working_state.increment_accumulated_chunks(client_id, table_type, self.aggregator_id)
-
-        self._check_crash_point("CRASH_AFTER_PROCESS_BEFORE_COMMIT")
-
+        
+        # Send payload to peers (fanout exchange)
         if payload:
             try:
                 data_msg = AggregatorDataMessage(
@@ -556,8 +615,42 @@ class Aggregator:
                 logging.error(f"action: error_sending_data_message | error:{e}")
 
         self.working_state.mark_processed(chunk.message_id())
-        self._save_state(chunk.message_id())
 
+    def _handle_data_chunk(self, raw_msg: bytes):
+        """
+        Handle incoming data chunk following the pattern:
+        1. apply(x) - Process (via _apply_and_update_state)
+        2. actualizar estado(x) - Update state (via _apply_and_update_state)
+        3. if can_commit_working_state:
+            - [CRASH POINT] SE ROMPE ANTES DEL COMMIT DE WS
+            - commit_working_state(estado.to_bytes, x.message_id())
+            - clean buffer (done automatically in commit_working_state)
+        4. _send_end_message() if END received
+        5. [CRASH POINT] SE ROMPE ANTES DE ENVIAR
+        6. Mando a cola
+        7. commit_send_ack(x.client_id(), x.message_id())
+        8. [CRASH POINT] SE ROMPE DESPUÉS DE ENVIAR
+        """
+        logging.info(f"DEBUG: _handle_data_chunk called | len:{len(raw_msg)}")
+        self._check_crash_point("CRASH_BEFORE_PROCESS")
+        
+        chunk = ProcessBatchReader.from_bytes(raw_msg)
+        client_id = chunk.client_id()
+        table_type = chunk.table_type()
+
+        # 1 & 2. apply(x) + actualizar estado(x)
+        self._apply_and_update_state(chunk)
+
+        self._check_crash_point("CRASH_AFTER_PROCESS_BEFORE_COMMIT")
+
+        # 3. if can_commit_working_state:
+        if self.persistence.should_commit_state():
+            # [CRASH POINT] SE ROMPE ANTES DEL COMMIT DE WS
+            self._save_state(chunk.message_id())
+            # clean buffer (done automatically in _save_state → commit_working_state)
+            logging.info(f"Periodic state commit | chunks_processed:{self.persistence.chunks_since_last_commit}")
+
+        # 4. Check if END message was received and we should send results
         if self.working_state.is_end_message_received(client_id, table_type):
             self._send_stats_to_monitor(client_id, table_type)
 
