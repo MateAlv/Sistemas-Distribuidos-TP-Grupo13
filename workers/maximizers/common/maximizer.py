@@ -1,4 +1,4 @@
-from utils.processing.process_table import TransactionItemsProcessRow, PurchasesPerUserStoreRow
+from utils.processing.process_table import TransactionItemsProcessRow, PurchasesPerUserStoreRow, TPVProcessRow
 import logging
 import json
 from utils.processing.process_table import TableProcessRow
