@@ -81,18 +81,30 @@ class UsersJoiner(Joiner):
     def publish_results(self, client_id):
         # Envía resultados finales de Query 4
         joiner_results = self.working_state_main.get_results(client_id)
-
-        # Filtrar resultados None
-        query4_results = [result for result in joiner_results if result is not None]
+        query4_results = {}
+        
+        for message_id, row in joiner_results.items():
+            query4_result = Query4ResultRow(
+                store_id=row["store_id"],
+                store_name=row["store_name"],
+                user_id=row["user_id"],
+                birthdate=row["birthdate"],
+                purchase_quantity=row["purchases_made"]
+            )
+            if message_id not in query4_results:
+                query4_results[message_id] = []
+            query4_results[message_id].append(query4_result)
 
         if query4_results:
             # Enviar a cola específica del cliente
-            client_queue = MessageMiddlewareQueue("rabbitmq", f"to_merge_data_{client_id}")
+            for message_id, results in query4_results.items():
+                client_queue = MessageMiddlewareQueue("rabbitmq", f"to_merge_data_{client_id}")
 
-            query4_header = ResultChunkHeader(client_id, ResultTableType.QUERY_4)
-            query4_chunk = ResultChunk(query4_header, query4_results)
+                query4_header = ResultChunkHeader(client_id, ResultTableType.QUERY_4)
+                query4_chunk = ResultChunk(query4_header, results)
 
-            client_queue.send(query4_chunk.serialize())
+                client_queue.send(query4_chunk.serialize())
+                self.persistence_main.commit_send_ack(client_id, message_id)
             client_queue.close()
 
             logging.info(f"action: sent_query4_results | type:{self.joiner_type} | client_id:{client_id} | results:{len(query4_results)}")

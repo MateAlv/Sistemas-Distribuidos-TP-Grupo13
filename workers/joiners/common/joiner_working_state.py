@@ -36,13 +36,15 @@ class JoinerMainWorkingState(WorkingState):
     def get_chunks(self, client_id):
         return self.joiner_data_chunks.get(client_id, [])
 
-    def add_result(self, client_id, row):
+    def add_result(self, client_id, message_id, row):
         if client_id not in self.joiner_results:
-            self.joiner_results[client_id] = []
-        self.joiner_results[client_id].append(row)
+            self.joiner_results[client_id] = {}
+        if message_id not in self.joiner_results[client_id]:
+            self.joiner_results[client_id][message_id] = []
+        self.joiner_results[client_id][message_id].append(row)
 
     def get_results(self, client_id):
-        return self.joiner_results.get(client_id, [])
+        return self.joiner_results.get(client_id, {})
 
     def mark_end_message_received(self, client_id):
         if client_id not in self.client_end_messages_received:

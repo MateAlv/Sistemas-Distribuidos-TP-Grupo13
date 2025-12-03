@@ -92,14 +92,14 @@ class StoresTop3Joiner(Joiner):
         joiner_results = self.working_state_main.get_results(client_id)
         logging.debug(f"action: got_joiner_results | type:{self.joiner_type} | client_id:{client_id} | results_count:{len(joiner_results)}")
 
-        if joiner_results:
+        for message_id, row in joiner_results.items():
             try:
                 # Crear chunk con las filas que tienen store_name llenado
                 logging.debug(f"action: creating_chunk_header | type:{self.joiner_type} | client_id:{client_id}")
-                header = ProcessChunkHeader(client_id, TableType.PURCHASES_PER_USER_STORE)
+                header = ProcessChunkHeader(client_id, TableType.PURCHASES_PER_USER_STORE, message_id=message_id)
 
                 logging.debug(f"action: creating_chunk | type:{self.joiner_type} | client_id:{client_id}")
-                chunk = ProcessChunk(header, joiner_results)
+                chunk = ProcessChunk(header, row)
 
                 logging.debug(f"action: sending_chunk | type:{self.joiner_type} | client_id:{client_id}")
                 self.data_sender.send(chunk.serialize())

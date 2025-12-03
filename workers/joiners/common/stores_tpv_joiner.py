@@ -80,23 +80,27 @@ class StoresTpvJoiner(Joiner):
 
     def publish_results(self, client_id):
         joiner_results = self.working_state_main.get_results(client_id)
-        query3_results = []
-        for row in joiner_results:
+        query3_results = {}
+        for message_id, row in joiner_results.items():
             # Row is already aggregated by Maximizer
             query3_result = Query3ResultRow(row["store_id"], row["store_name"], row["tpv"], row["year_half"])
-            query3_results.append(query3_result)
+            if message_id not in query3_results:
+                query3_results[message_id] = []
+            query3_results[message_id].append(query3_result)
 
         if query3_results:
-            query3_header = ResultChunkHeader(client_id, ResultTableType.QUERY_3)
-            query3_chunk = ResultChunk(query3_header, query3_results)
+            for message_id, results in query3_results.items():
+                query3_header = ResultChunkHeader(client_id, ResultTableType.QUERY_3, message_id=message_id)
+                query3_chunk = ResultChunk(query3_header, results)
 
-            # Enviar a cola específica del cliente
-            client_queue = MessageMiddlewareQueue("rabbitmq", f"to_merge_data_{client_id}")
-            client_queue.send(query3_chunk.serialize())
+                # Enviar a cola específica del cliente
+                client_queue = MessageMiddlewareQueue("rabbitmq", f"to_merge_data_{client_id}")
+                client_queue.send(query3_chunk.serialize())
+                self.persistence_main.commit_send_ack(client_id, message_id)
+                logging.info(
+                    f"action: sent_result_message | type:{self.joiner_type} | client_id:{client_id} | rows:{len(query3_results)} | queue:to_merge_data_{client_id} | DEBUGGING_QUERY_3"
+                )
             client_queue.close()
-            logging.info(
-                f"action: sent_result_message | type:{self.joiner_type} | client_id:{client_id} | rows:{len(query3_results)} | queue:to_merge_data_{client_id} | DEBUGGING_QUERY_3"
-            )
         else:
             logging.info(f"action: no_results_to_send | type:{self.joiner_type} | client_id:{client_id}")
 

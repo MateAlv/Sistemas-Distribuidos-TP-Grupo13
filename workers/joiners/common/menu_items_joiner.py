@@ -38,14 +38,22 @@ class MenuItemsJoiner(Joiner):
         client_queue = MessageMiddlewareQueue("rabbitmq", f"to_merge_data_{client_id}")
         client_queue.send(end_query_msg_1.encode())
         client_queue.send(end_query_msg_2.encode())
+        client_queue.close()
+
 
     def publish_results(self, client_id):
-        sellings_results = []
-        profit_results = []
+        sellings_results = {}
+        profit_results = {}
+        message_ids = set()
         joiner_results = self.working_state_main.get_results(client_id)
         
-        for row in joiner_results:
+        for message_id, row in joiner_results.items():
             # INCLUIR CLIENT_ID EN LOS RESULTADOS
+            if message_id not in sellings_results:
+                sellings_results[message_id] = []
+            if message_id not in profit_results:
+                profit_results[message_id] = []
+
             row["client_id"] = client_id
             item_id = row["item_id"]  # Agregar esta línea
             item_name = row["item_name"]
@@ -53,11 +61,12 @@ class MenuItemsJoiner(Joiner):
             if row["quantity"] is not None:
                 sellings_quantity = row["quantity"]
                 max_selling = Query2_1ResultRow(item_id, item_name, sellings_quantity, year_month)
-                sellings_results.append(max_selling)
+                sellings_results[message_id].append(max_selling)
             if row["subtotal"] is not None:
                 profit_sum = row["subtotal"]
                 max_profit = Query2_2ResultRow(item_id, item_name, profit_sum, year_month)
-                profit_results.append(max_profit)
+                profit_results[message_id].append(max_profit)
+            message_ids.add(message_id)
 
         if not sellings_results and not profit_results:
             logging.info(f"action: no_results_to_send | type:{self.joiner_type} | client_id:{client_id}")
@@ -66,18 +75,23 @@ class MenuItemsJoiner(Joiner):
         # Enviar a cola específica del cliente
         client_queue = MessageMiddlewareQueue("rabbitmq", f"to_merge_data_{client_id}")
 
-        if sellings_results:
-            sellings_header = ResultChunkHeader(client_id, ResultTableType.QUERY_2_1)
-            sellings_chunk = ResultChunk(sellings_header, sellings_results)
-            client_queue.send(sellings_chunk.serialize())
-            logging.info(f"action: sent_selling_results | type:{self.joiner_type} | client_id:{client_id} | results:{len(sellings_results)}")
+        for message_id in message_ids:
+            sellings_results_chunk = sellings_results.get(message_id, [])
+            profit_results_chunk = profit_results.get(message_id, [])
 
-        if profit_results:
-            profit_header = ResultChunkHeader(client_id, ResultTableType.QUERY_2_2)  # Corregir TableType
-            profit_chunk = ResultChunk(profit_header, profit_results)
-            client_queue.send(profit_chunk.serialize())
-            logging.info(f"action: sent_profit_results | type:{self.joiner_type} | client_id:{client_id} | results:{len(profit_results)}")
+            if sellings_results_chunk:
+                sellings_header = ResultChunkHeader(client_id, ResultTableType.QUERY_2_1)
+                sellings_chunk = ResultChunk(sellings_header, sellings_results_chunk)
+                client_queue.send(sellings_chunk.serialize())
+                logging.info(f"action: sent_selling_results | type:{self.joiner_type} | client_id:{client_id} | message_id:{message_id} | results:{len(sellings_results_chunk)}")
 
+            if profit_results_chunk:
+                profit_header = ResultChunkHeader(client_id, ResultTableType.QUERY_2_2)  # Corregir TableType
+                profit_chunk = ResultChunk(profit_header, profit_results_chunk)
+                client_queue.send(profit_chunk.serialize())
+                logging.info(f"action: sent_profit_results | type:{self.joiner_type} | client_id:{client_id} | message_id:{message_id} | results:{len(profit_results_chunk)}")
+        
+            self.persistence_main.commit_send_ack(client_id, message_id)
         client_queue.close()
         logging.info(f"action: sent_result_message | type:{self.joiner_type} | client_id:{client_id}")
 

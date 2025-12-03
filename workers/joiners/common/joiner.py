@@ -132,7 +132,10 @@ class Joiner:
         """Maneja datos de join (tabla de productos del server)"""
         results = deque()
         
-        def callback(msg): results.append(msg)
+        def callback(msg):
+            chunk = ProcessBatchReader.from_bytes(data)
+            self.persistence_join.commit_processing_chunk(chunk)
+            results.append(msg)
         def stop():
             self.data_join_receiver.stop_consuming()
 
@@ -171,20 +174,23 @@ class Joiner:
             # Idempotency
             if self.working_state_join.is_processed(chunk.message_id()):
                 return
-
-            self.persistence_join.commit_processing_chunk(chunk)
             
             logging.info(f"action: receive_join_table_data | type:{self.joiner_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()} | rows_in:{len(chunk.rows)}")
             self.save_data_join(chunk)
             
             self.working_state_join.add_processed_id(chunk.message_id())
+
             self._save_state_join(chunk.message_id())
                 
     def handle_data(self):
         """Maneja datos del maximizer y END messages del exchange"""
         results = deque()
         
-        def callback(msg): results.append(msg)
+        def callback(msg):
+            chunk = ProcessBatchReader.from_bytes(msg)
+            self.save_data(chunk)
+            self.persistence_main.commit_processing_chunk(chunk)
+            results.append(msg)
         def stop():
             self.data_receiver.stop_consuming()
 
@@ -275,6 +281,7 @@ class Joiner:
                                 logging.error(f"action: error_sending_end_message | type:{self.joiner_type} | client_id:{client_id} | error:{end_msg_error} | error_type:{type(end_msg_error).__name__}")
                                 raise end_msg_error
                         self.working_state_main.clear_pending_end_messages()
+                        self.persistence_main.commit_working_state(self.working_state_main.to_bytes(), uuid.uuid4())
                         logging.debug(f"action: cleared_pending_end_messages | type:{self.joiner_type}")
                     
                 except ValueError as e:
@@ -293,12 +300,9 @@ class Joiner:
             if is_proc:
                 return
 
-            self.persistence_main.commit_processing_chunk(chunk)
-
             logging.info(f"action: receive_data | type:{self.joiner_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()} | rows_in:{len(chunk.rows)}")
                         
         with self.lock:
-            self.save_data(chunk)
             # Check if we're ready to join for this specific client
             client_id = chunk.client_id()
             if self.is_ready_to_join_for_client(client_id) and self.working_state_main.is_end_message_received(client_id):
@@ -442,12 +446,13 @@ class Joiner:
                     logging.debug(f"action: joining_row | type:{self.joiner_type} | client_id:{client_id} | chunk_idx:{chunk_idx} | row_idx:{row_idx}")
                     joined_row = self.join_result(row, client_id)
                     
-                    self.working_state_main.add_result(client_id, joined_row)
+                    self.working_state_main.add_result(client_id, chunk.message_id(), joined_row)
                     
                     logging.debug(f"action: row_joined_successfully | type:{self.joiner_type} | client_id:{client_id} | chunk_idx:{chunk_idx} | row_idx:{row_idx}")
                 except Exception as row_error:
                     logging.error(f"action: error_joining_row | type:{self.joiner_type} | client_id:{client_id} | chunk_idx:{chunk_idx} | row_idx:{row_idx} | error:{row_error} | error_type:{type(row_error).__name__}")
                     raise row_error
+            self.persistence_main.commit_working_state(self.working_state_main.to_bytes(), chunk.message_id())
         
         logging.info(f"action: applied_join | client_id:{client_id} | joined_rows:{len(self.working_state_main.get_results(client_id))}")
     
