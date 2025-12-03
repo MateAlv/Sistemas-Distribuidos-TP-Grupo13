@@ -412,6 +412,52 @@ class Filter:
             logging.debug(f"action: coordination_end_sent | stage:{self.stage} | cli_id:{client_id} | chunks:{total_expected-total_not_sent}")
         except Exception as e:
             logging.error(f"action: coordination_end_send_error | stage:{self.stage} | cli_id:{client_id} | error:{e}")
+        
+        # [NEW] Send explicit stats for the NEXT stage (Aggregator) to Monitor
+        # This allows Monitor to know 'agg_expected'
+        if self.filter_type in ["year", "hour"]:
+             # Determine next stage name
+             next_stage = None
+             if self.filter_type == "year":
+                 if table_type == TableType.TRANSACTION_ITEMS: next_stage = STAGE_AGG_PRODUCTS
+                 elif table_type == TableType.TRANSACTIONS: next_stage = STAGE_AGG_PURCHASES
+             elif self.filter_type == "hour":
+                 if table_type == TableType.TRANSACTIONS: next_stage = STAGE_AGG_TPV
+             
+             if next_stage:
+                 # We need to send stats for EACH shard we sent data to
+                 # self.shard_chunks_sent tracks chunks sent to each shard
+                 # We iterate over shards and send stats to Monitor
+                 # The 'chunks' field in stats will be the expected count for that shard
+                 
+                 # Which shards?
+                 target_shards = 0
+                 if next_stage == STAGE_AGG_PRODUCTS: target_shards = self.products_shards
+                 elif next_stage == STAGE_AGG_PURCHASES: target_shards = self.purchases_shards
+                 elif next_stage == STAGE_AGG_TPV: target_shards = self.tpv_shards
+                 
+                 for i in range(1, target_shards + 1):
+                     shard_total = self.shard_chunks_sent.get((next_stage, client_id, table_type, i), 0)
+                     try:
+                        payload = {
+                            "type": MSG_WORKER_STATS,
+                            "id": str(self.id),
+                            "client_id": client_id,
+                            "stage": next_stage, # Target stage
+                            "shard": str(i),     # Target shard
+                            "expected": 0,       # Irrelevant for this message? No, we want to set agg_expected.
+                            # In Monitor: if 'not_sent' in data -> agg_expected = data['chunks']
+                            # So we must include 'not_sent' (dummy) and set 'chunks' to shard_total
+                            "chunks": shard_total,
+                            "not_sent": 0,       # Signal to Monitor that this is a filter update
+                            "sender": str(self.id),
+                        }
+                        rk = f"coordination.stats.{next_stage}.{i}"
+                        self.middleware_coordination.send(json.dumps(payload).encode("utf-8"), routing_key=rk)
+                        logging.info(f"action: sent_next_stage_expected | stage:{next_stage} | shard:{i} | expected:{shard_total}")
+                     except Exception as e:
+                        logging.error(f"action: next_stage_stats_error | stage:{next_stage} | shard:{i} | error:{e}")
+
         end_msg = FilterStatsEndMessage(self.id, client_id, table_type)
         self.middleware_end_exchange.send(end_msg.encode())
         self.working_state.delete_client_stats_data(end_msg)

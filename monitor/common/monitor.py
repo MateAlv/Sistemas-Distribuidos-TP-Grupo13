@@ -51,8 +51,24 @@ class MonitorNode:
             'forwarded': False,
             'stats_expected_chunks': None,
             'stats_received': 0,
+            'expected': None,
+            'received_end': 0,
+            'sender_ids': set(),
+            'end_sender_ids': set(),
+            'total_chunks': 0,
+            'last_forward_ts': 0,
+            'forwarded': False,
+            'stats_expected_chunks': None,
+            'stats_received': 0,
             'stats_processed': 0,
+            # New fields for aggregator barrier
+            'agg_processed': 0,
+            'agg_expected': None,
         })))
+        
+        # Persistence
+        self.persistence_path = "/data/persistence/monitor_state.json"
+        self._recover_state()
 
         # How often we forward (seconds). Default: 60s.
         self.forward_interval = int(os.environ.get('BARRIER_FORWARD_INTERVAL', '60'))
@@ -265,6 +281,24 @@ class MonitorNode:
                             if now - tracker['last_forward_ts'] >= self.forward_interval:
                                 self._forward_barrier(client_id, stage, shard, tracker)
                                 tracker['last_forward_ts'] = now
+                                self._save_state()
+
+                        # New Aggregator Barrier Logic
+                        # Check if we have expected count (from filters) and processed count (from aggs)
+                        agg_expected = tracker.get('agg_expected')
+                        agg_processed = tracker.get('agg_processed', 0)
+                        
+                        if agg_expected is not None:
+                            if agg_processed >= agg_expected:
+                                if not tracker['forwarded']:
+                                    logging.info(f"Aggregator Barrier Reached | client:{client_id} | stage:{stage} | shard:{shard} | processed:{agg_processed} | expected:{agg_expected}")
+                                    self._forward_barrier(client_id, stage, shard, tracker)
+                                    tracker['forwarded'] = True
+                                    self._save_state()
+                            else:
+                                # Log progress periodically
+                                if int(now) % 5 == 0:
+                                    logging.info(f"Aggregator Barrier Progress | client:{client_id} | stage:{stage} | shard:{shard} | processed:{agg_processed}/{agg_expected}")
 
     def _start_election(self):
         if self.election_in_progress: return
@@ -394,9 +428,62 @@ class MonitorNode:
                 tracker['stats_expected_chunks'] = data.get('expected') if data.get('expected') is not None else tracker.get('stats_expected_chunks')
                 tracker['stats_received'] = max(tracker.get('stats_received', 0), data.get('chunks', 0))
                 tracker['stats_processed'] = max(tracker.get('stats_processed', 0), data.get('processed', data.get('chunks', 0)))
-            # Persist? (future) – could be written to disk; keeping in-memory for now.
+                
+                # New Aggregator Stats Logic
+                # Filters send 'expected' (chunks sent to next stage)
+                if data.get('expected') is not None:
+                    pass
+                
+                # Update agg_processed if provided (from Aggregator)
+                if 'processed' in data:
+                    # Aggregator sends its processed count
+                    # If multiple aggregators (replicas) exist for same shard (unlikely for now), we'd take max or sum?
+                    # Assuming 1 worker per shard ID.
+                    tracker['agg_processed'] = max(tracker.get('agg_processed', 0), data.get('processed', 0))
+                
+            self._save_state()
         except Exception as e:
             logging.error(f"Barrier handle error: {e} | data:{data}")
+
+    def _save_state(self):
+        try:
+            # Convert defaultdicts to dicts for JSON serialization
+            # This is a bit heavy for every update, but safe for now.
+            # We only save what's necessary.
+            state = {}
+            for client, stages in self.barrier_state.items():
+                state[client] = {}
+                for stage, shards in stages.items():
+                    state[client][stage] = {}
+                    for shard, tracker in shards.items():
+                        state[client][stage][shard] = {
+                            'agg_expected': tracker.get('agg_expected'),
+                            'agg_processed': tracker.get('agg_processed', 0),
+                            'forwarded': tracker.get('forwarded', False),
+                            # Save other fields if needed
+                        }
+            
+            os.makedirs(os.path.dirname(self.persistence_path), exist_ok=True)
+            with open(self.persistence_path, 'w') as f:
+                json.dump(state, f)
+        except Exception as e:
+            logging.error(f"Error saving state: {e}")
+
+    def _recover_state(self):
+        try:
+            if os.path.exists(self.persistence_path):
+                with open(self.persistence_path, 'r') as f:
+                    state = json.load(f)
+                    for client, stages in state.items():
+                        for stage, shards in stages.items():
+                            for shard, data in shards.items():
+                                tracker = self.barrier_state[client][stage][shard]
+                                tracker['agg_expected'] = data.get('agg_expected')
+                                tracker['agg_processed'] = data.get('agg_processed', 0)
+                                tracker['forwarded'] = data.get('forwarded', False)
+                logging.info("Monitor state recovered.")
+        except Exception as e:
+            logging.error(f"Error recovering state: {e}")
 
     def _forward_barrier(self, client_id, stage, shard, tracker):
         try:

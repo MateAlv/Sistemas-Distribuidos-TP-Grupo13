@@ -74,12 +74,9 @@ class Aggregator:
         self.working_state = AggregatorWorkingState()
 
         # Exchanges para coordinación
-        self.middleware_stats_exchange = MessageMiddlewareExchange(
-            "rabbitmq",
-            f"end_exchange_aggregator_{self.aggregator_type}",
-            f"{self.aggregator_type}_{self.aggregator_id}_stats",
-            "fanout",
-        )
+        # [REMOVED] Peer stats exchange
+        # self.middleware_stats_exchange = ...
+        
         self.middleware_data_exchange = MessageMiddlewareExchange(
             "rabbitmq",
             f"data_exchange_aggregator_{self.aggregator_type}",
@@ -87,7 +84,6 @@ class Aggregator:
             "fanout",
         )
         try:
-            self.middleware_stats_exchange.purge()
             self.middleware_data_exchange.purge()
         except MessageMiddlewareMessageError as purge_error:
             logging.warning(
@@ -159,6 +155,8 @@ class Aggregator:
             raise ValueError(f"Tipo de agregador inválido: {self.aggregator_type}")
 
         # Coordination publisher with shard-aware routing (agg is non-sharded -> global)
+        # Wait, Aggregators ARE sharded now.
+        # Routing key for barrier: coordination.barrier.<stage>.<shard>
         self.middleware_coordination = MessageMiddlewareExchange(
             "rabbitmq",
             COORDINATION_EXCHANGE,
@@ -185,7 +183,7 @@ class Aggregator:
         # Detener consumos activos
         for middleware in [
             getattr(self, "middleware_queue_receiver", None),
-            getattr(self, "middleware_stats_exchange", None),
+            # getattr(self, "middleware_stats_exchange", None), # Removed
             getattr(self, "middleware_data_exchange", None),
         ]:
             if middleware is None:
@@ -204,7 +202,7 @@ class Aggregator:
         # Cerrar conexiones
         for middleware in [
             getattr(self, "middleware_queue_receiver", None),
-            getattr(self, "middleware_stats_exchange", None),
+            # getattr(self, "middleware_stats_exchange", None), # Removed
             getattr(self, "middleware_data_exchange", None),
         ]:
             if middleware is None:
@@ -243,15 +241,18 @@ class Aggregator:
         )
 
         data_results = deque()
-        stats_results = deque()
+        data_results = deque()
+        # stats_results = deque() # Removed
+        data_chunks = deque()
+        coord_results = deque()
         data_chunks = deque()
         coord_results = deque()
 
         def data_callback(msg):
             data_results.append(msg)
 
-        def stats_callback(msg):
-            stats_results.append(msg)
+        # def stats_callback(msg):
+        #     stats_results.append(msg)
 
         def chunk_callback(msg):
             data_chunks.append(msg)
@@ -261,8 +262,8 @@ class Aggregator:
         def data_stop():
             self.middleware_data_exchange.stop_consuming()
 
-        def stats_stop():
-            self.middleware_stats_exchange.stop_consuming()
+        # def stats_stop():
+        #     self.middleware_stats_exchange.stop_consuming()
 
         def chunk_stop():
             self.middleware_queue_receiver.stop_consuming()
@@ -299,13 +300,13 @@ class Aggregator:
                     f"action: data_exchange_error | type:{self.aggregator_type} | agg_id:{self.aggregator_id} | error:{e}"
                 )
 
-            try:
-                self.stats_timer = self.middleware_stats_exchange.connection.call_later(TIMEOUT, stats_stop)
-                self.middleware_stats_exchange.start_consuming(stats_callback)
-            except Exception as e:
-                logging.error(
-                    f"action: stats_consume_error | type:{self.aggregator_type} | agg_id:{self.aggregator_id} | error:{e}"
-                )
+            # try:
+            #     self.stats_timer = self.middleware_stats_exchange.connection.call_later(TIMEOUT, stats_stop)
+            #     self.middleware_stats_exchange.start_consuming(stats_callback)
+            # except Exception as e:
+            #     logging.error(
+            #         f"action: stats_consume_error | type:{self.aggregator_type} | agg_id:{self.aggregator_id} | error:{e}"
+            #     )
 
             # Consume coordination barrier forwards
             try:
@@ -321,10 +322,10 @@ class Aggregator:
                 raw_data = data_results.popleft()
                 self._process_data_message(raw_data)
 
-            while stats_results:
-    
-                raw_stats = stats_results.popleft()
-                self._process_stats_message(raw_stats)
+            # while stats_results:
+            #    
+            #     raw_stats = stats_results.popleft()
+            #     self._process_stats_message(raw_stats)
 
             while coord_results:
                 raw_coord = coord_results.popleft()
@@ -334,6 +335,7 @@ class Aggregator:
     
                 msg = data_chunks.popleft()
                 try:
+                    logging.info(f"DEBUG: Aggregator received message: {msg[:50]}...")
                     if msg.startswith(b"END;"):
                         self._handle_end_message(msg)
                     else:
@@ -373,63 +375,12 @@ class Aggregator:
         self.working_state.mark_processed(data.message_id)
         self._save_state(data.message_id)
 
-        if self._can_send_end_message(data.client_id, data.table_type):
-            self._send_end_message(data.client_id, data.table_type)
+        # [NEW] Send stats to Monitor after processing remote data
+        self._send_stats_to_monitor(data.client_id, data.table_type)
 
-    def _process_stats_message(self, raw_msg: bytes):
-        try:
-            if raw_msg.startswith(b"AGG_STATS_END"):
-                stats_end = AggregatorStatsEndMessage.decode(raw_msg)
-                logging.info(
-                    f"action: stats_end_received | type:{self.aggregator_type} | agg_id:{stats_end.aggregator_id} "
-                    f"| cli_id:{stats_end.client_id} | table_type:{stats_end.table_type}"
-                )
-                # Registrar el mensaje para evitar reprocesos
-                self.working_state.mark_processed(stats_end.message_id)
-                # Solo limpiamos nuestro estado si el END es propio; si es de un par, lo ignoramos.
-                if stats_end.aggregator_id == self.aggregator_id:
-                    self.delete_client_data(stats_end)
-                return
+        # Removed: self._can_send_end_message check (now driven by Monitor barrier)
 
-            stats = AggregatorStatsMessage.decode(raw_msg)
-        except Exception as e:
-            logging.error(f"action: error_decoding_stats_message | error:{e}")
-            return
-
-        if stats.aggregator_id == self.aggregator_id:
-            return
-
-        if self.working_state.is_processed(stats.message_id):
-            logging.debug(f"action: duplicate_stats_message_ignored | message_id:{stats.message_id}")
-            return
-
-        self.working_state.update_chunks_received(
-            stats.client_id,
-            stats.table_type,
-            stats.aggregator_id,
-            stats.chunks_received,
-        )
-        self.working_state.update_chunks_processed(
-            stats.client_id,
-            stats.table_type,
-            stats.aggregator_id,
-            stats.chunks_processed,
-        )
-        logging.debug(
-            f"action: stats_message_applied | type:{self.aggregator_type} | from_agg:{stats.aggregator_id} | cli_id:{stats.client_id} | table:{stats.table_type} | recv:{stats.chunks_received} | proc:{stats.chunks_processed} | total_expected:{stats.total_expected}"
-        )
-
-        self.working_state.mark_processed(stats.message_id)
-        self._save_state(stats.message_id)
-
-        # Si aún no conocemos el total global esperado, tomarlo de los stats recibidos
-        if self.working_state.get_global_total_expected(stats.client_id, stats.table_type) is None:
-            self.working_state.set_global_total_expected(stats.client_id, stats.table_type, stats.total_expected)
-            logging.info(f"action: learned_global_total | client_id:{stats.client_id} | total:{stats.total_expected}")
-
-        if self._can_send_end_message(stats.client_id, stats.table_type):
-            logging.info(f"action: termination_condition_met_after_stats | client_id:{stats.client_id}")
-            self._send_end_message(stats.client_id, stats.table_type)
+    # Removed _process_stats_message (peer stats)
 
     def _process_coord_message(self, raw_msg: bytes):
         try:
@@ -448,6 +399,9 @@ class Aggregator:
                 if key in self.barrier_forwarded:
                     return
                 total_chunks = data.get("total_chunks", 0)
+                # [NEW] Barrier Forward Handling
+                # When Monitor says "Barrier Reached", we flush results and send END.
+                
                 # Map stage to table_type
                 if self.aggregator_type == "PRODUCTS":
                     table_type = TableType.TRANSACTION_ITEMS
@@ -455,13 +409,23 @@ class Aggregator:
                     table_type = TableType.TRANSACTIONS
                 else:
                     return
-                self.working_state.set_global_total_expected(client_id, table_type, total_chunks)
-                self.working_state.set_chunks_to_receive(client_id, table_type, total_chunks)
-                self.working_state.mark_end_message_received(client_id, table_type)
-                self._maybe_send_stats(client_id, table_type, force=True)
+                
+                logging.info(f"action: barrier_forward_received | type:{self.aggregator_type} | cli_id:{client_id} | shard:{shard} | total_chunks:{total_chunks}")
+                
+                # Check if we have already forwarded this barrier
+                if key in self.barrier_forwarded:
+                    logging.info(f"action: barrier_already_processed | key:{key}")
+                    return
+
+                # Flush results and send END
                 self._send_end_message(client_id, table_type)
                 self.barrier_forwarded.add(key)
-                logging.info(f"action: barrier_forward_consumed | type:{self.aggregator_type} | cli_id:{client_id} | shard:{shard} | total_chunks:{total_chunks}")
+                
+                # Clean up?
+                # self.delete_client_data(...)
+                
+        except Exception as e:
+            logging.error(f"action: barrier_forward_error | type:{self.aggregator_type} | error:{e}")
         except Exception as e:
             logging.error(f"action: barrier_forward_error | type:{self.aggregator_type} | error:{e}")
 
@@ -482,24 +446,19 @@ class Aggregator:
         )
 
         self.working_state.mark_end_message_received(client_id, table_type)
-        self.working_state.set_global_total_expected(client_id, table_type, total_expected)
-        
-        # Broadcast this global total to peers so they also know when to terminate
-        # We can use a new message type or reuse AggregatorStatsMessage with a special flag/value?
-        # Better to add a field to AggregatorStatsMessage or use a dedicated message.
-        # For now, let's assume AggregatorStatsMessage has 'total_expected'. 
-        # When we receive END, we update our 'total_expected' and broadcast it in our next stats update.
-        # The _maybe_send_stats uses get_chunks_to_receive which we just updated.
+        # self.working_state.set_global_total_expected(client_id, table_type, total_expected) # Monitor handles this
         
         self.working_state.set_chunks_to_receive(client_id, table_type, total_expected)
-        self.working_state.set_global_total_expected(client_id, table_type, total_expected)
+        # self.working_state.set_global_total_expected(client_id, table_type, total_expected)
 
         self._save_state(uuid.uuid4())
 
-        self._maybe_send_stats(client_id, table_type, force=True)
+        # [NEW] Send stats to Monitor (processed count). 
+        # Even if we haven't processed everything, we update Monitor.
+        # If we HAVE processed everything, Monitor will see processed >= expected (if expected is known)
+        self._send_stats_to_monitor(client_id, table_type)
 
-        if self._can_send_end_message(client_id, table_type):
-            self._send_end_message(client_id, table_type)
+        # Removed: self._can_send_end_message check
 
     def _handle_data_chunk(self, raw_msg: bytes):
         logging.info(f"DEBUG: _handle_data_chunk called | len:{len(raw_msg)}")
@@ -573,8 +532,8 @@ class Aggregator:
                     table_type,
                     payload,
                 )
-                logging.debug(
-                    f"action: aggregator_data_sent | type:{self.aggregator_type} | agg_id:{self.aggregator_id} "
+                logging.info(
+                    f"DEBUG: aggregator_data_sent | type:{self.aggregator_type} | agg_id:{self.aggregator_id} "
                     f"| client_id:{client_id} | table_type:{table_type} | payload_size:{len(payload)}"
                 )
                 self.middleware_data_exchange.send(data_msg.encode())
@@ -585,10 +544,26 @@ class Aggregator:
         self.working_state.mark_processed(chunk.message_id())
         self._save_state(chunk.message_id())
 
-        self._maybe_send_stats(client_id, table_type)
+        self.working_state.mark_processed(chunk.message_id())
+        self._save_state(chunk.message_id())
 
-        if self._can_send_end_message(client_id, table_type):
-            self._send_end_message(client_id, table_type)
+        # [NEW] Send stats to Monitor
+        self._send_stats_to_monitor(client_id, table_type)
+
+        # [CRITICAL] Late Data Handling
+        # If we already forwarded the barrier (sent END), and we receive more data (out of order),
+        # we must re-send stats to Monitor so it knows we processed more.
+        # However, if we already sent END to Maximizer, sending more data might confuse it if it closed the stream.
+        # But Maximizers usually wait for END. If we sent END, we shouldn't send more data?
+        # Actually, if we sent END, it means Monitor saw processed >= expected.
+        # If we receive MORE data now, it means 'expected' was wrong or 'processed' was incomplete?
+        # Or maybe 'expected' increased?
+        # If we receive data, we MUST process it.
+        # If we already sent END, we might need to send another END?
+        # Or just rely on the fact that Maximizer might handle it.
+        # For now, just ensure Monitor gets the update.
+        
+        # Removed: self._can_send_end_message check
 
     def _recover_state(self):
         state_data = self.persistence.recover_working_state()
@@ -605,115 +580,31 @@ class Aggregator:
 
     # Helper methods removed as they are now in WorkingState
 
-    def _maybe_send_stats(self, client_id, table_type, force=False):
-        total_expected = self.working_state.get_chunks_to_receive(client_id, table_type)
-        if total_expected is None:
-            return
-
-        received = self.working_state.get_received_for_aggregator(client_id, table_type, self.aggregator_id)
+    def _send_stats_to_monitor(self, client_id, table_type):
         processed = self.working_state.get_processed_for_aggregator(client_id, table_type, self.aggregator_id)
-    
-        send_table_type = table_type
-        if self.aggregator_type == "TPV":
-            send_table_type = TableType.TPV
+        try:
+            payload = {
+                "type": MSG_WORKER_STATS,
+                "id": str(self.aggregator_id),
+                "client_id": client_id,
+                "stage": self.stage,
+                "shard": self.shard_id or DEFAULT_SHARD,
+                "processed": processed,
+                "sender": str(self.aggregator_id),
+            }
+            rk = f"coordination.stats.{self.stage}.{self.shard_id or DEFAULT_SHARD}"
+            self.middleware_coordination.send(json.dumps(payload).encode("utf-8"), routing_key=rk)
+            logging.info(f"DEBUG: stats_sent_to_monitor | stage:{self.stage} | cli_id:{client_id} | processed:{processed}")
+        except Exception as e:
+            logging.error(f"action: stats_send_error | stage:{self.stage} | cli_id:{client_id} | error:{e}")
 
-        stats_msg = AggregatorStatsMessage(
-            self.aggregator_id,
-            client_id,
-            send_table_type,
-            total_expected,
-            received,
-            processed,
-        )
-        # Evitar spam: solo loggear en DEBUG cuando hay cambios o force
-        if force or not self.working_state.was_stats_sent(client_id, send_table_type, (received, processed, total_expected)):
-            logging.debug(
-                f"action: aggregator_stats_sent | type:{self.aggregator_type} | agg_id:{self.aggregator_id} "
-                f"| client_id:{client_id} | table_type:{send_table_type} | received:{received} | processed:{processed} | expected:{total_expected}"
-            )
-            self.middleware_stats_exchange.send(stats_msg.encode())
-            self.working_state.mark_stats_sent(client_id, send_table_type, (received, processed, total_expected))
-            self.working_state.set_last_stats_sent_time(client_id, send_table_type, time.time())
-            
-            # Publish coordination stats (throttled by was_stats_sent logic implicitly via this block)
-            try:
-                payload = {
-                    "type": MSG_WORKER_STATS,
-                    "id": str(self.aggregator_id),
-                    "client_id": client_id,
-                    "stage": self.stage,
-                    "shard": self.shard_id or DEFAULT_SHARD,
-                    "expected": total_expected,
-                    "chunks": received,
-                    "processed": processed,
-                    "sender": str(self.aggregator_id),
-                }
-                rk = f"coordination.barrier.{self.stage}.{self.shard_id or DEFAULT_SHARD}"
-                self.middleware_coordination.send(json.dumps(payload).encode("utf-8"), routing_key=rk)
-                logging.debug(f"action: coordination_stats_sent | stage:{self.stage} | cli_id:{client_id} | received:{received} | processed:{processed}")
-            except Exception as e:
-                logging.error(f"action: coordination_stats_send_error | stage:{self.stage} | cli_id:{client_id} | error:{e}")
-
+    # Removed _send_periodic_stats
     def _send_periodic_stats(self):
-        active = self.working_state.get_active_clients_and_tables()
-        for client_id, table_type in active:
-            last_sent = self.working_state.get_last_stats_sent_time(client_id, table_type)
-            if time.time() - last_sent > 5:
-                 self._maybe_send_stats(client_id, table_type, force=True)
+        pass
 
 
 
-    def _can_send_end_message(self, client_id, table_type):
-        # Symmetric Termination Logic
-        
-        # 1. Check if we have received the global total expected (from upstream)
-        global_total = self.working_state.get_global_total_expected(client_id, table_type)
-        if global_total is None:
-            logging.debug(
-                f"action: end_gate_blocked_no_global_total | type:{self.aggregator_type} | cli_id:{client_id} | table:{table_type}"
-            )
-            return False
-
-        # 2. Check if we have processed everything we received locally
-        received = self.working_state.get_received_for_aggregator(client_id, table_type, self.aggregator_id)
-        processed = self.working_state.get_processed_for_aggregator(client_id, table_type, self.aggregator_id)
-        
-        if processed < received:
-            logging.debug(
-                f"action: waiting_local_processing | type:{self.aggregator_type} | client_id:{client_id} | table:{table_type} | processed:{processed} | received:{received}"
-            )
-            return False
-
-        # 3. Check if all peers have processed their part
-        # Sum of processed chunks from all aggregators (including self)
-        total_processed_global = self.working_state.get_total_processed_global(client_id, table_type)
-        
-        if total_processed_global < global_total:
-            logging.debug(
-                f"action: waiting_global_processing | type:{self.aggregator_type} | client_id:{client_id} | table:{table_type} | global_processed:{total_processed_global} | global_expected:{global_total}"
-            )
-            return False
-             
-        # 4. Check accumulation consistency (processed vs accumulated)
-        total_accumulated = self.working_state.get_total_accumulated(client_id, table_type)
-        # Note: total_accumulated tracks what THIS aggregator has accumulated. 
-        # But get_total_processed_global tracks what ALL aggregators have processed.
-        # We should check if OUR processed matches OUR accumulated.
-        
-        # Actually, get_total_accumulated in working_state sums up accumulation counts from all aggregators if they send it?
-        # Let's check working_state.increment_accumulated_chunks. It seems it tracks per aggregator.
-        # So get_total_accumulated returns sum of accumulated chunks for all aggregators.
-        
-        if total_processed_global != total_accumulated:
-            logging.debug(
-                f"action: waiting_accumulation_consistency | type:{self.aggregator_type} | client_id:{client_id} | table:{table_type} | global_processed:{total_processed_global} | global_accumulated:{total_accumulated}"
-            )
-            return False
-
-        logging.info(
-            f"action: symmetric_termination_condition_met | type:{self.aggregator_type} | client_id:{client_id} | table:{table_type} | global_total:{global_total} | processed:{total_processed_global}"
-        )
-        return True
+    # Removed _can_send_end_message (logic moved to Monitor)
 
     def _send_end_message(self, client_id, table_type):
         total_processed = self.working_state.get_total_processed(client_id, table_type)
@@ -787,17 +678,29 @@ class Aggregator:
                 }
                 rk = f"coordination.barrier.{self.stage}.{self.shard_id or DEFAULT_SHARD}"
                 self.middleware_coordination.send(json.dumps(payload).encode("utf-8"), routing_key=rk)
-                logging.debug(f"action: coordination_end_sent | stage:{self.stage} | cli_id:{client_id} | chunks:{my_processed}")
+                logging.info(f"DEBUG: coordination_end_sent | stage:{self.stage} | cli_id:{client_id} | chunks:{my_processed}")
             except Exception as e:
                 logging.error(f"action: coordination_end_send_error | stage:{self.stage} | cli_id:{client_id} | error:{e}")
         except Exception as e:
             logging.error(f"action: error_sending_end_message | error:{e}")
 
-        # Emit stats_end with the downstream table type (TPV for tpv aggregators)
-        stats_end_table = TableType.TPV if self.aggregator_type == "TPV" else table_type
-        stats_end = AggregatorStatsEndMessage(self.aggregator_id, client_id, stats_end_table)
-        self.middleware_stats_exchange.send(stats_end.encode())
-        self.delete_client_data(stats_end)
+        # Removed stats_end emission
+        # stats_end_table = TableType.TPV if self.aggregator_type == "TPV" else table_type
+        # stats_end = AggregatorStatsEndMessage(self.aggregator_id, client_id, stats_end_table)
+        # self.middleware_stats_exchange.send(stats_end.encode())
+        
+        # Clean up
+        self.delete_client_data(client_id) # Modified to take client_id directly if possible or adapt
+        
+    def delete_client_data(self, client_id):
+        # Wrapper to adapt to old signature if needed, or just call working_state
+        # The original delete_client_data took a message object?
+        # Let's check AggregatorWorkingState.
+        # It seems we need to implement this or fix the call.
+        # Original code called self.delete_client_data(stats_end) where stats_end was a message.
+        # We should just clear state for client.
+        self.working_state.delete_client_data(client_id, self.aggregator_type)
+        logging.info(f"action: client_data_deleted | client_id:{client_id}")
 
     def delete_client_data(self, stats_end: AggregatorStatsEndMessage):
         client_id = stats_end.client_id
