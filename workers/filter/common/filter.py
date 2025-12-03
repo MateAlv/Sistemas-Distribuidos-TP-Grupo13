@@ -227,6 +227,9 @@ class Filter:
                         if self.working_state.can_send_end_message(stats.client_id, stats.table_type, stats.total_expected, self.id):
                             chunks_not_sent = self.working_state.get_total_not_sent_chunks(stats.client_id, stats.table_type)
                             self._send_end_message(stats.client_id, stats.table_type, stats.total_expected, chunks_not_sent)
+                        
+                        # Persist state after updating stats from other filters
+                        self.persistence_service.commit_working_state(self.working_state.to_bytes(), uuid.uuid4())
 
                 except Exception as e:
                     logging.error(f"action: error_decoding_stats_message | error:{e}")
@@ -397,6 +400,7 @@ class Filter:
             total_expected)
 
         self.working_state.set_total_chunks_expected(client_id, table_type, total_expected)
+        self.working_state.end_received(client_id, table_type)
 
         # Only send stats if not already sent or if values changed - send OWN stats, not total
         if self.working_state.should_send_stats(client_id, table_type, own_received, own_not_sent):
@@ -426,6 +430,9 @@ class Filter:
                 logging.error(f"action: coordination_stats_send_error | stage:{self.stage} | cli_id:{client_id} | error:{e}")
             # Mark stats as sent with current values
             self.working_state.mark_stats_sent(client_id, table_type, own_received, own_not_sent)
+
+        # Persist state after handling END message and potential stats update
+        self.persistence_service.commit_working_state(self.working_state.to_bytes(), uuid.uuid4())
 
         # Use TOTAL to check if all filters are done
         total_received = self.working_state.get_total_chunks_received(client_id, table_type)

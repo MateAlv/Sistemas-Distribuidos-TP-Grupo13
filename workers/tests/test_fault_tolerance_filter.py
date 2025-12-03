@@ -487,5 +487,100 @@ class TestFilterCrashPoints(unittest.TestCase):
         # (or it was already processed)
 
 
+class TestFilterEndAndStatsPersistence(unittest.TestCase):
+    """Tests for END message and Stats persistence"""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp(prefix="filter_end_stats_")
+        os.environ["PERSISTENCE_DIR"] = self.temp_dir
+        os.environ["WORKER_ID"] = "1"
+        os.environ["FILTER_SHARD_ID"] = "1"
+        os.environ["FILTER_SHARDS"] = "1"
+        
+        self.config = {
+            "id": 1,
+            "filter_type": "year",
+            "year_start": 2019,
+            "year_end": 2025
+        }
+
+    def tearDown(self):
+        if os.path.exists(self.temp_dir):
+            shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    @patch('workers.filter.common.filter.MessageMiddlewareQueue')
+    @patch('workers.filter.common.filter.MessageMiddlewareExchange')
+    def test_end_message_state_persistence(self, mock_exchange, mock_queue):
+        """
+        Test that receiving an END message persists the state.
+        """
+        filter_worker = Filter(self.config)
+        
+        # Create END message
+        client_id = 1
+        table_type = TableType.TRANSACTIONS
+        total_chunks = 100
+        end_msg = MessageEnd(client_id, table_type, total_chunks, "sender_1")
+        
+        # Process END message
+        filter_worker._handle_end_message(end_msg.encode())
+        
+        # Verify in-memory state
+        self.assertTrue(filter_worker.working_state.end_is_received(client_id, table_type))
+        self.assertEqual(filter_worker.working_state.get_total_chunks_to_receive(client_id, table_type), total_chunks)
+        
+        # CRASH and RECOVER
+        filter_worker2 = Filter(self.config)
+        
+        # Verify recovered state
+        self.assertTrue(filter_worker2.working_state.end_is_received(client_id, table_type),
+                       "END received status should persist")
+        self.assertEqual(filter_worker2.working_state.get_total_chunks_to_receive(client_id, table_type), total_chunks,
+                        "Total expected chunks should persist")
+
+    @patch('workers.filter.common.filter.MessageMiddlewareQueue')
+    @patch('workers.filter.common.filter.MessageMiddlewareExchange')
+    def test_stats_update_persistence(self, mock_exchange, mock_queue):
+        """
+        Test that updating stats from another filter persists the state.
+        """
+        # We need to test the logic inside the run loop where stats are processed.
+        # Since we can't easily run the full loop, we'll simulate the steps:
+        # 1. Update stats
+        # 2. Commit state (which we added manually in the loop)
+        
+        filter_worker = Filter(self.config)
+        
+        client_id = 1
+        table_type = TableType.TRANSACTIONS
+        other_filter_id = 2
+        
+        # Create stats message from another filter
+        from workers.filter.common.filter_stats_messages import FilterStatsMessage
+        stats = FilterStatsMessage(other_filter_id, client_id, table_type, 100, 50, 0)
+        
+        # Simulate what happens in the loop:
+        # 1. Update working state
+        filter_worker.working_state.update_stats_received(client_id, table_type, stats)
+        
+        # 2. Commit state (this is the line we added to filter.py)
+        import uuid
+        filter_worker.persistence_service.commit_working_state(
+            filter_worker.working_state.to_bytes(), 
+            uuid.uuid4()
+        )
+        
+        # CRASH and RECOVER
+        filter_worker2 = Filter(self.config)
+        
+        # Verify recovered state
+        # Check if the stats from the other filter are present
+        chunks_received = filter_worker2.working_state.get_own_chunks_received(client_id, table_type, other_filter_id)
+        self.assertEqual(chunks_received, 50, "Stats from other filter should persist")
+        
+        total_expected = filter_worker2.working_state.get_total_chunks_to_receive(client_id, table_type)
+        self.assertEqual(total_expected, 100, "Total expected chunks should persist from stats")
+
+
 if __name__ == "__main__":
     unittest.main()
