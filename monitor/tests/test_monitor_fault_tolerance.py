@@ -4,6 +4,7 @@ import time
 import os
 import sys
 import logging
+import re
 
 # Configure logging
 logging.basicConfig(
@@ -14,6 +15,9 @@ logging.basicConfig(
         logging.FileHandler("logs.txt", mode='a')
     ]
 )
+
+CONFIG_MONITOR = os.environ.get("MONITOR_TEST_CONFIG", "config/config-monitor.ini")
+COMPOSE_SCRIPT = "scripts/generar-compose.py"
 
 def run_command(command, check=True, capture_output=True):
     """Runs a shell command."""
@@ -56,9 +60,42 @@ def wait_for_leader_election(timeout=60):
             logging.info("Leader elected!")
             return True
         time.sleep(2)
-    
+
     logging.error("Timeout waiting for leader election.")
     return False
+
+def _last_tracked_nodes_from_logs(log_path="logs.txt"):
+    """
+    Parses the last 'tracking nodes' line from logs.txt and returns the list of nodes.
+    """
+    try:
+        with open(log_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        tracked_lines = [l for l in lines if "tracking nodes:" in l]
+        if not tracked_lines:
+            return []
+        last_line = tracked_lines[-1]
+        match = re.search(r"tracking nodes: \[(.*)\]", last_line)
+        if not match:
+            return []
+        raw_list = match.group(1)
+        return [n.strip().strip("'") for n in raw_list.split(",") if n.strip()]
+    except Exception as exc:
+        logging.error(f"Failed to parse tracking nodes: {exc}")
+        return []
+
+def choose_victim_from_tracking():
+    """
+    Pick an aggregator that the leader is actually tracking to avoid killing
+    a container the monitor never saw.
+    """
+    tracked = _last_tracked_nodes_from_logs()
+    for node in tracked:
+        if "aggregator" in node:
+            logging.info(f"Choosing victim from tracking list: {node}")
+            return node
+    logging.warning("No aggregator found in tracking list; falling back to first aggregator service in compose.")
+    return None
 
 def wait_for_revival(victim_container, timeout=120):
     """Waits for the monitor to revive the victim container."""
@@ -101,14 +138,15 @@ def wait_for_revival(victim_container, timeout=120):
 
 def main():
     try:
-        # 0. Cleanup previous runs
+        # 0. Cleanup previous runs (mirror make test prep)
         logging.info("Cleaning up previous runs...")
-        run_command("make hard-down", check=False)
+        run_command("make clean-results", check=False)
+        run_command("make down", check=False)
         run_command("docker rm -f rabbitmq", check=False)
 
-        # 1. Generate docker-compose.yaml
-        logging.info("Generating docker-compose.yaml...")
-        run_command("make compose CONFIG=config/config-test.ini")
+        # 1. Generate docker-compose.yaml with no clients
+        logging.info("Generating docker-compose.yaml (no clients)...")
+        run_command(f"python3 {COMPOSE_SCRIPT} --config={CONFIG_MONITOR}")
         
         # 2. Identify services
         services = get_services_from_compose()
@@ -129,10 +167,15 @@ def main():
         # 4. Wait for Leader Election
         if not wait_for_leader_election():
             raise Exception("Leader election failed.")
+
+        # 4b. Allow heartbeats to propagate so leader tracks nodes
+        logging.info("Waiting for heartbeats to populate tracking (10s)...")
+        time.sleep(10)
             
         # 5. Scenario: Service Revival
-        # Pick a victim (e.g., first aggregator)
-        victim = next((s for s in services if "aggregator" in s), None)
+        victim = choose_victim_from_tracking()
+        if victim is None:
+            victim = next((s for s in services if "aggregator" in s), None)
         if not victim:
             raise Exception("No suitable victim found.")
             
