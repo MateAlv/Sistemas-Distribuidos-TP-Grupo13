@@ -181,6 +181,7 @@ class PersistenceService:
     def __init__(self, directory: str = "./", commit_interval: int = DEFAULT_COMMIT_INTERVAL):
         # path directories
         ensure_directory_exists(directory)
+        logging.info("Persistence init | dir:%s | commit_interval:%s", directory, commit_interval)
 
         self.state_commit_path = os.path.join(directory, STATE_COMMIT_FILE)
         self.processing_data_commit_path = os.path.join(directory, PROCESSING_DATA_COMMIT_FILE)
