@@ -64,6 +64,9 @@ def initialize_log(logging_level):
 
 
 def main():
+    logging.basicConfig(format="%(asctime)s %(levelname)-8s %(message)s", level=logging.INFO, datefmt="%Y-%m-%d %H:%M:%S")
+    logging.info("Filter init: starting container entrypoint")
+
     parser = argparse.ArgumentParser(description="Procesador de transacciones con filtros.")
     parser.add_argument(
         "--filter", choices=["year", "hour", "amount"], required=True,
@@ -72,7 +75,9 @@ def main():
     args = parser.parse_args()
 
     config_file = f"config/config_{args.filter}.ini"
+    logging.info(f"Filter init: loading config from {config_file}")
     (logging_level, cfg) = initialize_config(config_file)
+    logging.info(f"Filter init: applying logging level {logging_level}")
     initialize_log(logging_level)
 
     logging.debug(f"Config cargada desde {config_file}: {cfg}")
@@ -80,8 +85,10 @@ def main():
     from utils.heartbeat_sender import HeartbeatSender
     monitor = HeartbeatSender()
     monitor.start()
+    logging.info("Filter init: heartbeat sender started")
 
     filter = Filter(cfg, monitor)
+    logging.info(f"Filter init: Filter object created | type:{cfg['filter_type']} | id:{cfg['id']}")
     
     signal.signal(signal.SIGTERM, filter.shutdown)
 

@@ -2,6 +2,8 @@ import logging
 import json
 import os
 import uuid
+import sys
+import signal
 from collections import deque, defaultdict
 from utils.processing.process_table import TableProcessRow
 from utils.processing.process_chunk import ProcessChunk
@@ -52,12 +54,26 @@ class Filter:
             self.stage = f"filter_{self.filter_type}"
 
         self.working_state = FilterWorkingState()
+        logging.info(
+            "Filter init: basic config | type:%s | id:%s | shard_id:%s | shards:%s | stage:%s",
+            self.filter_type,
+            self.id,
+            self.shard_id,
+            self.shard_count,
+            self.stage,
+        )
 
         self.middleware_queue_sender = {}
         # Shard counts for downstream routing
         self.products_shards = int(os.getenv("PRODUCTS_SHARDS", "1"))
         self.purchases_shards = int(os.getenv("PURCHASES_SHARDS", "1"))
         self.tpv_shards = int(os.getenv("TPV_SHARDS", "1"))
+        logging.info(
+            "Filter init: downstream shards | products:%s | purchases:%s | tpv:%s",
+            self.products_shards,
+            self.purchases_shards,
+            self.tpv_shards,
+        )
         # Track chunk index per destination/client/table to compute shard deterministically
         self.chunk_counters = defaultdict(int)
         # Track how many chunks we actually sent to each shard so END carries correct per-shard expected count
@@ -98,6 +114,11 @@ class Filter:
             self.middleware_queue_receiver = MessageMiddlewareQueue("rabbitmq", f"to_filter_amount_shard_{self.shard_id}")
         else:
             raise ValueError(f"Tipo de filtro inválido: {self.filter_type}")
+        logging.info(
+            "Filter init: middleware ready | receiver:%s | senders:%s",
+            self.middleware_queue_receiver.queue_name,
+            list(self.middleware_queue_sender.keys()),
+        )
         
         logging.info(f"Filtro inicializado. Tipo: {self.filter_type}, ID: {self.id}"
                      f" | Receiver Queue: {self.middleware_queue_receiver.queue_name}"
@@ -110,9 +131,30 @@ class Filter:
         # Support PERSISTENCE_DIR for testing (defaults to /data/persistence for production)
         persistence_dir = os.getenv("PERSISTENCE_DIR", "/data/persistence")
         self.persistence_service = PersistenceService(f"{persistence_dir}/filter_{self.filter_type}_{self.id}")
+        logging.info(
+            "Filter init: persistence paths | base:%s | state:%s | processing:%s | send:%s | buffer:%s",
+            persistence_dir,
+            self.persistence_service.state_commit_path,
+            self.persistence_service.processing_data_commit_path,
+            self.persistence_service.send_commit_path,
+            self.persistence_service.chunk_buffer_path,
+        )
+        # Crash injection marker so we only kill once (for tests)
+        self.kill_year_once = os.getenv("KILL_FILTER_YEAR_ONCE", "true").lower() == "true"
+        self.kill_year_marker = os.path.join(
+            os.path.dirname(self.persistence_service.state_commit_path),
+            "crash_once_marker",
+        )
+        self.kill_year_triggered = os.path.exists(self.kill_year_marker)
         self.handle_processing_recovery()
 
     def handle_processing_recovery(self):
+        logging.info(
+            "persistence_recovery_start | filter:%s | id:%s | state_path:%s",
+            self.filter_type,
+            self.id,
+            self.persistence_service.state_commit_path,
+        )
 
         # First, recover the working state (processed_ids, global_processed_ids, etc.)
         recovered_state_bytes = self.persistence_service.recover_working_state()
@@ -124,6 +166,12 @@ class Filter:
                            f"{len(self.working_state.global_processed_ids)} global processed")
             except Exception as e:
                 logging.warning(f"Could not recover working state: {e}")
+        else:
+            logging.info(
+                "persistence_recovery_no_state | filter:%s | id:%s",
+                self.filter_type,
+                self.id,
+            )
         
         # Then, recover any last processing chunk that was interrupted
         last_processing_chunk = self.persistence_service.recover_last_processing_chunk()
@@ -160,6 +208,13 @@ class Filter:
                 if self.working_state.can_send_end_message(client_id, table_type, total_expected, self.id):
                     total_not_sent = self.working_state.get_total_not_sent_chunks(client_id, table_type)
                     self._send_end_message(client_id, table_type, total_expected, total_not_sent)
+        logging.info(
+            "persistence_recovery_complete | filter:%s | id:%s | processed_ids:%d | global_ids:%d",
+            self.filter_type,
+            self.id,
+            len(self.working_state.processed_ids),
+            len(self.working_state.global_processed_ids),
+        )
 
     def run(self):
         logging.info(f"Filtro iniciado. Tipo: {self.filter_type}, ID: {self.id}")
@@ -278,17 +333,26 @@ class Filter:
         else:
             self.working_state.increase_not_sent_chunks(client_id, table_type, self.id, 1)
 
-        # Se commitea el working state
+        # 3. Send to next stage (only if there are filtered rows)
+        self.send_filtered_rows(filtered_rows, chunk, client_id, table_type, message_id)
+
+        # 4. Marca de procesado y persistencia lo más tarde posible
         self.working_state.processed_ids.add(msg_id)
         self.working_state.global_processed_ids.add(msg_id_str)
-        
+
         # Crash point for testing: before commit_working_state
         if os.getenv("CRASH_POINT") == "CRASH_BEFORE_COMMIT_WORKING_STATE":
             raise SystemExit("Simulated crash before commit_working_state")
         self.persistence_service.commit_working_state(self.working_state.to_bytes(), msg_id)
 
-        # 4. Send to next stage (only if there are filtered rows)
-        self.send_filtered_rows(filtered_rows, chunk, client_id, table_type, message_id)
+        # Test-only crash: kill year filter after first processed chunk
+        if (
+            self.filter_type == "year"
+            and self.id == 1
+            and self.kill_year_once
+            and not self.kill_year_triggered
+        ):
+            print("would kill year filter now")
 
         if self.working_state.end_is_received(client_id, table_type):
             total_expected = self.working_state.get_total_chunks_to_receive(client_id, table_type)

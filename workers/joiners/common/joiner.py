@@ -63,6 +63,14 @@ class Joiner:
         self.data_receiver_timer = None
         self.data_join_receiver_timer = None
 
+        # Test-only crash on first data chunk if env set
+        self.exit_on_first_data = os.getenv("JOINER_EXIT_ON_FIRST_DATA")
+        self.exit_on_first_data_triggered = False
+        if self.exit_on_first_data:
+            logging.info("JOINER_EXIT_ON_FIRST_DATA set (%s); will exit on first data chunk", self.exit_on_first_data)
+        else:
+            logging.info("JOINER_EXIT_ON_FIRST_DATA not set; normal joiner run")
+
         self.__running = True
         
         # Iniciar hilos para manejar data y join_data (eliminamos end_message_handler_thread)
@@ -405,6 +413,16 @@ class Joiner:
         self._check_crash_point("CRASH_BEFORE_PROCESS")
         chunk = ProcessBatchReader.from_bytes(data)
         crash_after_two_chunks("joiner")
+
+        if self.exit_on_first_data and not self.exit_on_first_data_triggered:
+            self.exit_on_first_data_triggered = True
+            logging.info(
+                "TEST_EXIT_JOINER_ON_FIRST_DATA | joiner:%s | client_id:%s | msg_id:%s",
+                self.joiner_type,
+                chunk.client_id(),
+                chunk.message_id(),
+            )
+            os._exit(137)
         
         with self.lock:
             # Idempotency

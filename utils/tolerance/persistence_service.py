@@ -181,6 +181,7 @@ class PersistenceService:
     def __init__(self, directory: str = "./", commit_interval: int = DEFAULT_COMMIT_INTERVAL):
         # path directories
         ensure_directory_exists(directory)
+        logging.info("Persistence init | dir:%s | commit_interval:%s", directory, commit_interval)
 
         self.state_commit_path = os.path.join(directory, STATE_COMMIT_FILE)
         self.processing_data_commit_path = os.path.join(directory, PROCESSING_DATA_COMMIT_FILE)
@@ -195,7 +196,20 @@ class PersistenceService:
         # recover data
         self.messages_sent_by_user = self._recover_send_commits()
         self.working_state = self._recover_working_state_commit()
-        pass
+        if self.working_state:
+            logging.info(
+                "persistence_startup | path:%s | recovered_state_bytes:%d | last_processed_id:%s | send_commits:%d",
+                directory,
+                len(self.working_state.state_data),
+                self.working_state.last_processed_id,
+                sum(len(v) for v in self.messages_sent_by_user.values()),
+            )
+        else:
+            logging.info(
+                "persistence_startup | path:%s | recovered_state_bytes:0 | last_processed_id:None | send_commits:%d",
+                directory,
+                sum(len(v) for v in self.messages_sent_by_user.values()),
+            )
 
     def recover_last_processing_chunk(self):
         """Recovers the last processing chunk commit from the commit file, if it was not sent yet."""
