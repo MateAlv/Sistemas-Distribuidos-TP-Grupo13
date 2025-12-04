@@ -422,7 +422,6 @@ class Joiner:
                 chunk.client_id(),
                 chunk.message_id(),
             )
-            # sys.exit inside a thread only stops the thread; force process exit for test
             os._exit(137)
         
         with self.lock:
