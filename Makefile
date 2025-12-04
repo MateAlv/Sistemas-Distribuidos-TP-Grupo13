@@ -84,6 +84,8 @@ test:
 		# Stop the stack and logging \
 		docker compose -f ${DOCKER} stop -t 1 >/dev/null 2>&1; \
 		kill $$LOG_PID 2>/dev/null; \
+		echo "Test finished. Waiting 30s before exit..."; \
+		sleep 30; \
 		echo "Test finished. Check logs.txt" \
 	'
 .PHONY: test
