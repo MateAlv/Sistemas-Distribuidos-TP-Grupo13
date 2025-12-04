@@ -25,7 +25,6 @@ from utils.file_utils.table_type import TableType, ResultTableType
 from middleware.middleware_interface import MessageMiddlewareQueue, MessageMiddlewareExchange, TIMEOUT, \
     MessageMiddlewareMessageError
 from utils.tolerance.persistence_service import PersistenceService
-from utils.tolerance.crash_helper import crash_after_two_chunks, crash_after_end_processed
 from .filter_stats_messages import FilterStatsMessage, FilterStatsEndMessage
 from .filter_working_state import FilterWorkingState
 from utils.results.result_table import Query1ResultRow
@@ -146,6 +145,11 @@ class Filter:
             "crash_once_marker",
         )
         self.kill_year_triggered = os.path.exists(self.kill_year_marker)
+
+        # Test-only kill switch on first data chunk (all filter types)
+        self.kill_on_first_chunk = os.getenv("FILTER_EXIT_ON_FIRST_CHUNK")
+        self.kill_on_first_chunk_triggered = False
+
         self.handle_processing_recovery()
 
     def handle_processing_recovery(self):
@@ -228,19 +232,12 @@ class Filter:
                 table_type = end_message.table_type()
                 self.working_state.end_received(client_id, table_type)
                 self.persistence_service.commit_working_state(self.working_state.to_bytes(), uuid.uuid4())
-                # REVISAR LÓGICA DE PERSISTENCIA Y RECOVERY DE END
             else:
-                # Crash point for testing: before commit_processing_chunk
-                if os.getenv("CRASH_POINT") == "CRASH_BEFORE_COMMIT_PROCESSING":
-                    raise SystemExit("Simulated crash before commit_processing_chunk")
                 
                 chunk = ProcessBatchReader.from_bytes(msg)
                 # Se commitea el chunk a procesar
                 self.persistence_service.commit_processing_chunk(chunk)
                 
-                # Crash point for testing: after commit_processing_chunk
-                if os.getenv("CRASH_POINT") == "CRASH_AFTER_COMMIT_PROCESSING":
-                    raise SystemExit("Simulated crash after commit_processing_chunk")
             results.append(msg)
             
         def stats_callback(msg): stats_results.append(msg)
@@ -311,6 +308,19 @@ class Filter:
         table_type = chunk.table_type()
         message_id = chunk.message_id()
 
+        # Test-only kill switch: exit on first data chunk (once per persisted state)
+        if self.kill_on_first_chunk and not self.kill_on_first_chunk_triggered:
+            self.kill_on_first_chunk_triggered = True
+            logging.info(
+                "TEST_EXIT_FILTER_ON_FIRST_CHUNK | type:%s | id:%s | shard:%s | cli_id:%s | msg_id:%s",
+                self.filter_type,
+                self.id,
+                self.shard_id,
+                client_id,
+                message_id,
+            )
+            os._exit(137)
+
         # Idempotency check
         msg_id = chunk.message_id()
         msg_id_str = str(msg_id)
@@ -322,37 +332,23 @@ class Filter:
             logging.info(f"action: global_duplicate_chunk_ignored | message_id:{msg_id}")
             return
 
-        crash_after_two_chunks("filter")
-
         # 1. Apply filter - returns filtered rows
         filtered_rows = self.process_chunk(chunk)
 
-        # 2. Update working state (in-memory)
+        # 2. Update working state
         if filtered_rows:
             self.working_state.increase_received_chunks(client_id, table_type, self.id, 1)
         else:
             self.working_state.increase_not_sent_chunks(client_id, table_type, self.id, 1)
 
-        # 3. Send to next stage (only if there are filtered rows)
+        # 3. Send to next stage 
         self.send_filtered_rows(filtered_rows, chunk, client_id, table_type, message_id)
 
-        # 4. Marca de procesado y persistencia lo más tarde posible
+        # 4. Mark as processed
         self.working_state.processed_ids.add(msg_id)
         self.working_state.global_processed_ids.add(msg_id_str)
 
-        # Crash point for testing: before commit_working_state
-        if os.getenv("CRASH_POINT") == "CRASH_BEFORE_COMMIT_WORKING_STATE":
-            raise SystemExit("Simulated crash before commit_working_state")
         self.persistence_service.commit_working_state(self.working_state.to_bytes(), msg_id)
-
-        # Test-only crash: kill year filter after first processed chunk
-        if (
-            self.filter_type == "year"
-            and self.id == 1
-            and self.kill_year_once
-            and not self.kill_year_triggered
-        ):
-            print("would kill year filter now")
 
         if self.working_state.end_is_received(client_id, table_type):
             total_expected = self.working_state.get_total_chunks_to_receive(client_id, table_type)
@@ -377,7 +373,6 @@ class Filter:
             
             if self.working_state.can_send_end_message(client_id, table_type, total_expected, self.id):
                 self._send_end_message(client_id, table_type, total_expected, total_not_sent)
-                crash_after_end_processed("filter")
 
     def send_filtered_rows(self, filtered_rows, chunk, client_id, table_type, message_id):
         

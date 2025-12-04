@@ -74,6 +74,8 @@ test:
 	@echo "Running tests... Logs redirected to logs.txt"
 	@bash -c ' \
 		> logs.txt; \
+		export FILTER_EXIT_ON_FIRST_CHUNK=1; \
+		export AGG_EXIT_ON_FIRST_CHUNK=1; \
 		# Launch stack detached (mirror test-monitor) \
 		docker compose -f ${DOCKER} up --build -d; \
 		# Stream logs (follows restarts) into the single log file with service prefixes \

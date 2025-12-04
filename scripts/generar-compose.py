@@ -223,6 +223,8 @@ def define_filter(meta: dict, compose: dict, nodo: str, worker_id: int, nodes: d
             f"PRODUCTS_SHARDS={nodes.get('AGGREGATOR_PRODUCTS', 1)}",
             f"PURCHASES_SHARDS={nodes.get('AGGREGATOR_PURCHASES', 1)}",
             f"TPV_SHARDS={nodes.get('AGGREGATOR_TPV', 1)}",
+            # Test-only crash hooks
+            "FILTER_EXIT_ON_FIRST_CHUNK=${FILTER_EXIT_ON_FIRST_CHUNK:-}",
         ],
         "volumes": [
             f".{config_path}:{config_path}:ro",
