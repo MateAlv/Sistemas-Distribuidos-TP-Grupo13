@@ -748,25 +748,25 @@ class TestAggregatorExtendedFaultTolerance(unittest.TestCase):
         6. Deterministic IDs + flags.
         Verify output ID is stable.
         """
-        chunk = self._create_test_chunk("msg_det")
         aggregator = Aggregator(self.config["agg_type"], self.config["agg_id"])
-        
-        mock_send = MagicMock()
-        aggregator.middleware_data_exchange.send = mock_send
-        
-        # Run 1
-        aggregator._apply_and_update_state(chunk)
-        args1, _ = mock_send.call_args
-        id1 = AggregatorDataMessage.decode(args1[0]).message_id
-        
-        # Run 2 (simulate crash/retry)
-        mock_send.reset_mock()
-        aggregator2 = Aggregator(self.config["agg_type"], self.config["agg_id"])
-        aggregator2.middleware_data_exchange.send = mock_send
-        aggregator2._apply_and_update_state(chunk)
-        args2, _ = mock_send.call_args
-        id2 = AggregatorDataMessage.decode(args2[0]).message_id
-        
+        # Seed accumulator for products
+        prod_acc = aggregator.working_state.get_product_accumulator(1)
+        prod_acc[(1, 2024, 1)] = {"quantity": 1, "subtotal": 2.0}
+
+        send_wrapper = MagicMock()
+        aggregator.middleware_queue_sender["to_absolute_max"] = MagicMock(send=send_wrapper)
+
+        def extract_id(payload: bytes):
+            from utils.processing.process_chunk import ProcessChunkHeader
+            return ProcessChunkHeader.deserialize(payload[: ProcessChunkHeader.HEADER_SIZE]).message_id
+
+        aggregator.publish_final_results(1, TableType.TRANSACTION_ITEMS)
+        id1 = extract_id(send_wrapper.call_args[0][0])
+
+        send_wrapper.reset_mock()
+        aggregator.publish_final_results(1, TableType.TRANSACTION_ITEMS)
+        id2 = extract_id(send_wrapper.call_args[0][0])
+
         self.assertEqual(id1, id2, "Output IDs must be deterministic")
 
     @patch('workers.aggregators.common.aggregator.MessageMiddlewareQueue')
@@ -870,18 +870,16 @@ class TestAggregatorExtendedFaultTolerance(unittest.TestCase):
 
     @patch('workers.aggregators.common.aggregator.MessageMiddlewareQueue')
     @patch('workers.aggregators.common.aggregator.MessageMiddlewareExchange')
-    def test_fanout_ack_products_vs_tpv(self, mock_exchange, mock_queue):
+    def test_fanout_disabled_no_commit_send_ack(self, mock_exchange, mock_queue):
         """
-        Products/Purchases should commit_send_ack on fanout; TPV should skip.
+        Fanout is disabled; commit_send_ack should not be invoked for PRODUCTS or TPV.
         """
-        # PRODUCTS
         agg_prod = Aggregator("PRODUCTS", 1)
         agg_prod.persistence.commit_send_ack = MagicMock()
         chunk = self._create_test_chunk("msg_fanout")
         agg_prod._apply_and_update_state(chunk)
-        self.assertTrue(agg_prod.persistence.commit_send_ack.called)
+        self.assertFalse(agg_prod.persistence.commit_send_ack.called)
 
-        # TPV
         os.environ["AGGREGATOR_SHARD_ID"] = "1"
         agg_tpv = Aggregator("TPV", 1)
         agg_tpv.persistence.commit_send_ack = MagicMock()

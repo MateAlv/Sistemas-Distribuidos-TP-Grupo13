@@ -543,6 +543,10 @@ class Filter:
                  
                  for i in range(1, target_shards + 1):
                      shard_total = self.shard_chunks_sent.get((next_stage, client_id, table_type, i), 0)
+                     if self.filter_type == "hour" and table_type == TableType.TRANSACTIONS:
+                        logging.info(
+                            f"DEBUGGING_QUERY_3 | hour_end_shard_totals | cli_id:{client_id} | shard:{i} | sent_chunks:{shard_total}"
+                        )
                      try:
                         logging.info(
                             f"action: sending_expected_for_next_stage | stage:{next_stage} | shard:{i} | cli_id:{client_id} | expected_chunks:{shard_total} | sender_filter:{self.id}"

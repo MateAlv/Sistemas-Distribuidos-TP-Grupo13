@@ -533,8 +533,23 @@ class MonitorNode:
     def _revive_node(self, node_id):
         self._publish_death(node_id)
         try:
+            import shutil
+            docker_path = shutil.which('docker')
+            logging.info(f"Docker path: {docker_path}")
+            # logging.info(f"Env: {os.environ}")
+
             logging.info(f"Restarting container {node_id}...")
-            subprocess.run(['docker', 'restart', node_id], check=False)
+            result = subprocess.run(
+                ['docker', 'restart', node_id],
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            if result.returncode == 0:
+                logging.info(f"Successfully restarted {node_id}. Output: {result.stdout}")
+            else:
+                logging.error(f"Failed to restart {node_id}. Return code: {result.returncode}. Stderr: {result.stderr}")
         except Exception as e:
             logging.error(f"Failed to restart {node_id}: {e}")
 

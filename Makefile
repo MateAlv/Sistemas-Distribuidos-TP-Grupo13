@@ -102,6 +102,10 @@ test-compilation:
 		client/main.py
 .PHONY: test-compilation
 
+test-monitor:
+	python3 monitor/tests/test_monitor_fault_tolerance.py
+.PHONY: test-monitor
+
 test-small:
 	# Clean up previous run
 	-docker compose -f ${DOCKER} down -v --remove-orphans
