@@ -39,6 +39,8 @@ class TestJoiner(Joiner):
     Test-friendly Joiner subclass that skips middleware initialization.
     Only initializes persistence services and working states for testing.
     """
+    __test__ = False
+    
     def __init__(self, joiner_type, expected_inputs):
         # Skip parent __init__ completely
         # Initialize only what's needed for persistence/state testing
