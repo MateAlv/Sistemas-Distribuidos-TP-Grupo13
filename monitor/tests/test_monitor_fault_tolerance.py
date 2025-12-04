@@ -175,6 +175,11 @@ def main():
         run_command("make clean-results", check=False)
         run_command("make down", check=False)
         run_command("docker rm -f rabbitmq", check=False)
+        # Reset logs.txt
+        try:
+            open("logs.txt", "w").close()
+        except Exception:
+            pass
 
         # 1. Generate docker-compose.yaml with no clients
         logging.info("Generating docker-compose.yaml (no clients)...")
