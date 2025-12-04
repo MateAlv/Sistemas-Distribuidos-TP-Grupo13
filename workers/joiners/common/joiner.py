@@ -70,7 +70,8 @@ class Joiner:
 
         # Persistence
         # Main persistence (Maximizer data)
-        base_dir = f"/data/persistence/joiner_{self.joiner_type}_{self.id}" if hasattr(self, "id") else f"/data/persistence/joiner_{self.joiner_type}"
+        persistence_dir = os.getenv("PERSISTENCE_DIR", "/data/persistence")
+        base_dir = f"{persistence_dir}/joiner_{self.joiner_type}_{self.id}" if hasattr(self, "id") else f"{persistence_dir}/joiner_{self.joiner_type}"
         self.persistence_main = PersistenceService(directory=os.path.join(base_dir, "main"))
         
         # Join persistence (Server data)
