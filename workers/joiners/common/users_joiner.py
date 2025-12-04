@@ -83,17 +83,14 @@ class UsersJoiner(Joiner):
         joiner_results = self.working_state_main.get_results(client_id)
         query4_results = {}
         
-        for message_id, row in joiner_results.items():
-            query4_result = Query4ResultRow(
-                store_id=row["store_id"],
-                store_name=row["store_name"],
-                user_id=row["user_id"],
-                birthdate=row["birthdate"],
-                purchase_quantity=row["purchases_made"]
-            )
+        # joiner_results is a dict: {message_id: [list of Query4ResultRow objects]}
+        for message_id, results_list in joiner_results.items():
             if message_id not in query4_results:
                 query4_results[message_id] = []
-            query4_results[message_id].append(query4_result)
+            
+            # results_list is already a list of Query4ResultRow objects from join_result
+            # No need to recreate them, just use them directly
+            query4_results[message_id].extend(results_list)
 
         if query4_results:
             # Enviar a cola específica del cliente

@@ -81,12 +81,17 @@ class StoresTpvJoiner(Joiner):
     def publish_results(self, client_id):
         joiner_results = self.working_state_main.get_results(client_id)
         query3_results = {}
-        for message_id, row in joiner_results.items():
-            # Row is already aggregated by Maximizer
-            query3_result = Query3ResultRow(row["store_id"], row["store_name"], row["tpv"], row["year_half"])
+        
+        # joiner_results is a dict: {message_id: [list of dict results from join_result]}
+        for message_id, results_list in joiner_results.items():
             if message_id not in query3_results:
                 query3_results[message_id] = []
-            query3_results[message_id].append(query3_result)
+            
+            # results_list is a list of dict results
+            for row in results_list:
+                # Row is already aggregated by Maximizer
+                query3_result = Query3ResultRow(row["store_id"], row["store_name"], row["tpv"], row["year_half"])
+                query3_results[message_id].append(query3_result)
 
         if query3_results:
             for message_id, results in query3_results.items():

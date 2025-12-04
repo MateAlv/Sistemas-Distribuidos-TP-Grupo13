@@ -47,25 +47,28 @@ class MenuItemsJoiner(Joiner):
         message_ids = set()
         joiner_results = self.working_state_main.get_results(client_id)
         
-        for message_id, row in joiner_results.items():
+        # joiner_results is a dict: {message_id: [list of dict results from join_result]}
+        for message_id, results_list in joiner_results.items():
             # INCLUIR CLIENT_ID EN LOS RESULTADOS
             if message_id not in sellings_results:
                 sellings_results[message_id] = []
             if message_id not in profit_results:
                 profit_results[message_id] = []
 
-            row["client_id"] = client_id
-            item_id = row["item_id"]  # Agregar esta línea
-            item_name = row["item_name"]
-            year_month = row["month_year"]
-            if row["quantity"] is not None:
-                sellings_quantity = row["quantity"]
-                max_selling = Query2_1ResultRow(item_id, item_name, sellings_quantity, year_month)
-                sellings_results[message_id].append(max_selling)
-            if row["subtotal"] is not None:
-                profit_sum = row["subtotal"]
-                max_profit = Query2_2ResultRow(item_id, item_name, profit_sum, year_month)
-                profit_results[message_id].append(max_profit)
+            # results_list is a list of dict results
+            for row in results_list:
+                row["client_id"] = client_id
+                item_id = row["item_id"]
+                item_name = row["item_name"]
+                year_month = row["month_year"]
+                if row["quantity"] is not None:
+                    sellings_quantity = row["quantity"]
+                    max_selling = Query2_1ResultRow(item_id, item_name, sellings_quantity, year_month)
+                    sellings_results[message_id].append(max_selling)
+                if row["subtotal"] is not None:
+                    profit_sum = row["subtotal"]
+                    max_profit = Query2_2ResultRow(item_id, item_name, profit_sum, year_month)
+                    profit_results[message_id].append(max_profit)
             message_ids.add(message_id)
 
         if not sellings_results and not profit_results:
