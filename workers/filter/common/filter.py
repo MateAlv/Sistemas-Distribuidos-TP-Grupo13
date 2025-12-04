@@ -157,11 +157,6 @@ class Filter:
                 own_received = self.working_state.get_own_chunks_received(client_id, table_type, self.id)
                 own_not_sent = self.working_state.get_own_chunks_not_sent(client_id, table_type, self.id)
 
-                if self.working_state.should_send_stats(client_id, table_type, own_received, own_not_sent):
-                    stats_msg = FilterStatsMessage(self.id, client_id, table_type, total_expected, own_received, own_not_sent)
-                    self.middleware_end_exchange.send(stats_msg.encode())
-                    self.working_state.mark_stats_sent(client_id, table_type, own_received, own_not_sent)
-
                 if self.working_state.can_send_end_message(client_id, table_type, total_expected, self.id):
                     total_not_sent = self.working_state.get_total_not_sent_chunks(client_id, table_type)
                     self._send_end_message(client_id, table_type, total_expected, total_not_sent)
@@ -207,22 +202,12 @@ class Filter:
         while self.__running:
 
 
-            # Skip end_exchange consumption in test mode (no downstream workers)
-            test_mode = os.getenv("TEST_MODE", "false").lower() == "true"
-            if not test_mode:
-                try:
-                    self.stats_timer = self.middleware_end_exchange.connection.call_later(TIMEOUT, stats_stop)
-                    self.middleware_end_exchange.start_consuming(stats_callback)
-                except (OSError, RuntimeError, MessageMiddlewareMessageError) as e:
-                    logging.error(f"Error en consumo: {e}")
-
-            # Skip coordination exchange in test mode (no coordination infrastructure)
-            if not test_mode:
-                try:
-                    self.consume_timer = self.middleware_queue_receiver.connection.call_later(TIMEOUT, stop)
-                    self.middleware_queue_receiver.start_consuming(callback)
-                except (OSError, RuntimeError, MessageMiddlewareMessageError) as e:
-                     logging.error(f"Error en consumo: {e}")
+            # Skip peer stats consumption entirely (rely on server-provided expected + own counts)
+            try:
+                self.consume_timer = self.middleware_queue_receiver.connection.call_later(TIMEOUT, stop)
+                self.middleware_queue_receiver.start_consuming(callback)
+            except (OSError, RuntimeError, MessageMiddlewareMessageError) as e:
+                 logging.error(f"Error en consumo: {e}")
 
             # Force-end consumption (not skipped in test mode as it's critical for cleanup)
             force_end_results = deque()
@@ -250,28 +235,6 @@ class Filter:
                     self.delete_client_data(client_id)
                 except Exception as e:
                     logging.error(f"action: force_end_error | type:{self.filter_type} | error:{e}")
-
-            while stats_results:
-
-                stats_msg = stats_results.popleft()
-                try:
-                    if stats_msg.startswith(b"STATS_END"):
-                        # Ignore peer STATS_END to avoid mixing replicas
-                        continue
-                    else:
-                        stats = FilterStatsMessage.decode(stats_msg)
-
-                        self.working_state.update_stats_received(stats.client_id, stats.table_type, stats)
-
-                        if self.working_state.can_send_end_message(stats.client_id, stats.table_type, stats.total_expected, self.id):
-                            chunks_not_sent = self.working_state.get_total_not_sent_chunks(stats.client_id, stats.table_type)
-                            self._send_end_message(stats.client_id, stats.table_type, stats.total_expected, chunks_not_sent)
-                        
-                        # Persist state after updating stats from other filters
-                        self.persistence_service.commit_working_state(self.working_state.to_bytes(), uuid.uuid4())
-
-                except Exception as e:
-                    logging.error(f"action: error_decoding_stats_message | error:{e}")
 
             while results:
 
@@ -446,34 +409,24 @@ class Filter:
         self.working_state.set_total_chunks_expected(client_id, table_type, total_expected)
         self.working_state.end_received(client_id, table_type)
 
-        # Only send stats if not already sent or if values changed - send OWN stats, not total
-        if self.working_state.should_send_stats(client_id, table_type, own_received, own_not_sent):
-            stats_msg = FilterStatsMessage(self.id, client_id, table_type, total_expected, own_received, own_not_sent)
-
-            logging.info(
-                f"action: sending_stats_message | type:{self.filter_type} | cli_id:{client_id} | file_type:{table_type.name} | chunks_received:{own_received} | chunks_not_sent:{own_not_sent} | chunks_expected:{total_expected}")
-            logging.debug(f"action: sending_stats_message_raw | msg:{stats_msg.encode()}")
-            self.middleware_end_exchange.send(stats_msg.encode())
-            # Publish coordination stats (throttled by should_send_stats)
-            try:
-                payload = {
-                    "type": MSG_WORKER_STATS,
-                    "id": str(self.id),
-                    "client_id": client_id,
-                    "stage": self.stage,
-                    "expected": total_expected,
-                    "chunks": own_received,
-                    "not_sent": own_not_sent,
-                    "sender": str(self.id),
-                    "shard": self.shard_id,
-                }
-                rk = f"coordination.barrier.{self.stage}.shard.{self.shard_id}"
-                self.middleware_coordination.send(json.dumps(payload).encode("utf-8"), routing_key=rk)
-                logging.debug(f"action: coordination_stats_sent | stage:{self.stage} | cli_id:{client_id} | received:{own_received} | not_sent:{own_not_sent}")
-            except Exception as e:
-                logging.error(f"action: coordination_stats_send_error | stage:{self.stage} | cli_id:{client_id} | error:{e}")
-            # Mark stats as sent with current values
-            self.working_state.mark_stats_sent(client_id, table_type, own_received, own_not_sent)
+        # Only send stats to monitor (no peer stats)
+        try:
+            payload = {
+                "type": MSG_WORKER_STATS,
+                "id": str(self.id),
+                "client_id": client_id,
+                "stage": self.stage,
+                "expected": total_expected,
+                "chunks": own_received,
+                "not_sent": own_not_sent,
+                "sender": str(self.id),
+                "shard": self.shard_id,
+            }
+            rk = f"coordination.barrier.{self.stage}.shard.{self.shard_id}"
+            self.middleware_coordination.send(json.dumps(payload).encode("utf-8"), routing_key=rk)
+            logging.debug(f"action: coordination_stats_sent | stage:{self.stage} | cli_id:{client_id} | received:{own_received} | not_sent:{own_not_sent}")
+        except Exception as e:
+            logging.error(f"action: coordination_stats_send_error | stage:{self.stage} | cli_id:{client_id} | error:{e}")
 
         # Persist state after handling END message and potential stats update
         self.persistence_service.commit_working_state(self.working_state.to_bytes(), uuid.uuid4())
@@ -610,7 +563,7 @@ class Filter:
                         logging.error(f"action: next_stage_stats_error | stage:{next_stage} | shard:{i} | error:{e}")
 
         end_msg = FilterStatsEndMessage(self.id, client_id, table_type)
-        self.middleware_end_exchange.send(end_msg.encode())
+        # Keep deletion local; do not broadcast to peers
         self.working_state.delete_client_stats_data(end_msg)
 
     def _end_message_to_send(self, client_id, table_type, total_expected, total_not_sent):
