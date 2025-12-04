@@ -192,6 +192,8 @@ def main():
                 pass
             time.sleep(2)
 
+        logging.info("Test completed or timed out. Waiting 30s before finishing...")
+        time.sleep(30)
         logging.info("Test completed or timed out. Check logs for pipeline result.")
 
     except Exception as e:
