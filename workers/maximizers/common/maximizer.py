@@ -5,7 +5,7 @@ from utils.processing.process_table import TableProcessRow
 from utils.processing.process_chunk import ProcessChunk
 from utils.processing.process_batch_reader import ProcessBatchReader
 from utils.file_utils.file_table import DateTime
-from utils.eof_protocol.end_messages import MessageEnd
+from utils.eof_protocol.end_messages import MessageEnd, MessageForceEnd
 from utils.file_utils.table_type import TableType
 from middleware.middleware_interface import MessageMiddlewareQueue, MessageMiddlewareExchange
 from collections import defaultdict, deque
@@ -129,8 +129,19 @@ class Maximizer:
         return self.maximizer_type == "TOP3" and self.role == "absolute"
     
     def delete_client_data(self, client_id: int):
-        """Elimina la información almacenada de un cliente"""
-        self.working_state.delete_client_data(client_id, self.maximizer_type, self.role == "absolute")
+        """Elimina la información almacenada de un cliente o de todos si es -1"""
+        if client_id == -1:
+            all_clients = list(self.working_state.get_all_client_ids())
+            for cid in all_clients:
+                self.working_state.delete_client_data(cid, self.maximizer_type, self.role == "absolute")
+                # Clean received shards tracking
+                if cid in self.received_shards:
+                    del self.received_shards[cid]
+        else:
+            self.working_state.delete_client_data(client_id, self.maximizer_type, self.role == "absolute")
+            # Clean received shards tracking
+            if client_id in self.received_shards:
+                del self.received_shards[client_id]
         
         logging.info(f"action: delete_client_data | type:{self.maximizer_type} | range:{self.maximizer_range} | client_id:{client_id}")
         self._save_state(uuid.uuid4())
@@ -215,6 +226,32 @@ class Maximizer:
                 self.data_receiver.start_consuming(callback)
             except Exception as e:
                 logging.error(f"action: error_during_consumption | type:{self.maximizer_type} | range:{self.maximizer_range} | error:{e}")
+
+            # Force-end consumption (critical for cleanup)
+            force_end_results = deque()
+            def force_end_callback(msg):
+                force_end_results.append(msg)
+            def force_end_stop():
+                if not self.force_end_exchange.connection or not self.force_end_exchange.connection.is_open:
+                    return
+                self.force_end_exchange.stop_consuming()
+
+            try:
+                force_end_timer = self.force_end_exchange.connection.call_later(TIMEOUT, force_end_stop)
+                self.force_end_exchange.start_consuming(force_end_callback)
+            except (OSError, RuntimeError, MessageMiddlewareMessageError) as e:
+                logging.error(f"Error consuming force_end: {e}")
+
+            # Process force-end messages
+            while force_end_results:
+                msg = force_end_results.popleft()
+                try:
+                    force_end_msg = MessageForceEnd.decode(msg)
+                    client_id = force_end_msg.client_id()
+                    logging.info(f"action: force_end_received | type:{self.maximizer_type} | range:{self.maximizer_range} | client_id:{client_id}")
+                    self.delete_client_data(client_id)
+                except Exception as e:
+                    logging.error(f"action: force_end_error | type:{self.maximizer_type} | range:{self.maximizer_range} | error:{e}")
 
     def _handle_end_message(self, raw_message: bytes):
         logging.info(f"action: recv_end_raw | type:{self.maximizer_type} | range:{self.maximizer_range} | raw:{raw_message}")

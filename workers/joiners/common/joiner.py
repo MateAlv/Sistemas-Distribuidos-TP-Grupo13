@@ -1,7 +1,7 @@
 
 from utils.processing.process_table import TableProcessRow
 from utils.processing.process_batch_reader import ProcessBatchReader
-from utils.eof_protocol.end_messages import MessageEnd
+from utils.eof_protocol.end_messages import MessageEnd, MessageForceEnd
 from middleware.middleware_interface import MessageMiddlewareMessageError, MessageMiddlewareExchange
 import logging
 import threading
@@ -305,6 +305,34 @@ class Joiner:
             except (OSError, RuntimeError, MessageMiddlewareMessageError) as e:
                 logging.error(f"Error en consumo: {e}")
 
+            # Force-end consumption (critical for cleanup)
+            force_end_results = deque()
+            def force_end_callback(msg):
+                force_end_results.append(msg)
+            def force_end_stop():
+                if not self.force_end_exchange.connection or not self.force_end_exchange.connection.is_open:
+                    return
+                self.force_end_exchange.stop_consuming()
+
+            test_mode = os.getenv("TEST_MODE", "false").lower() == "true"
+            if not test_mode:
+                try:
+                    force_end_timer = self.force_end_exchange.connection.call_later(TIMEOUT, force_end_stop)
+                    self.force_end_exchange.start_consuming(force_end_callback)
+                except (OSError, RuntimeError, MessageMiddlewareMessageError) as e:
+                    logging.error(f"Error consuming force_end: {e}")
+
+            # Process force-end messages
+            while force_end_results:
+                msg = force_end_results.popleft()
+                try:
+                    force_end_msg = MessageForceEnd.decode(msg)
+                    client_id = force_end_msg.client_id()
+                    logging.info(f"action: force_end_received | type:{self.joiner_type} | client_id:{client_id}")
+                    self.delete_client_data(client_id)
+                except Exception as e:
+                    logging.error(f"action: force_end_error | type:{self.joiner_type} | error:{e}")
+
             # Procesar datos del maximizer
             while results:
                 data = results.popleft()
@@ -566,6 +594,31 @@ class Joiner:
         with self.lock:
             self.working_state_main.reset()
             logging.info(f"action: joiner_reset_for_new_session | type:{self.joiner_type}")
+
+    def delete_client_data(self, client_id: int):
+        """
+        Deletes all data for a specific client or all clients if client_id==-1.
+        Persists the cleanup to prevent zombie data after crash.
+        """
+        with self.lock:
+            logging.info(f"action: delete_client_data | type:{self.joiner_type} | client_id:{client_id}")
+            
+            if client_id == -1:
+                # Delete all clients
+                self.working_state_main.reset()
+                self.working_state_join.reset()
+            else:
+                # Delete specific client
+                self.working_state_main.delete_client_data(client_id)
+                self.working_state_join.delete_client_data(client_id)
+            
+            # Persist cleanup
+            try:
+                self._save_state_main(uuid.uuid4())
+                self._save_state_join(uuid.uuid4())
+                logging.info(f"action: delete_client_data_persisted | type:{self.joiner_type} | client_id:{client_id}")
+            except Exception as e:
+                logging.error(f"Error persisting delete_client_data: {e}")
 
     def shutdown(self, signum=None, frame=None):
         logging.info(f"SIGTERM recibido: cerrando joiner {self.joiner_type}")

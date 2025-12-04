@@ -85,6 +85,32 @@ class JoinerMainWorkingState(WorkingState):
         if client_id in self.joiner_results:
             del self.joiner_results[client_id]
 
+    def delete_client_data(self, client_id: int):
+        """Delete all data for a specific client (used by force-end)."""
+        # Remove from all dictionaries and lists
+        if client_id in self.joiner_data_chunks:
+            del self.joiner_data_chunks[client_id]
+        if client_id in self.data:
+            del self.data[client_id]
+        if client_id in self.joiner_results:
+            del self.joiner_results[client_id]
+        if client_id in self.ready_to_join:
+            del self.ready_to_join[client_id]
+        if client_id in self.finished_senders:
+            del self.finished_senders[client_id]
+        if client_id in self.total_expected_chunks:
+            del self.total_expected_chunks[client_id]
+        
+        # Remove from lists
+        if client_id in self.client_end_messages_received:
+            self.client_end_messages_received.remove(client_id)
+        if client_id in self.completed_clients:
+            self.completed_clients.remove(client_id)
+        if client_id in self._pending_end_messages:
+            self._pending_end_messages.remove(client_id)
+        
+        # Note: processed_ids_main is not cleaned since it doesn't track client_id
+
     def reset(self):
         self.data.clear()
         self.joiner_data_chunks.clear()
@@ -178,6 +204,12 @@ class JoinerJoinWorkingState(WorkingState):
 
     def get_join_data_count(self, client_id):
         return len(self.joiner_data.get(client_id, {}))
+
+    def delete_client_data(self, client_id: int):
+        """Delete all join data for a specific client (used by force-end)."""
+        if client_id in self.joiner_data:
+            del self.joiner_data[client_id]
+        # Note: processed_ids_join is not cleaned since it doesn't track client_id
 
     def reset(self):
         self.joiner_data.clear()

@@ -20,6 +20,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY monitor/ .
 COPY utils/ ./utils/
+COPY middleware/ ./middleware/
 COPY config/ ./config/
 
 ENTRYPOINT ["python3", "main.py"]

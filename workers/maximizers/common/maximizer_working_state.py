@@ -86,6 +86,21 @@ class MaximizerWorkingState(WorkingState):
     def get_tpv_results(self, client_id):
         return self.tpv_aggregated.get(client_id, {})
 
+    def get_all_client_ids(self):
+        """Returns a set of all client IDs currently tracked."""
+        clients = set()
+        clients.update(self.sellings_max.keys())
+        clients.update(self.profit_max.keys())
+        clients.update(self.partial_ranges_seen.keys())
+        clients.update(self.partial_end_counts.keys())
+        clients.update(self.top3_by_store.keys())
+        clients.update(self.partial_top3_finished.keys())
+        clients.update(self.tpv_aggregated.keys())
+        clients.update(self.finished_senders.keys())
+        clients.update(self.total_expected_chunks.keys())
+        clients.update(self.clients_end_processed)
+        return clients
+
     def delete_client_data(self, client_id, maximizer_type, is_absolute):
         if maximizer_type == "MAX":
             if client_id in self.sellings_max:
@@ -110,6 +125,9 @@ class MaximizerWorkingState(WorkingState):
         to_remove_end = {(cid, lbl) for (cid, lbl) in self.end_sent if cid == client_id}
         self.results_sent -= to_remove_results
         self.end_sent -= to_remove_end
+        
+        # Cleanup processed flags
+        self.clients_end_processed.discard(client_id)
 
     # Multi-Sender Tracking Methods
     def is_sender_finished(self, client_id, sender_id):

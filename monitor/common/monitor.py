@@ -5,6 +5,7 @@ import os
 import json
 import subprocess
 import pika
+from middleware.middleware_interface import MessageMiddlewareExchange
 from collections import defaultdict
 from utils.protocol import (
     MSG_HEARTBEAT, MSG_ELECTION, MSG_COORDINATOR, MSG_DEATH,
@@ -19,6 +20,7 @@ from utils.protocol import (
     STAGE_JOIN_ITEMS, STAGE_JOIN_STORES_TPV, STAGE_JOIN_STORES_TOP3, STAGE_JOIN_USERS,
     STAGE_SERVER_RESULTS,
 )
+from utils.eof_protocol.end_messages import MessageForceEnd
 
 # --- Barrier Tracker ---
 class BarrierTracker:
@@ -185,6 +187,14 @@ class MonitorNode:
         
         # Persistence
         self.persistence_path = "/data/persistence/monitor_state.json"
+        self.force_end_exchange = MessageMiddlewareExchange(
+            "rabbitmq",
+            "FORCE_END_EXCHANGE",
+            "server",
+            "fanout",
+            routing_keys=[""],
+        )
+
         self._recover_state()
 
         # How often we forward (seconds). Default: 60s.
@@ -368,6 +378,11 @@ class MonitorNode:
                     if node_id == self.node_id: continue
                     if time.time() - last_seen > HEARTBEAT_TIMEOUT:
                         logging.info(f"Node {node_id} died. Reviving...")
+                        
+                        if node_id == "server":
+                            logging.critical("SERVER DIED! Triggering global cleanup...")
+                            self._trigger_force_end_all()
+                        
                         self._revive_node(node_id)
                         del self.nodes_last_seen[node_id]
             else:
@@ -588,6 +603,16 @@ class MonitorNode:
             connection.close()
         except Exception as e:
             logging.error(f"Death cert error: {e}")
+
+    def _trigger_force_end_all(self):
+        """Sends a force-end message with client_id=-1 to clean up all workers."""
+        try:
+            logging.info("action: triggering_force_end_all | reason: server_crash_detected")
+            msg = MessageForceEnd(-1)
+            self.force_end_exchange.send(msg.encode())
+            logging.info("action: force_end_all_sent")
+        except Exception as e:
+            logging.error(f"Error sending force_end_all: {e}")
 
     def _load_expected_from_config(self):
         cfg_path = os.environ.get("MONITOR_CONFIG_PATH", "/home/mate/FIUBA/sistemas-distribuidos/Sistemas-Distribuidos-TP-Grupo13/config/config.ini")

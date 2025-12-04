@@ -44,7 +44,7 @@ class AggregatorWorkingState(WorkingState):
         logging.info(f"action: deleting_client_stats_data | cli_id:{client_id}")
         try:
             with self._lock:
-                if client_id == 0:
+                if client_id == -1:
                     self.end_message_received = {}
                     self.chunks_received_per_client = {}
                     self.chunks_processed_per_client = {}

@@ -19,8 +19,14 @@ from utils.protocol import (
     MSG_WORKER_END,
     MSG_WORKER_STATS,
     STAGE_SERVER_RESULTS,
+    STAGE_SERVER_RESULTS,
     DEFAULT_SHARD,
+    HEARTBEAT_EXCHANGE,
+    MSG_HEARTBEAT,
+    HEARTBEAT_INTERVAL,
 )
+import pika
+import time
 from middleware.middleware_interface import MessageMiddlewareQueue, MessageMiddlewareExchange, TIMEOUT
 
 # Delimitadores / framing
@@ -101,7 +107,7 @@ class Server:
                 "server",
                 "fanout",
                 routing_keys=[""],
-            )
+        )
         self._force_end_lock = threading.Lock()
 
         self._threads = []
@@ -112,6 +118,44 @@ class Server:
                 logging.debug("action: save_dir_ready | dir: %s", SAVE_DIR)
             except Exception as e:
                 logging.warning("action: save_dir_create_fail | dir: %s | error: %r", SAVE_DIR, e)
+        
+        # Start heartbeat thread
+        self.heartbeat_thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
+        self.heartbeat_thread.start()
+
+    def _heartbeat_loop(self):
+        """Sends periodic heartbeats to the monitor."""
+        while self._running:
+            try:
+                connection = pika.BlockingConnection(pika.ConnectionParameters(host='rabbitmq', heartbeat=0))
+                channel = connection.channel()
+                channel.exchange_declare(exchange=HEARTBEAT_EXCHANGE, exchange_type='topic', durable=True)
+                
+                while self._running:
+                    msg = {
+                        'type': MSG_HEARTBEAT,
+                        'id': 'server',
+                        'timestamp': time.time(),
+                        'component': 'server',
+                        'is_leader': False
+                    }
+                    routing_key = "heartbeat.server"
+                    
+                    channel.basic_publish(
+                        exchange=HEARTBEAT_EXCHANGE,
+                        routing_key=routing_key,
+                        body=json.dumps(msg)
+                    )
+                    time.sleep(HEARTBEAT_INTERVAL)
+            except Exception as e:
+                logging.error(f"Server heartbeat error: {e}")
+                time.sleep(5)
+            finally:
+                try:
+                    if 'connection' in locals() and connection.is_open:
+                        connection.close()
+                except:
+                    pass
 
     # ---------------------------------------------------------------------
 

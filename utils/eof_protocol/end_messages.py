@@ -98,9 +98,9 @@ class MessageForceEnd:
     def encode(self) -> bytes:
         """
         Serializa el objeto a bytes con el formato:
-        b"END;{client_id};{table_type.value};{count}"
+        b"FORCE_END;{client_id}"
         """
-        return f"FORCE_END;{self._client_id};".encode("utf-8")
+        return f"FORCE_END;{self._client_id}".encode("utf-8")
     
     @classmethod
     def decode(cls, message: bytes) -> "MessageForceEnd":

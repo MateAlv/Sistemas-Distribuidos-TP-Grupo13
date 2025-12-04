@@ -173,6 +173,30 @@ class FilterWorkingState(WorkingState):
         except KeyError:
             pass
 
+    def delete_client_data(self, client_id: int):
+        """Delete all data for a specific client (used by force-end)."""
+        logging.info(f"action: delete_client_data | client_id:{client_id}")
+        
+        # Remove from all tracking dictionaries
+        for dictionary in [
+            self.chunks_received_per_filter,
+            self.chunks_not_sent_per_filter,
+            self.number_of_chunks_to_receive,
+            self.end_message_received,
+        ]:
+            if client_id in dictionary:
+                del dictionary[client_id]
+        
+        # Clean already_sent_stats (keyed by tuple)
+        keys_to_delete = [key for key in self.already_sent_stats if key[0] == client_id]
+        for key in keys_to_delete:
+            del self.already_sent_stats[key]
+        
+        # Note: We cannot clean processed_ids and global_processed_ids precisely
+        # since they don't track client_id. This is acceptable as memory growth is minimal.
+        
+        logging.info(f"action: filter_working_state_cleaned | client_id:{client_id}")
+
     def destroy(self):
         """Limpia todos los datos del estado de trabajo"""
         for attr in [
