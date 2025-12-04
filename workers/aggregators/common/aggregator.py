@@ -81,6 +81,11 @@ class Aggregator:
         self.shard_id = os.getenv("AGGREGATOR_SHARD_ID", None)
         self.shard_count = int(os.getenv("AGGREGATOR_SHARDS", "1"))
 
+        # Test-only crash hook
+        self.exit_on_first_chunk = os.getenv("AGG_EXIT_ON_FIRST_CHUNK")
+        self.exit_on_first_chunk_triggered = False
+        self.exit_marker = None
+
         # Initialize persistence with chunk buffering
         # Support PERSISTENCE_DIR for testing (defaults to /data/persistence for production)
         persistence_dir = os.getenv("PERSISTENCE_DIR", "/data/persistence")
@@ -89,6 +94,14 @@ class Aggregator:
             f"{persistence_dir}/aggregator_{self.aggregator_type}_{self.aggregator_id}",
             commit_interval=commit_interval
         )
+        # Exit marker path (after persistence dir known)
+        self.exit_marker = os.path.join(
+            f"{persistence_dir}/aggregator_{self.aggregator_type}_{self.aggregator_id}",
+            "exit_once.marker",
+        )
+        if self.exit_on_first_chunk and os.path.exists(self.exit_marker):
+            self.exit_on_first_chunk_triggered = True
+            logging.info("AGG_EXIT_ON_FIRST_CHUNK marker found; skipping crash for this process")
         self._recover_state()
 
 
@@ -302,18 +315,7 @@ class Aggregator:
             self.working_state.force_delete_client_stats_data(client_id)
 
         def chunk_callback(msg):
-            """
-            Callback pattern:
-            1. Pop de cola → x (done by RabbitMQ)
-            2. [CRASH POINT] SE ROMPE ANTES DEL COMMIT
-            3. append_chunk_to_buffer(x)
-            4. result.append(x)
-            5. [CRASH POINT] SE ROMPE ANTES DEL ACK
-            6. ACK a cola - RabbitMQ (handled automatically by pika)
-            7. [CRASH POINT] SE ROMPE DESPUÉS DEL COMMIT (before processing)
-            """
-            # 2. [CRASH POINT] SE ROMPE ANTES DEL COMMIT
-            
+
             if msg.startswith(b"END;"):
                 # END messages: persist immediately (no buffering)
                 end_message = MessageEnd.decode(msg)
@@ -321,28 +323,37 @@ class Aggregator:
                 table_type = end_message.table_type()
                 total_expected = end_message.total_chunks()
                 self.working_state.mark_end_message_received(client_id, table_type)
+                if self.exit_on_first_chunk and not self.exit_on_first_chunk_triggered:
+                    self.exit_on_first_chunk_triggered = True
+                    logging.info(
+                        "TEST_EXIT_AGGREGATOR_ON_END | agg:%s_%s | client_id:%s | table_type:%s",
+                        self.aggregator_type,
+                        self.aggregator_id,
+                        end_message.client_id(),
+                        end_message.table_type(),
+                    )
+                    try:
+                        if self.exit_marker:
+                            os.makedirs(os.path.dirname(self.exit_marker), exist_ok=True)
+                            with open(self.exit_marker, "w", encoding="utf-8") as f:
+                                f.write("exited")
+                    except Exception as e:
+                        logging.error("Could not write exit marker: %s", e)
+                    os._exit(137)
+
                 self.working_state.set_chunks_to_receive(client_id, table_type, total_expected)
                 self._save_state(uuid.uuid4())
             else:
-                # 3. append_chunk_to_buffer(x)
                 chunk = ProcessBatchReader.from_bytes(msg)
                 self.persistence.append_chunk_to_buffer(chunk)
             
             # 4. result.append(x)
             data_chunks.append(msg)
             
-            # 5. [CRASH POINT] SE ROMPE ANTES DEL ACK
-            # 6. ACK a cola - RabbitMQ (automatic after callback returns)
-            # 7. [CRASH POINT] SE ROMPE DESPUÉS DEL COMMIT
             
         def coord_callback(msg):
             coord_results.append(msg)
 
-        def data_stop():
-            self.middleware_data_exchange.stop_consuming()
-
-        # def stats_stop():
-        #     self.middleware_stats_exchange.stop_consuming()
 
         def chunk_stop():
             self.middleware_queue_receiver.stop_consuming()
@@ -361,7 +372,7 @@ class Aggregator:
                 logging.error(
                     f"action: data_consume_error | type:{self.aggregator_type} | agg_id:{self.aggregator_id} | error:{e}"
                 )
-            
+
             try:
                 self.force_end_exchange.start_consuming(force_end_callback)
             except Exception as e:
@@ -410,20 +421,14 @@ class Aggregator:
                 client_id = data.get("client_id")
                 key = (client_id, stage, shard)
                 
-                # CRITICAL: Check and mark as processed BEFORE sending
-                # This prevents race condition where multiple barriers publish partial data
                 if key in self.barrier_forwarded:
                     logging.info(f"action: barrier_already_processed | key:{key}")
                     return
                 
-                # Mark IMMEDIATELY to prevent concurrent barrier forwards
                 self.barrier_forwarded.add(key)
                 
                 total_chunks = data.get("total_chunks", 0)
-                # [NEW] Barrier Forward Handling
-                # When Monitor says "Barrier Reached", we flush results and send END.
                 
-                # Map stage to table_type
                 if self.aggregator_type == "PRODUCTS":
                     table_type = TableType.TRANSACTION_ITEMS
                 elif self.aggregator_type in ["PURCHASES", "TPV"]:
@@ -456,18 +461,10 @@ class Aggregator:
             f"| file_type:{table_type} | total_chunks_expected:{total_expected}"
         )
 
-        # IMPORTANT: Do NOT process buffer here!
-        # Chunks may still arrive AFTER this END message due to network delays.
-        # Buffer will be processed when BARRIER arrives (in _send_end_message).
-        
-        # Mark END received and persist (FT improvement)
         self.working_state.mark_end_message_received(client_id, table_type)
         self.working_state.set_chunks_to_receive(client_id, table_type, total_expected)
         self._save_state(uuid.uuid4())
 
-        # Send stats to Monitor
-        # Note: Stats may be incomplete if chunks still arriving, but that's OK
-        # Monitor will wait for all aggregators to report before triggering barrier
         self._send_stats_to_monitor(client_id, table_type)
         # Announce END to Monitor - Monitor will coordinate barrier and trigger publish
         self._send_end_to_monitor(client_id, table_type, total_expected)

@@ -263,6 +263,7 @@ def define_aggregator(meta: dict, compose: dict, nodo: str, worker_id: int, node
             f"CONTAINER_NAME={service_name}",
             f"AGGREGATOR_SHARD_ID={worker_id}",
             f"AGGREGATOR_SHARDS={nodes.get(nodo, 1)}",
+            "AGG_EXIT_ON_FIRST_CHUNK=${AGG_EXIT_ON_FIRST_CHUNK:-}",
         ],
         "volumes": [
             "./data/persistence:/data/persistence",
@@ -561,6 +562,7 @@ def define_chaos_monkey(meta: dict, compose: dict, client_amount: int = 0):
             f"CHAOS_ENABLED={meta.get('chaos_enabled', 'false')}",
             f"CHAOS_INTERVAL={meta.get('chaos_interval', '30')}",
             "CONTAINER_NAME=chaos_monkey",
+            "AGG_EXIT_ON_FIRST_CHUNK=${AGG_EXIT_ON_FIRST_CHUNK:-}",
         ],
         "volumes": [
             "/var/run/docker.sock:/var/run/docker.sock",

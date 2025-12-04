@@ -239,7 +239,8 @@ class Joiner:
             try:
                 self.data_join_receiver.start_consuming(callback)
             except (OSError, RuntimeError, MessageMiddlewareMessageError) as e:
-                logging.error(f"Error en consumo: {e}")
+                continue
+            #                 logging.error(f"Error en consumo de join_data: {e}")
 
             while results:
                 data = results.popleft()
