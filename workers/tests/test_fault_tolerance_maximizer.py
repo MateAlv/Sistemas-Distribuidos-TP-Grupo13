@@ -1,496 +1,311 @@
-"""
-Comprehensive Mock-based Fault Tolerance Tests for Maximizer Worker
-
-Tests verify that for each crash point, the maximizer can:
-1. Process multiple messages
-2. Crash at a specific point
-3. Recover and continue
-4. Produce EXACTLY the same result as if no crash occurred
-
-Crash Points Tested:
-1. CRASH_BEFORE_COMMIT_PROCESSING - Before persisting chunk
-2. CRASH_AFTER_COMMIT_PROCESSING - After persisting chunk
-3. CRASH_BEFORE_COMMIT_WORKING_STATE - Before persisting state  
-4. CRASH_BEFORE_COMMIT_SEND_ACK - Before sending message
-5. CRASH_AFTER_COMMIT_SEND_ACK - After sending message
-"""
-import unittest
 import os
-import tempfile
-import shutil
-from unittest.mock import Mock, patch, MagicMock, call
-import datetime as dt_module
-
-# Import maximizer and dependencies
 import sys
-from pathlib import Path
-# Adjust path - now we're in workers/tests, need to go up to project root
-sys.path.append(str(Path(__file__).parent.parent.parent))
+import datetime
+import unittest
+from unittest.mock import MagicMock, patch
+from collections import defaultdict
+
+# Add root directory
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..")))
+
+# Mock pika before import
+sys.modules["pika"] = MagicMock()
 
 from workers.maximizers.common.maximizer import Maximizer
+from workers.maximizers.common.maximizer_working_state import MaximizerWorkingState
 from utils.processing.process_chunk import ProcessChunk, ProcessChunkHeader
-from utils.processing.process_table import TransactionItemsProcessRow, DateTime
+from utils.processing.process_table import (
+    TransactionItemsProcessRow,
+    TPVProcessRow,
+)
 from utils.file_utils.table_type import TableType
-from utils.eof_protocol.end_messages import MessageEnd
+from utils.file_utils.file_table import DateTime
 from utils.common.processing_types import MonthYear
-from utils.processing.process_batch_reader import ProcessBatchReader
+from utils.eof_protocol.end_messages import MessageEnd
 
 
-class TestMaximizerFaultToleranceComprehensive(unittest.TestCase):
-    """Comprehensive fault tolerance tests covering all crash points"""
-
+class TestMaximizerFaultTolerance(unittest.TestCase):
     def setUp(self):
-        """Set up test environment with mocks"""
-        # Create temporary persistence directory
-        self.temp_dir = tempfile.mkdtemp(prefix="maximizer_test_")
-        os.environ["PERSISTENCE_DIR"] = self.temp_dir
-        os.environ["WORKER_ID"] = "1"
-        os.environ["CONTAINER_NAME"] = "test_maximizer"
-        
-        # Clear any crash points
-        if "CRASH_POINT" in os.environ:
-            del os.environ["CRASH_POINT"]
-        
-        # Mock configuration - using MAX partial as example
-        self.config = {
-            "maximizer_type": "MAX",
-            "maximizer_range": "partial",
-            "expected_inputs": 1
-        }
+        self.env_patcher = patch.dict(
+            os.environ,
+            {
+                "AGGREGATOR_SHARDS": "1",
+                "MAX_SHARDS": "1",
+                "TOP3_SHARDS": "1",
+                "TPV_SHARDS": "1",
+            },
+        )
+        self.env_patcher.start()
+
+        # PersistenceService mock (avoid disk)
+        self.persistence_patcher = patch("workers.maximizers.common.maximizer.PersistenceService")
+        self.MockPersistence = self.persistence_patcher.start()
+        self.mock_persistence = self.MockPersistence.return_value
+        self.mock_persistence.recover_working_state.return_value = None
+        self.mock_persistence.recover_last_processing_chunk.return_value = None
+        self.mock_persistence.commit_processing_chunk = MagicMock()
+        self.mock_persistence.commit_working_state = MagicMock()
+        self.mock_persistence.clear_processing_commit = MagicMock()
+
+        # Middleware mocks
+        self.queue_patcher = patch("workers.maximizers.common.maximizer.MessageMiddlewareQueue")
+        self.exchange_patcher = patch("workers.maximizers.common.maximizer.MessageMiddlewareExchange")
+        self.MockQueue = self.queue_patcher.start()
+        self.MockExchange = self.exchange_patcher.start()
 
     def tearDown(self):
-        """Clean up test environment"""
-        # Remove temporary directory
-        if os.path.exists(self.temp_dir):
-            shutil.rmtree(self.temp_dir, ignore_errors=True)
-        
-        # Clear environment variables
-        if "CRASH_POINT" in os.environ:
-            del os.environ["CRASH_POINT"]
-        if "PERSISTENCE_DIR" in os.environ:
-            del os.environ["PERSISTENCE_DIR"]
+        self.env_patcher.stop()
+        self.persistence_patcher.stop()
+        self.queue_patcher.stop()
+        self.exchange_patcher.stop()
 
-    def _create_test_chunk(self, client_id=1, message_id="msg_001", num_rows=3):
-        """Helper to create a test ProcessChunk"""
-        import uuid
-        
-        # Convert string message_id to UUID
-        if isinstance(message_id, str):
-            message_id = uuid.UUID(int=hash(message_id) & (2**128 - 1))
-        
-        header = ProcessChunkHeader(
-            client_id=client_id,
-            message_id=message_id,
-            table_type=TableType.TRANSACTION_ITEMS
-        )
-        
-        rows = []
-        for i in range(num_rows):
-            # Create DateTime using date and time objects
-            date_obj = dt_module.date(2020, 1, i+1)
-            time_obj = dt_module.time(12, 0, 0)
-            
+    def _make_tx_chunk(self, table_type=TableType.TRANSACTION_ITEMS, client_id=1, message_id=None):
+        header = ProcessChunkHeader(client_id=client_id, table_type=table_type, message_id=message_id)
+        if table_type == TableType.TRANSACTION_ITEMS:
             row = TransactionItemsProcessRow(
-                transaction_id=f"tx_{i}",
-                item_id=i+1,
-                quantity=10 + i,
-                subtotal=100.0 + i,
-                created_at=DateTime(date_obj, time_obj)
+                transaction_id="tx1",
+                item_id=100,
+                quantity=5,
+                subtotal=50.0,
+                created_at=DateTime(datetime.date(2024, 1, 1), datetime.time(10, 0)),
             )
-            rows.append(row)
-        
-        return ProcessChunk(header, rows)
-
-    def _process_chunks_no_fault(self, chunks):
-        """Helper: Process chunks without any faults (baseline)"""
-        with patch('workers.maximizers.common.maximizer.MessageMiddlewareQueue'), \
-             patch('workers.maximizers.common.maximizer.MessageMiddlewareExchange'):
-            
-            maximizer_worker = Maximizer(
-                self.config["maximizer_type"], 
-                self.config["maximizer_range"], 
-                self.config["expected_inputs"]
+            return ProcessChunk(header, [row])
+        elif table_type == TableType.TPV:
+            row = TPVProcessRow(
+                store_id=1,
+                tpv=10.0,
+                year_half="2024-H1",
+                shard_id="1",
             )
-            results = []
-            
-            for chunk in chunks:
-                # Apply maximizer operation
-                maximizer_worker.apply(chunk.client_id(), chunk)
-                maximizer_worker.working_state.mark_processed(chunk.message_id())
-                results.append((chunk.message_id(), len(chunk.rows())))
-            
-            return results
+            return ProcessChunk(header, [row])
+        return ProcessChunk(header, [])
 
-    @patch('workers.maximizers.common.maximizer.MessageMiddlewareQueue')
-    @patch('workers.maximizers.common.maximizer.MessageMiddlewareExchange')
-    def test_crash_before_commit_processing_multi_message_recovery(self, mock_exchange, mock_queue):
+    def test_process_chunk_persists_and_clears_commit(self):
+        maximizer = Maximizer("MAX", "absolute")
+        chunk = self._make_tx_chunk()
+        maximizer._handle_data_chunk(chunk.serialize())
+
+        self.mock_persistence.commit_processing_chunk.assert_called_once()
+        self.mock_persistence.commit_working_state.assert_called()
+        self.mock_persistence.clear_processing_commit.assert_called_once()
+        self.assertIn(chunk.message_id(), maximizer.working_state.processed_ids)
+
+    def test_invalid_table_type_clears_commit(self):
+        maximizer = Maximizer("MAX", "absolute")
+        bad_chunk = self._make_tx_chunk(table_type=TableType.TPV)
+        maximizer._handle_data_chunk(bad_chunk.serialize())
+
+        self.mock_persistence.commit_processing_chunk.assert_called()
+        self.mock_persistence.clear_processing_commit.assert_called()
+        self.mock_persistence.commit_working_state.assert_not_called()
+
+    def test_deterministic_ids_for_all_outputs(self):
+        client_id = 1
+
+        # MAX absolute
+        max_abs = Maximizer("MAX", "absolute")
+        max_abs.data_sender.send = MagicMock()
+        max_abs.working_state.sellings_max[client_id][(1, MonthYear(1, 2024))] = 10
+        max_abs.publish_absolute_max_results(client_id)
+        id1 = ProcessChunkHeader.deserialize(max_abs.data_sender.send.call_args[0][0][:28]).message_id
+        max_abs.publish_absolute_max_results(client_id)
+        id2 = ProcessChunkHeader.deserialize(max_abs.data_sender.send.call_args[0][0][:28]).message_id
+        self.assertEqual(id1, id2)
+
+        # TOP3 absolute
+        top_abs = Maximizer("TOP3", "absolute")
+        top_abs.data_sender.send = MagicMock()
+        top_abs.working_state.top3_by_store[client_id][1] = defaultdict(int, {10: 5})
+        top_abs.publish_absolute_top3_results(client_id)
+        t1 = ProcessChunkHeader.deserialize(top_abs.data_sender.send.call_args[0][0][:28]).message_id
+        top_abs.publish_absolute_top3_results(client_id)
+        t2 = ProcessChunkHeader.deserialize(top_abs.data_sender.send.call_args[0][0][:28]).message_id
+        self.assertEqual(t1, t2)
+
+        # TPV absolute
+        tpv_abs = Maximizer("TPV", "absolute")
+        tpv_abs.data_sender.send = MagicMock()
+        tpv_abs.working_state.tpv_aggregated[client_id][(1, "2024-H1")] = 10.0
+        tpv_abs.publish_tpv_results(client_id)
+        p1 = ProcessChunkHeader.deserialize(tpv_abs.data_sender.send.call_args[0][0][:28]).message_id
+        tpv_abs.publish_tpv_results(client_id)
+        p2 = ProcessChunkHeader.deserialize(tpv_abs.data_sender.send.call_args[0][0][:28]).message_id
+        self.assertEqual(p1, p2)
+
+    def test_idempotent_results_and_end_skip_on_flags(self):
+        maximizer = Maximizer("MAX", "absolute")
+        client_id = 1
+        label_end = f"end-{maximizer.stage}"
+        maximizer.working_state.mark_results_sent(client_id, maximizer._results_label())
+        maximizer.working_state.mark_end_sent(client_id, label_end)
+
+        maximizer.data_sender.send = MagicMock()
+        with patch.object(maximizer, "delete_client_data") as mock_del:
+            maximizer.process_client_end(client_id, TableType.TRANSACTION_ITEMS)
+            # No sends because flags already set
+            maximizer.data_sender.send.assert_not_called()
+            mock_del.assert_called_once()
+            self.assertTrue(maximizer.working_state.is_client_end_processed(client_id))
+
+    def test_resume_pending_finalization_resends(self):
+        client_id = 1
+        maximizer = Maximizer("TPV", "absolute")
+        maximizer.expected_shards = 1
+        maximizer.working_state.finished_senders[client_id].add("agg1")
+        maximizer.working_state.tpv_aggregated[client_id][(1, "2024-H1")] = 5.0
+        maximizer.data_sender.send = MagicMock()
+
+        with patch.object(maximizer, "delete_client_data") as mock_del:
+            maximizer._resume_pending_finalization()
+            mock_del.assert_called_once()
+            # After finalization (before delete), end was marked processed
+            self.assertTrue(maximizer.working_state.is_client_end_processed(client_id))
+
+    def test_process_client_end_marks_after_send(self):
+        maximizer = Maximizer("MAX", "absolute")
+        client_id = 1
+        maximizer.working_state.sellings_max[client_id][(1, MonthYear(1, 2024))] = 5
+        maximizer.data_sender.send = MagicMock()
+
+        with patch.object(maximizer, "delete_client_data") as mock_del:
+            maximizer.process_client_end(client_id, TableType.TRANSACTION_ITEMS)
+            self.assertTrue(maximizer.working_state.is_client_end_processed(client_id))
+            mock_del.assert_called_once()
+
+    def test_retry_after_publish_failure(self):
+        maximizer = Maximizer("MAX", "absolute")
+        client_id = 1
+        maximizer.working_state.sellings_max[client_id][(1, MonthYear(1, 2024))] = 5
+        maximizer.data_sender.send = MagicMock()
+
+        original_publish = maximizer.publish_absolute_max_results
+        publish_state = {"first": True}
+
+        def side_effect(*args, **kwargs):
+            if publish_state["first"]:
+                publish_state["first"] = False
+                raise Exception("boom")
+            return original_publish(*args, **kwargs)
+
+        with patch.object(maximizer, "publish_absolute_max_results", side_effect=side_effect) as mock_pub, \
+             patch.object(maximizer, "_send_end_message", wraps=maximizer._send_end_message) as mock_end, \
+             patch.object(maximizer, "delete_client_data") as mock_del:
+            with self.assertRaises(Exception):
+                maximizer.process_client_end(client_id, TableType.TRANSACTION_ITEMS)
+            self.assertFalse(maximizer.working_state.is_client_end_processed(client_id))
+
+            maximizer.process_client_end(client_id, TableType.TRANSACTION_ITEMS)
+            self.assertTrue(maximizer.working_state.is_client_end_processed(client_id))
+            self.assertEqual(mock_pub.call_count, 2)
+            mock_end.assert_called()
+            mock_del.assert_called_once()
+
+    def test_send_end_idempotent(self):
+        maximizer = Maximizer("MAX", "absolute")
+        maximizer.data_sender.send = MagicMock()
+        client_id = 1
+        maximizer._send_end_message(client_id, TableType.TRANSACTION_ITEMS, "joiner", 0, "abs")
+        maximizer._send_end_message(client_id, TableType.TRANSACTION_ITEMS, "joiner", 0, "abs")
+        self.assertEqual(maximizer.data_sender.send.call_count, 1)
+
+    def test_resume_when_only_end_missing(self):
+        client_id = 1
+        maximizer = Maximizer("TPV", "absolute")
+        maximizer.expected_shards = 1
+        maximizer.working_state.finished_senders[client_id].add("agg1")
+        maximizer.working_state.tpv_aggregated[client_id][(1, "2024-H1")] = 5.0
+        maximizer.working_state.mark_results_sent(client_id, maximizer._results_label())
+        maximizer.data_sender.send = MagicMock()
+
+        with patch.object(maximizer, "delete_client_data") as mock_del:
+            maximizer._resume_pending_finalization()
+            mock_del.assert_called_once()
+            self.assertTrue(maximizer.working_state.is_client_end_processed(client_id))
+
+    def test_completion_despite_shard_tracking_loss(self):
         """
-        Test Crash Point 1: CRASH_BEFORE_COMMIT_PROCESSING
-        
-        Scenario:
-        1. Process 3 messages successfully  
-        2. Process 4th message, crash BEFORE commit_processing_chunk
-        3. Restart maximizer
-        4. Verify 4th message is redelivered and processed
-        5. Result identical to no-fault execution
-        """
-        # Create 4 test chunks
-        chunks = [self._create_test_chunk(message_id=f"msg_{i}") for i in range(4)]
-        
-        # Get baseline (no fault)
-        baseline_results = self._process_chunks_no_fault(chunks)
-        
-        # PHASE 1: Process first 3 successfully
-        maximizer_worker = Maximizer(
-            self.config["maximizer_type"], 
-            self.config["maximizer_range"], 
-            self.config["expected_inputs"]
-        )
-        for i in range(3):
-            maximizer_worker.apply(chunks[i].client_id(), chunks[i])
-            maximizer_worker.working_state.mark_processed(chunks[i].message_id())
-            maximizer_worker.persistence_service.commit_working_state(
-                maximizer_worker.working_state.to_bytes(), 
-                chunks[i].message_id()
-            )
-        
-        # Verify 3 chunks processed
-        self.assertEqual(len(maximizer_worker.working_state.processed_ids), 3)
-        
-        # PHASE 2: Set crash point and simulate processing 4th message
-        os.environ["CRASH_POINT"] = "CRASH_BEFORE_COMMIT_PROCESSING"
-        
-        # PHASE 3: Restart maximizer (simulates recovery)
-        del os.environ["CRASH_POINT"]  # Remove crash point for recovery
-        maximizer_worker2 = Maximizer(
-            self.config["maximizer_type"], 
-            self.config["maximizer_range"], 
-            self.config["expected_inputs"]
-        )
-        
-        # Verify recovered state has 3 processed messages
-        self.assertEqual(len(maximizer_worker2.working_state.processed_ids), 3)
-        
-        # Process 4th message after recovery
-        maximizer_worker2.apply(chunks[3].client_id(), chunks[3])
-        maximizer_worker2.working_state.mark_processed(chunks[3].message_id())
-        
-        # VERIFICATION: Result identical to baseline
-        self.assertEqual(len(maximizer_worker2.working_state.processed_ids), 4)
-
-    @patch('workers.maximizers.common.maximizer.MessageMiddlewareQueue')
-    @patch('workers.maximizers.common.maximizer.MessageMiddlewareExchange')
-    def test_processing_commit_cleared_after_success(self, mock_exchange, mock_queue):
-        """
-        Ensure processing commit is cleared after handling a chunk, so recovery won't loop forever.
-        """
-        chunk = self._create_test_chunk(message_id="msg_processing_commit")
-
-        maximizer_worker = Maximizer(
-            self.config["maximizer_type"],
-            self.config["maximizer_range"],
-            self.config["expected_inputs"]
-        )
-
-        # Process the chunk end-to-end
-        maximizer_worker._handle_data_chunk(chunk.serialize())
-
-        # After successful handling, the processing commit should not linger
-        recovered = maximizer_worker.persistence.recover_last_processing_chunk()
-        self.assertIsNone(recovered, "Processing commit should be cleared after successful handling")
-        self.assertIn(chunk.message_id(), maximizer_worker.working_state.processed_ids)
-
-    @patch('workers.maximizers.common.maximizer.MessageMiddlewareQueue')
-    @patch('workers.maximizers.common.maximizer.MessageMiddlewareExchange')
-    def test_absolute_max_results_use_deterministic_msg_id(self, mock_exchange, mock_queue):
-        """
-        Publishing results twice for the same client should use a stable message_id (idempotent resend).
+        Even if received_shards is lost on crash, END counts in working_state should drive completion.
         """
         client_id = 1
-        maximizer_worker = Maximizer(
-            self.config["maximizer_type"],
-            "absolute",  # force absolute mode
-            self.config["expected_inputs"]
-        )
+        maximizer = Maximizer("TPV", "absolute")
+        maximizer.expected_shards = 1
+        # Process data to populate state and in-memory received_shards
+        chunk = self._make_tx_chunk(table_type=TableType.TPV, client_id=client_id)
+        chunk.rows[0].shard_id = "shard_1"
+        maximizer._handle_data_chunk(chunk.serialize())
+        self.assertTrue(len(maximizer.received_shards[client_id]) > 0)
 
-        # Seed state with deterministic data
-        month = MonthYear(month=1, year=2024)
-        maximizer_worker.working_state.sellings_max[client_id][(123, month)] = 10
-        maximizer_worker.working_state.profit_max[client_id][(123, month)] = 99.0
+        # Simulate crash: persist working_state only
+        state_bytes = maximizer.working_state.to_bytes()
 
-        sent_payloads = []
-        maximizer_worker.data_sender.send = sent_payloads.append
+        # Restart
+        maximizer_rec = Maximizer("TPV", "absolute")
+        maximizer_rec.expected_shards = 1
+        maximizer_rec.working_state = MaximizerWorkingState.from_bytes(state_bytes)
+        maximizer_rec.data_sender.send = MagicMock()
+        maximizer_rec.middleware_coordination.send = MagicMock()
 
-        maximizer_worker.publish_absolute_max_results(client_id)
-        maximizer_worker.publish_absolute_max_results(client_id)
+        # shard tracking in memory is empty
+        self.assertEqual(len(maximizer_rec.received_shards[client_id]), 0)
 
-        self.assertGreaterEqual(len(sent_payloads), 2, "Two publishes should have occurred")
+        end_msg = MessageEnd(client_id, TableType.TPV, 1, "shard_1")
 
-        msg_ids = []
-        for payload in sent_payloads[:2]:
-            chunk = ProcessBatchReader.from_bytes(payload)
-            msg_ids.append(chunk.message_id())
+        with patch.object(maximizer_rec, "delete_client_data") as mock_del:
+            maximizer_rec._handle_end_message(end_msg.encode())
+            self.assertTrue(maximizer_rec.working_state.is_sender_finished(client_id, "shard_1"))
+            self.assertTrue(maximizer_rec.working_state.is_client_end_processed(client_id))
+            mock_del.assert_called_once()
+            # END and results should have been sent
+            self.assertGreaterEqual(maximizer_rec.data_sender.send.call_count, 1)
 
-        self.assertEqual(msg_ids[0], msg_ids[1], "Message IDs must be deterministic for retries")
-
-    @patch('workers.maximizers.common.maximizer.MessageMiddlewareQueue')
-    @patch('workers.maximizers.common.maximizer.MessageMiddlewareExchange')
-    def test_crash_after_commit_processing_recovery(self, mock_exchange, mock_queue):
+    def test_completion_despite_shard_tracking_loss(self):
         """
-        Test Crash Point 2: CRASH_AFTER_COMMIT_PROCESSING
-        
-        Scenario:
-        1. Process 2 messages
-        2. Process 3rd message, persist it, then crash AFTER commit
-        3. Restart maximizer
-        4. Verify recovery processes persisted chunk
-        5. Result identical to no-fault execution
+        Test that completion depends on persisted END counts, not ephemeral received_shards.
+        Even if received_shards is lost on crash, receiving all ENDs should trigger completion.
         """
-        chunks = [self._create_test_chunk(message_id=f"msg_{i}") for i in range(3)]
-        baseline_results = self._process_chunks_no_fault(chunks)
-        
-        # PHASE 1: Process first 2 messages
-        maximizer_worker = Maximizer(
-            self.config["maximizer_type"], 
-            self.config["maximizer_range"], 
-            self.config["expected_inputs"]
-        )
-        for i in range(2):
-            maximizer_worker.apply(chunks[i].client_id(), chunks[i])
-            maximizer_worker.working_state.mark_processed(chunks[i].message_id())
-        
-        # PHASE 2: Process 3rd, persist it (simulating AFTER commit but BEFORE handle_process_message)
-        maximizer_worker.persistence_service.commit_processing_chunk(chunks[2])
-        
-        # Crash happens here (AFTER commit_processing_chunk)
-        os.environ["CRASH_POINT"] = "CRASH_AFTER_COMMIT_PROCESSING"
-        
-        # PHASE 3: Restart maximizer
-        del os.environ["CRASH_POINT"]
-        maximizer_worker2 = Maximizer(
-            self.config["maximizer_type"], 
-            self.config["maximizer_range"], 
-            self.config["expected_inputs"]
-        )
-        
-        # Verify recovery detected persisted chunk
-        recovered_chunk = maximizer_worker2.persistence_service.recover_last_processing_chunk()
-        self.assertIsNotNone(recovered_chunk)
-        # Compare UUID objects
-        self.assertEqual(recovered_chunk.message_id(), chunks[2].message_id())
-
-    @patch('workers.maximizers.common.maximizer.MessageMiddlewareQueue')
-    @patch('workers.maximizers.common.maximizer.MessageMiddlewareExchange')
-    def test_crash_before_commit_working_state_recovery(self, mock_exchange, mock_queue):
-        """
-        Test Crash Point 3: CRASH_BEFORE_COMMIT_WORKING_STATE
-        
-        Scenario:
-        1. Process 2 messages
-        2. Process 3rd, apply max, crash BEFORE commit_working_state
-        3. Restart maximizer
-        4. Verify 3rd message reprocessed (idempotency)
-        5. Result identical to no-fault execution
-        """
-        chunks = [self._create_test_chunk(message_id=f"msg_{i}") for i in range(3)]
-        baseline_results = self._process_chunks_no_fault(chunks)
-        
-        # PHASE 1: Process first 2 messages completely
-        maximizer_worker = Maximizer(
-            self.config["maximizer_type"], 
-            self.config["maximizer_range"], 
-            self.config["expected_inputs"]
-        )
-        for i in range(2):
-            maximizer_worker.apply(chunks[i].client_id(), chunks[i])
-            maximizer_worker.working_state.mark_processed(chunks[i].message_id())
-            maximizer_worker.persistence_service.commit_working_state(
-                maximizer_worker.working_state.to_bytes(),
-                chunks[i].message_id()
-            )
-        
-        # PHASE 2: Process 3rd message but DON'T commit working state
-        maximizer_worker.apply(chunks[2].client_id(), chunks[2])
-        # Crash happens here (BEFORE commit_working_state)
-        # Working state was NOT persisted
-        
-        # PHASE 3: Restart maximizer
-        maximizer_worker2 = Maximizer(
-            self.config["maximizer_type"], 
-            self.config["maximizer_range"], 
-            self.config["expected_inputs"]
-        )
-        
-        # Verify recovered state only has 2 processed IDs
-        self.assertEqual(len(maximizer_worker2.working_state.processed_ids), 2)
-        self.assertNotIn(chunks[2].message_id(), maximizer_worker2.working_state.processed_ids)
-        
-        # Reprocess 3rd message
-        maximizer_worker2.apply(chunks[2].client_id(), chunks[2])
-        maximizer_worker2.working_state.mark_processed(chunks[2].message_id())
-        
-        # VERIFICATION: Same result as baseline
-        self.assertEqual(len(maximizer_worker2.working_state.processed_ids), 3)
-
-    @patch('workers.maximizers.common.maximizer.MessageMiddlewareQueue')
-    @patch('workers.maximizers.common.maximizer.MessageMiddlewareExchange')
-    def test_crash_before_send_ack_recovery(self, mock_exchange, mock_queue):
-        """
-        Test Crash Point 4: CRASH_BEFORE_COMMIT_SEND_ACK
-        
-        Scenario:
-        1. Process and persist 2 messages
-        2. Process 3rd message, commit state, crash BEFORE send ACK
-        3. Restart maximizer
-        4. Verify 3rd message marked as processed but needs resending
-        5. Result identical to no-fault execution
-        """
-        chunks = [self._create_test_chunk(message_id=f"msg_{i}") for i in range(3)]
-        
-        # PHASE 1: Process first 2 completely
-        maximizer_worker = Maximizer(
-            self.config["maximizer_type"], 
-            self.config["maximizer_range"], 
-            self.config["expected_inputs"]
-        )
-        for i in range(2):
-            maximizer_worker.apply(chunks[i].client_id(), chunks[i])
-            maximizer_worker.working_state.mark_processed(chunks[i].message_id())
-            maximizer_worker.persistence_service.commit_working_state(
-                maximizer_worker.working_state.to_bytes(),
-                chunks[i].message_id()
-            )
-        
-        # PHASE 2: Process 3rd, commit state, but DON'T send
-        maximizer_worker.apply(chunks[2].client_id(), chunks[2])
-        maximizer_worker.working_state.mark_processed(chunks[2].message_id())
-        maximizer_worker.persistence_service.commit_working_state(
-            maximizer_worker.working_state.to_bytes(),
-            chunks[2].message_id()
-        )
-        # Crash happens here (BEFORE commit_send_ack / sending to queue)
-        
-        # PHASE 3: Restart maximizer
-        maximizer_worker2 = Maximizer(
-            self.config["maximizer_type"], 
-            self.config["maximizer_range"], 
-            self.config["expected_inputs"]
-        )
-        
-        # Verify 3rd message was marked as processed in working state
-        self.assertIn(chunks[2].message_id(), maximizer_worker2.working_state.processed_ids)
-
-    @patch('workers.maximizers.common.maximizer.MessageMiddlewareQueue')
-    @patch('workers.maximizers.common.maximizer.MessageMiddlewareExchange')
-    def test_crash_after_send_ack_recovery(self, mock_exchange, mock_queue):
-        """
-        Test Crash Point 5: CRASH_AFTER_COMMIT_SEND_ACK
-        
-        Scenario:
-        1. Process 3 messages completely (send + ACK)
-        2. Process 4th message, send, ACK, then crash AFTER
-        3. Restart maximizer
-        4. Verify 4th message fully processed and acknowledged
-        5. Result identical to no-fault execution
-        """
-        chunks = [self._create_test_chunk(message_id=f"msg_{i}") for i in range(4)]
-        
-        # PHASE 1: Process all 4 messages completely
-        maximizer_worker = Maximizer(
-            self.config["maximizer_type"], 
-            self.config["maximizer_range"], 
-            self.config["expected_inputs"]
-        )
-        for i in range(4):
-            maximizer_worker.apply(chunks[i].client_id(), chunks[i])
-            maximizer_worker.working_state.mark_processed(chunks[i].message_id())
-            maximizer_worker.persistence_service.commit_working_state(
-                maximizer_worker.working_state.to_bytes(),
-                chunks[i].message_id()
-            )
-            # Simulate send + ACK
-            maximizer_worker.persistence_service.commit_send_ack(
-                chunks[i].client_id(),
-                chunks[i].message_id()
-            )
-        
-        # Crash happens AFTER everything complete
-        
-        # PHASE 2: Restart maximizer
-        maximizer_worker2 = Maximizer(
-            self.config["maximizer_type"], 
-            self.config["maximizer_range"], 
-            self.config["expected_inputs"]
-        )
-        
-        # Verify all 4 messages in processed state
-        self.assertEqual(len(maximizer_worker2.working_state.processed_ids), 4)
-        for i in range(4):
-            self.assertIn(chunks[i].message_id(), maximizer_worker2.working_state.processed_ids)
-
-    @patch('workers.maximizers.common.maximizer.MessageMiddlewareQueue')
-    @patch('workers.maximizers.common.maximizer.MessageMiddlewareExchange')
-    def test_idempotency_duplicate_prevention(self, mock_exchange, mock_queue):
-        """
-        Test idempotency: duplicate messages are ignored
-        
-        This ensures that if a message is redelivered (e.g., after crash),
-        it won't be processed twice.
-        """
-        chunk = self._create_test_chunk(message_id="msg_dup")
-        
-        maximizer_worker = Maximizer(
-            self.config["maximizer_type"], 
-            self.config["maximizer_range"], 
-            self.config["expected_inputs"]
-        )
-        
-        # Process first time
-        maximizer_worker.apply(chunk.client_id(), chunk)
-        maximizer_worker.working_state.mark_processed(chunk.message_id())
-        
-        # Simulate redelivery - check idempotency
-        is_duplicate = maximizer_worker.working_state.is_processed(chunk.message_id())
-        self.assertTrue(is_duplicate, "Duplicate should be detected")
-
-    @patch('workers.maximizers.common.maximizer.MessageMiddlewareQueue')
-    @patch('workers.maximizers.common.maximizer.MessageMiddlewareExchange')
-    def test_end_message_survives_crash(self, mock_exchange, mock_queue):
-        """
-        Test that END messages are properly handled across crashes
-        """
-        maximizer_worker = Maximizer(
-            self.config["maximizer_type"], 
-            self.config["maximizer_range"], 
-            self.config["expected_inputs"]
-        )
-        
-        # Process some chunks
-        chunks = [self._create_test_chunk(message_id=f"msg_{i}") for i in range(2)]
-        for chunk in chunks:
-            maximizer_worker.apply(chunk.client_id(), chunk)
-            maximizer_worker.working_state.mark_processed(chunk.message_id())
-        
-        # Mark client end as processed
         client_id = 1
-        maximizer_worker.working_state.mark_client_end_processed(client_id)
+        # TPV Absolute waits for expected_shards
+        maximizer = Maximizer("TPV", "absolute")
+        maximizer.expected_shards = 1
         
-        # Persist state with END - use last chunk's message_id
-        maximizer_worker.persistence_service.commit_working_state(
-            maximizer_worker.working_state.to_bytes(),
-            chunks[-1].message_id()  # Use UUID from chunk
-        )
+        # 1. Process data (updates received_shards in memory)
+        chunk = self._make_tx_chunk(table_type=TableType.TPV, client_id=client_id)
+        chunk.rows[0].shard_id = "shard_1"
+        maximizer._handle_data_chunk(chunk.serialize())
         
-        # Crash and restart
-        maximizer_worker2 = Maximizer(
-            self.config["maximizer_type"], 
-            self.config["maximizer_range"], 
-            self.config["expected_inputs"]
-        )
+        # Verify in-memory tracking (may store a derived slug)
+        self.assertGreater(len(maximizer.received_shards[client_id]), 0)
         
-        # Verify END was recovered
-        has_end = maximizer_worker2.working_state.is_client_end_processed(client_id)
-        self.assertTrue(has_end, "END message should survive crash")
+        # 2. Simulate Crash & Restart
+        state_bytes = maximizer.working_state.to_bytes()
+        
+        maximizer_rec = Maximizer("TPV", "absolute")
+        maximizer_rec.expected_shards = 1
+        maximizer_rec.working_state = MaximizerWorkingState.from_bytes(state_bytes)
+        
+        # Verify shard tracking is LOST (as expected/accepted)
+        self.assertEqual(len(maximizer_rec.received_shards[client_id]), 0)
+        
+        # 3. Send END message
+        # This should trigger completion if logic relies on finished_senders (which is in working_state)
+        # We need to mock dependencies for completion
+        maximizer_rec.data_sender.send = MagicMock()
+        maximizer_rec.middleware_coordination.send = MagicMock()
+        
+        # Construct END message
+        end_msg = MessageEnd(client_id, TableType.TPV, 1, "shard_1")
+        
+        with patch.object(maximizer_rec, "process_client_end", wraps=maximizer_rec.process_client_end) as mock_process:
+            with patch.object(maximizer_rec, "delete_client_data"):
+                maximizer_rec._handle_end_message(end_msg.encode())
+                
+                # 4. Verify Completion
+                # Should have marked sender finished
+                self.assertTrue(maximizer_rec.working_state.is_sender_finished(client_id, "shard_1"))
+                # Should have triggered process_client_end
+                mock_process.assert_called_once()
+                # Should have marked client end processed
+                self.assertTrue(maximizer_rec.working_state.is_client_end_processed(client_id))
 
 
 if __name__ == "__main__":
