@@ -45,7 +45,6 @@ from workers.common.sharding import (
 from .aggregator_stats_messages import (
     AggregatorStatsMessage,
     AggregatorStatsEndMessage,
-    AggregatorDataMessage,
 )
 import pickle
 import uuid
@@ -75,22 +74,7 @@ class Aggregator:
         # Estado distribuido encapsulado
         self.working_state = AggregatorWorkingState()
 
-        # Exchanges para coordinación
-        # [REMOVED] Peer stats exchange
-        # self.middleware_stats_exchange = ...
-        
-        self.middleware_data_exchange = MessageMiddlewareExchange(
-            "rabbitmq",
-            f"data_exchange_aggregator_{self.aggregator_type}",
-            f"{self.aggregator_type}_{self.aggregator_id}_data",
-            "fanout",
-        )
-        try:
-            self.middleware_data_exchange.purge()
-        except MessageMiddlewareMessageError as purge_error:
-            logging.warning(
-                f"action: purge_exchange_warning | type:{self.aggregator_type} | agg_id:{self.aggregator_id} | error:{purge_error}"
-            )
+        # Coordination exchange only (peer data exchange removed)
 
         self.shard_configs: list[ShardConfig] = []
         self.id_to_shard: dict[int, ShardConfig] = {}
@@ -202,7 +186,6 @@ class Aggregator:
         for middleware in [
             getattr(self, "middleware_queue_receiver", None),
             # getattr(self, "middleware_stats_exchange", None), # Removed
-            getattr(self, "middleware_data_exchange", None),
         ]:
             if middleware is None:
                 continue
@@ -221,7 +204,6 @@ class Aggregator:
         for middleware in [
             getattr(self, "middleware_queue_receiver", None),
             # getattr(self, "middleware_stats_exchange", None), # Removed
-            getattr(self, "middleware_data_exchange", None),
         ]:
             if middleware is None:
                 continue
@@ -319,12 +301,6 @@ class Aggregator:
             client_id = MessageForceEnd.decode(msg).client_id()
             self.working_state.force_delete_client_stats_data(client_id)
 
-        def data_callback(msg):
-            data_results.append(msg)
-
-        # def stats_callback(msg):
-        #     stats_results.append(msg)
-
         def chunk_callback(msg):
             """
             Callback pattern:
@@ -394,38 +370,12 @@ class Aggregator:
                 )
 
             try:
-                self.data_timer = self.middleware_data_exchange.connection.call_later(TIMEOUT, data_stop)
-                self.middleware_data_exchange.start_consuming(data_callback)
-            except Exception as e:
-                logging.error(
-                    f"action: data_exchange_error | type:{self.aggregator_type} | agg_id:{self.aggregator_id} | error:{e}"
-                )
-
-            # try:
-            #     self.stats_timer = self.middleware_stats_exchange.connection.call_later(TIMEOUT, stats_stop)
-            #     self.middleware_stats_exchange.start_consuming(stats_callback)
-            # except Exception as e:
-            #     logging.error(
-            #         f"action: stats_consume_error | type:{self.aggregator_type} | agg_id:{self.aggregator_id} | error:{e}"
-            #     )
-
-            try:
                 coord_timer = self.middleware_coordination.connection.call_later(TIMEOUT, coord_stop)
                 self.middleware_coordination.start_consuming(coord_callback)
             except Exception as e:
                 logging.error(
                     f"action: coordination_consume_error | type:{self.aggregator_type} | agg_id:{self.aggregator_id} | error:{e}"
                 )
-
-            while data_results:
-    
-                raw_data = data_results.popleft()
-                self._process_data_message(raw_data)
-
-            # while stats_results:
-            #    
-            #     raw_stats = stats_results.popleft()
-            #     self._process_stats_message(raw_stats)
 
             while coord_results:
                 raw_coord = coord_results.popleft()
@@ -444,43 +394,6 @@ class Aggregator:
                     logging.error(
                         f"action: exception_in_main_processing | type:{self.aggregator_type} | error:{e}"
                     )
-
-    def _process_data_message(self, raw_msg: bytes):
-        try:
-            data = AggregatorDataMessage.decode(raw_msg)
-        except Exception as e:
-            logging.error(f"action: error_decoding_data_message | error:{e}")
-            return
-
-        if data.aggregator_id == self.aggregator_id:
-            return
-        if data.aggregator_type != self.aggregator_type:
-            logging.warning(
-                f"action: aggregator_data_type_mismatch | expected:{self.aggregator_type} | received:{data.aggregator_type}"
-            )
-            return
-
-        logging.debug(
-            f"action: aggregator_data_received | type:{self.aggregator_type} | from_agg:{data.aggregator_id} "
-            f"| client_id:{data.client_id} | table_type:{data.table_type}"
-        )
-
-        if self.working_state.is_processed(data.message_id):
-            logging.info(f"action: duplicate_data_message_ignored | message_id:{data.message_id}")
-            return
-
-        self._apply_remote_aggregation(data)
-        self.working_state.increment_accumulated_chunks(data.client_id, data.table_type, data.aggregator_id)
-
-        self.working_state.mark_processed(data.message_id)
-        self._save_state(data.message_id)
-
-        # [NEW] Send stats to Monitor after processing remote data
-        self._send_stats_to_monitor(data.client_id, data.table_type)
-
-        # Removed: self._can_send_end_message check (now driven by Monitor barrier)
-
-    # Removed _process_stats_message (peer stats)
 
     def _process_coord_message(self, raw_msg: bytes):
         try:
@@ -649,40 +562,6 @@ class Aggregator:
         )
         self.working_state.increment_accumulated_chunks(client_id, table_type, self.aggregator_id)
         
-        # Send payload to peers (fanout exchange)
-        if payload:
-            try:
-                data_msg = AggregatorDataMessage(
-                    self.aggregator_type,
-                    self.aggregator_id,
-                    client_id,
-                    table_type,
-                    payload,
-                )
-                logging.info(
-                    f"DEBUG: aggregator_data_sent | type:{self.aggregator_type} | agg_id:{self.aggregator_id} "
-                    f"| client_id:{client_id} | table_type:{table_type} | payload_size:{len(payload)}"
-                )
-                
-                # CRITICAL: TPV does NOT use fanout - only sends final results after barrier
-                # PURCHASES uses fanout for peer-to-peer aggregation
-                # PRODUCTS does not use fanout
-                if self.aggregator_type == "PURCHASES":
-                    self.middleware_data_exchange.send(data_msg.encode())
-                    # Only commit send_ack when actually sending to peers
-                    self.persistence.commit_send_ack(client_id, chunk.message_id())
-                elif self.aggregator_type == "PRODUCTS":
-                    # PRODUCTS: no fanout, only sends final results
-                    logging.debug("action: skip_fanout_products")
-                elif self.aggregator_type == "TPV":
-                    # TPV: no fanout, only accumulates locally and sends final results after barrier
-                    logging.debug("DEBUGGING_QUERY_3 | skip_fanout_tpv_peers")
-                    logging.info(
-                        f"DEBUGGING_QUERY_3 | agg_tpv_payload_accumulated | cli_id:{client_id} | rows:{len(aggregated_chunk.rows)} | accumulated_keys:{len(self.working_state.get_tpv_accumulator(client_id))}"
-                    )
-            except Exception as e:
-                logging.error(f"action: error_sending_data_message | error:{e}")
-
         self.working_state.mark_processed(chunk.message_id())
         
         # Track message_id to client_id mapping for pruning
@@ -1002,49 +881,9 @@ class Aggregator:
                 )
         return {"tpv": payload}
 
-    def _apply_remote_aggregation(self, data_msg: AggregatorDataMessage):
-        client_id = data_msg.client_id
-        payload = data_msg.payload
-        if self.aggregator_type == "TPV":
-            # Skip remote fanout for TPV to avoid duplicate accumulation
-            logging.debug("DEBUGGING_QUERY_3 | skip_remote_tpv_fanout")
-            return
-
-        if self.aggregator_type == "PRODUCTS":
-            rows = []
-            for item_id, year, month, quantity, subtotal in payload.get("products", []):
-                created_at = DateTime(datetime.date(int(year), int(month), 1), datetime.time(0, 0))
-                rows.append(
-                    TransactionItemsProcessRow(
-                        "",
-                        int(item_id),
-                        int(quantity),
-                        float(subtotal),
-                        created_at,
-                    )
-                )
-            if rows:
-                self.accumulate_products(client_id, rows)
-
-        elif self.aggregator_type == "PURCHASES":
-            rows = []
-            marker_date = DateTime(datetime.date(2024, 1, 1), datetime.time(0, 0))
-            for store_id, user_id, count in payload.get("purchases", []):
-                rows.append(
-                    PurchasesPerUserStoreRow(
-                        int(store_id), "", int(user_id), marker_date.date, int(count)
-                    )
-                )
-            if rows:
-                self.accumulate_purchases(client_id, SimpleNamespace(rows=rows))
-
-        elif self.aggregator_type == "TPV":
-            rows = []
-            for year, semester, store_id, total_tpv in payload.get("tpv", []):
-                year_half = YearHalf(int(year), int(semester))
-                rows.append(TPVProcessRow(int(store_id), float(total_tpv), year_half))
-            if rows:
-                self.accumulate_tpv(client_id, SimpleNamespace(rows=rows))
+    def _apply_remote_aggregation(self, data_msg=None):
+        # Legacy fanout path no longer used after barrier-based sync.
+        return
 
     def publish_final_results(self, client_id, table_type):
         if client_id not in self.working_state.global_accumulator:

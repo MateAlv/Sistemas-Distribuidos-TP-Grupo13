@@ -202,6 +202,7 @@ class Filter:
         while self.__running:
 
 
+            test_mode = os.getenv("TEST_MODE", "false").lower() == "true"
             # Skip peer stats consumption entirely (rely on server-provided expected + own counts)
             try:
                 self.consume_timer = self.middleware_queue_receiver.connection.call_later(TIMEOUT, stop)
