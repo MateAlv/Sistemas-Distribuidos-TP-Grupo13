@@ -91,10 +91,14 @@ def choose_victim_from_tracking():
     """
     tracked = _last_tracked_nodes_from_logs()
     for node in tracked:
+        if "filter_year_service" in node:
+            logging.info(f"Choosing victim from tracking list: {node}")
+            return node
+    for node in tracked:
         if "aggregator" in node:
             logging.info(f"Choosing victim from tracking list: {node}")
             return node
-    logging.warning("No aggregator found in tracking list; falling back to first aggregator service in compose.")
+    logging.warning("No suitable victim found in tracking list; falling back to first aggregator service in compose.")
     return None
 
 def latest_leader_from_logs(log_path="logs.txt"):

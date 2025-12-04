@@ -7,7 +7,7 @@ import pytest
 from workers.filter.common.filter import Filter
 from utils.file_utils.table_type import TableType
 from utils.eof_protocol.end_messages import MessageEnd
-from utils.protocol import STAGE_AGG_TPV, STAGE_AGG_PRODUCTS
+from utils.protocol import STAGE_AGG_TPV, STAGE_AGG_PRODUCTS, STAGE_AGG_PURCHASES
 
 
 def _make_filter(filter_type="hour", filter_id=1, tpv_shards=3, products_shards=3):
@@ -115,6 +115,54 @@ class TestFilterEOFSynchronization:
             f._handle_end_message(end_msg.encode())
             mock_send_end.assert_called_once()
 
+    def test_year_transactions_end_sends_expected_per_purchases_shard(self, monkeypatch):
+        """Year filter sends END and expected stats per agg_purchases shard (including zeros)."""
+        monkeypatch.setenv("PURCHASES_SHARDS", "3")
+        f, _ = _make_filter(filter_type="year", products_shards=1)
+        client_id = 5
+        table_type = TableType.TRANSACTIONS
+        total_expected = 4
+        total_not_sent = 1
+        # Only shard 2 got chunks
+        f.shard_chunks_sent[(STAGE_AGG_PURCHASES, client_id, table_type, 2)] = 3
+
+        f._send_end_message(client_id, table_type, total_expected, total_not_sent)
+
+        for shard_id, expected_chunks in [(1, 0), (2, 3), (3, 0)]:
+            queue_name = f"to_agg_purchases_shard_{shard_id}"
+            assert queue_name in f.middleware_queue_sender
+            mock_queue = f.middleware_queue_sender[queue_name]
+            end_msg = _decode_end_sent(mock_queue.send)
+            assert end_msg.total_chunks() == expected_chunks
+
+        # Coordination stats: 1 barrier END + 3 per-shard expected stats
+        assert f.middleware_coordination.send.call_count == 4
+        per_shard_payloads = [
+            json.loads(call.args[0].decode()) for call in f.middleware_coordination.send.call_args_list[1:]
+        ]
+        shards_expected = {(int(p["shard"]), p["expected"]) for p in per_shard_payloads}
+        assert shards_expected == {(1, 0), (2, 3), (3, 0)}
+
+    def test_amount_end_creates_merge_queue_and_sends_query_end(self, monkeypatch):
+        """Amount filter should create merge queue on END even if no chunks were sent."""
+        f, mock_q = _make_filter(filter_type="amount")
+        client_id = 7
+        table_type = TableType.TRANSACTIONS
+        total_expected = 0
+        total_not_sent = 0
+
+        # Ensure merge queue not present
+        assert f.middleware_queue_sender == {}
+
+        f._send_end_message(client_id, table_type, total_expected, total_not_sent)
+
+        queue_name = f"to_merge_data_{client_id}"
+        assert queue_name in f.middleware_queue_sender
+        mock_queue = f.middleware_queue_sender[queue_name]
+        mock_queue.send.assert_called_once()
+        sent = mock_queue.send.call_args[0][0]
+        # For amount, it sends MessageQueryEnd; just ensure bytes were sent
+        assert sent
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

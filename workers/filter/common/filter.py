@@ -2,6 +2,7 @@ import logging
 import json
 import os
 import uuid
+import sys
 from collections import deque, defaultdict
 from utils.processing.process_table import TableProcessRow
 from utils.processing.process_chunk import ProcessChunk
@@ -113,6 +114,12 @@ class Filter:
         self.handle_processing_recovery()
 
     def handle_processing_recovery(self):
+        logging.info(
+            "persistence_recovery_start | filter:%s | id:%s | state_path:%s",
+            self.filter_type,
+            self.id,
+            self.persistence_service.state_commit_path,
+        )
 
         # First, recover the working state (processed_ids, global_processed_ids, etc.)
         recovered_state_bytes = self.persistence_service.recover_working_state()
@@ -124,6 +131,12 @@ class Filter:
                            f"{len(self.working_state.global_processed_ids)} global processed")
             except Exception as e:
                 logging.warning(f"Could not recover working state: {e}")
+        else:
+            logging.info(
+                "persistence_recovery_no_state | filter:%s | id:%s",
+                self.filter_type,
+                self.id,
+            )
         
         # Then, recover any last processing chunk that was interrupted
         last_processing_chunk = self.persistence_service.recover_last_processing_chunk()
@@ -289,6 +302,11 @@ class Filter:
 
         # 4. Send to next stage (only if there are filtered rows)
         self.send_filtered_rows(filtered_rows, chunk, client_id, table_type, message_id)
+
+        # Test-only crash: kill year filter after first processed chunk
+        if self.filter_type == "year":
+            logging.info("TEST_KILL_FILTER_YEAR_AFTER_FIRST_CHUNK")
+            sys.exit(1)
 
         if self.working_state.end_is_received(client_id, table_type):
             total_expected = self.working_state.get_total_chunks_to_receive(client_id, table_type)

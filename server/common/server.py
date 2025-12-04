@@ -332,10 +332,24 @@ class Server:
                     logging.warning("action: unknown_header | peer:%s | header:%s", peer, header)
                     break
         except OSError as e:
-            logging.error("OSError decoding message from client | client_id:%s | error:%r", client_id, e)
-            force_end_message = MessageForceEnd(client_id).encode()
-            with self._force_end_lock:
-                self.force_end_exchange.send(force_end_message)
+            peek_data = b""
+            try:
+                peek_data = sock.recv(16, socket.MSG_PEEK)
+            except Exception:
+                pass
+            logging.error(
+                "OSError decoding message from client | client_id:%s | error:%r | peek:%r",
+                client_id,
+                e,
+                peek_data,
+            )
+            # If handshake never completed, we don't know client_id: skip force_end
+            if client_id is not None:
+                force_end_message = MessageForceEnd(client_id).encode()
+                with self._force_end_lock:
+                    self.force_end_exchange.send(force_end_message)
+            else:
+                logging.debug("action: skip_force_end_no_client_id")
             
         except Exception as e:
             logging.error("action: client_handler_error | peer:%s | client_id:%s | error:%r", peer, client_id, e)
