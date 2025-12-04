@@ -19,6 +19,7 @@ import threading
 import uuid
 import pickle
 from utils.tolerance.persistence_service import PersistenceService
+from utils.tolerance.crash_helper import crash_after_two_chunks, crash_after_end_processed
 from .maximizer_working_state import MaximizerWorkingState
 from utils.common.processing_types import MonthYear
 
@@ -282,12 +283,14 @@ class Maximizer:
                  logging.info(f"action: waiting_for_more_senders | client_id:{client_id} | finished:{finished_count} | expected:{self.expected_inputs}")
         # Persist END tracking so recovery can resume finalization
         self._save_state(uuid.uuid4())
+        crash_after_end_processed("maximizer")
 
     def _handle_data_chunk(self, data: bytes):
         self._check_crash_point("CRASH_BEFORE_PROCESS")
         chunk = ProcessBatchReader.from_bytes(data)
         client_id = chunk.client_id()
         table_type = chunk.table_type()
+        crash_after_two_chunks("maximizer")
         expected_table = self._expected_table_type()
 
         if self.working_state.is_processed(chunk.message_id()):

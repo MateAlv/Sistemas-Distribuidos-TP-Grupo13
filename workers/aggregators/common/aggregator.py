@@ -49,6 +49,7 @@ from .aggregator_stats_messages import (
 import pickle
 import uuid
 from utils.tolerance.persistence_service import PersistenceService
+from utils.tolerance.crash_helper import crash_after_two_chunks, crash_after_end_processed
 from .aggregator_working_state import AggregatorWorkingState
 
 
@@ -688,6 +689,7 @@ class Aggregator:
         client_id = chunk.client_id()
         table_type = chunk.table_type()
 
+        crash_after_two_chunks("aggregator")
         # 1 & 2. apply(x) + actualizar estado(x)
         self._apply_and_update_state(chunk)
 
@@ -829,6 +831,7 @@ class Aggregator:
             logging.error(f"action: error_sending_end_message | error:{e}")
 
         self.delete_client_data(client_id, table_type)
+        crash_after_end_processed("aggregator")
         
     def delete_client_data(self, client_id, table_type):
         """

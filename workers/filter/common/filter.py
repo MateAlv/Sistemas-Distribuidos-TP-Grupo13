@@ -23,6 +23,7 @@ from utils.file_utils.table_type import TableType, ResultTableType
 from middleware.middleware_interface import MessageMiddlewareQueue, MessageMiddlewareExchange, TIMEOUT, \
     MessageMiddlewareMessageError
 from utils.tolerance.persistence_service import PersistenceService
+from utils.tolerance.crash_helper import crash_after_two_chunks, crash_after_end_processed
 from .filter_stats_messages import FilterStatsMessage, FilterStatsEndMessage
 from .filter_working_state import FilterWorkingState
 from utils.results.result_table import Query1ResultRow
@@ -266,6 +267,8 @@ class Filter:
             logging.info(f"action: global_duplicate_chunk_ignored | message_id:{msg_id}")
             return
 
+        crash_after_two_chunks("filter")
+
         # 1. Apply filter - returns filtered rows
         filtered_rows = self.process_chunk(chunk)
 
@@ -310,6 +313,7 @@ class Filter:
             
             if self.working_state.can_send_end_message(client_id, table_type, total_expected, self.id):
                 self._send_end_message(client_id, table_type, total_expected, total_not_sent)
+                crash_after_end_processed("filter")
 
     def send_filtered_rows(self, filtered_rows, chunk, client_id, table_type, message_id):
         
