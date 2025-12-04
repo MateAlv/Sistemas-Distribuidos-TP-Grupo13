@@ -266,18 +266,14 @@ class Server:
                         # Use chunks actually sent per client/table/shard (if available) instead of file count
                         # Broadcast END a todos los shards de year para que propaguen su propio total
                         if table_type == TableType.TRANSACTIONS or table_type == TableType.TRANSACTION_ITEMS:
-                            # Sharded tables: Send END only to shards that received data
+                            # Sharded tables: Send END to every shard with the per-shard expected count (can be zero)
                             for sid in range(1, self.filter_year_shards + 1):
                                 chunk_total = chunks_sent_per_shard.get((client_id, table_type, sid), 0)
-                                if chunk_total > 0:
-                                    message = MessageEnd(client_id, table_type=table_type, count=chunk_total).encode()
-                                    queue_name = f"to_filter_year_shard_{sid}"
-                                    logging.debug("action: sending_end_message | peer:%s | client_id:%s | table_type:%s | shard:%s | count:%d", 
-                                               peer, client_id, table_type.name, sid, chunk_total)
-                                    middleware_queue_senders[queue_name].send(message)
-                                else:
-                                    logging.debug("action: skip_end_empty_shard | peer:%s | client_id:%s | table_type:%s | shard:%s", 
-                                               peer, client_id, table_type.name, sid)
+                                message = MessageEnd(client_id, table_type=table_type, count=chunk_total).encode()
+                                queue_name = f"to_filter_year_shard_{sid}"
+                                logging.debug("action: sending_end_message | peer:%s | client_id:%s | table_type:%s | shard:%s | count:%d", 
+                                           peer, client_id, table_type.name, sid, chunk_total)
+                                middleware_queue_senders[queue_name].send(message)
                         
                         else:
                             # Non-sharded tables: Send END once
