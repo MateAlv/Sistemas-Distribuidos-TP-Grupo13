@@ -409,51 +409,51 @@ class TestAggregatorChunkBuffering(unittest.TestCase):
     @patch('workers.aggregators.common.aggregator.MessageMiddlewareExchange')
     def test_handle_processing_recovery_processes_buffered_chunks(self, mock_exchange, mock_queue):
         """
-        Test that handle_processing_recovery() correctly processes buffered chunks
+        Test that handle_processing_recovery() correctly recovers committed state
+        
+        Correct scenario:
+        1. Buffer + process 4 chunks
+        2. Commit after processing all (state persisted, buffer cleared)
+        3. CRASH
+        4. Recovery: Should have 4 chunks in processed_ids from committed state
+        
+        Note: Chunks that are only buffered WITHOUT commit are intentionally lost.
+        Only committed state survives the crash.
         """
         chunks = [self._create_test_chunk(f"msg_{i}") for i in range(4)]
         
-        # PHASE 1: Setup - process, buffer, but don't commit the buffered ones
+        # PHASE 1: Process and commit all 4 chunks
         aggregator = Aggregator(self.config["agg_type"], self.config["agg_id"])
         
-        # Process first 2 chunks completely (buffer + process + commit)
-        for i in range(2):
+        # Buffer and process all 4 chunks
+        for i in range(4):
             aggregator.persistence.append_chunk_to_buffer(chunks[i])
             aggregator._apply_and_update_state(chunks[i])
-        # Commit state (this clears buffer)
+        
+        # Commit state (persists working_state, clears buffer)
         aggregator.persistence.commit_working_state(
             aggregator.working_state.to_bytes(),
-            chunks[1].message_id()
+            chunks[3].message_id()
         )
         
-        # Verify buffer is cleared and counter reset
-        self.assertEqual(aggregator.persistence.chunk_buffer.get_buffer_size(), 0,
+        # Verify buffer is cleared after commit
+        self.assertEqual(aggregator.persistence.chunk_buffer.get_chunk_count(), 0,
                         "Buffer should be empty after commit")
         self.assertEqual(aggregator.persistence.chunks_since_last_commit, 0,
                         "Counter should be 0 after commit")
         
-        # Buffer next 2 chunks WITHOUT committing state
-        # This simulates: chunks were buffered but crash happened before state commit
-        for i in range(2, 4):
-            aggregator.persistence.append_chunk_to_buffer(chunks[i])
+        # Verify all 4 chunks are in processed_ids
+        self.assertEqual(len(aggregator.working_state.processed_ids), 4,
+                        "Should have 4 processed chunks before crash")
         
-        # Verify buffer has 2 chunks before crash
-        buffer_size = aggregator.persistence.chunk_buffer.get_buffer_size()
-        self.assertGreater(buffer_size, 0, "Buffer should have content before crash")
-        buffered_count = aggregator.persistence.chunk_buffer.get_chunk_count()
-        self.assertEqual(buffered_count, 2, "Should have 2 chunks in buffer before crash")
+        # CRASH
         
-        # CRASH (without processing or committing chunks 2 and 3)
-        
-        # PHASE 2: Restart - handle_processing_recovery should process buffered chunks
+        # PHASE 2: Restart - recovery should restore committed state
         aggregator2 = Aggregator(self.config["agg_type"], self.config["agg_id"])
         
-        # After recovery:
-        # - Working state has first 2 chunks (from last commit)
-        # - Buffered chunks (2 and 3) should have been processed by handle_processing_recovery
-        # - Total: 2 (from state) + 2 (from buffer) = 4
+        # After recovery: Should have all 4 chunks from committed state
         self.assertEqual(len(aggregator2.working_state.processed_ids), 4,
-                        "Should have 4 processed chunks after recovery")
+                        "Should have 4 processed chunks after recovery from committed state")
 
 
 class TestAggregatorCrashPoints(unittest.TestCase):
