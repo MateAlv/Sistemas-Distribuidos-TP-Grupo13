@@ -48,4 +48,4 @@ ROUTING_KEY_CONTROL = 'control.#'
 # Timeouts (in seconds)
 HEARTBEAT_INTERVAL = 2 # seconds
 HEARTBEAT_TIMEOUT = 20 # seconds
-ELECTION_TIMEOUT = 10 # seconds
+ELECTION_TIMEOUT = 5 # seconds

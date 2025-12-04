@@ -97,6 +97,38 @@ def choose_victim_from_tracking():
     logging.warning("No aggregator found in tracking list; falling back to first aggregator service in compose.")
     return None
 
+def latest_leader_from_logs(log_path="logs.txt"):
+    """
+    Returns the last monitor id that logged 'I am the new LEADER!'.
+    """
+    try:
+        with open(log_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        leader_lines = [l for l in lines if "I am the new LEADER!" in l]
+        if not leader_lines:
+            return None
+        last_line = leader_lines[-1]
+        m = re.match(r"^(monitor_[0-9]+)", last_line.strip())
+        if m:
+            return m.group(1)
+    except Exception as exc:
+        logging.error(f"Failed to parse leader from logs: {exc}")
+    return None
+
+def wait_for_new_leader(prev_leader, timeout=60):
+    """
+    Wait until a new leader (different from prev_leader) is observed in logs.
+    """
+    logging.info(f"Waiting for new leader (prev:{prev_leader}) timeout={timeout}s...")
+    start = time.time()
+    while time.time() - start < timeout:
+        leader = latest_leader_from_logs()
+        if leader and leader != prev_leader:
+            logging.info(f"New leader detected in logs: {leader}")
+            return leader
+        time.sleep(2)
+    raise Exception("Timeout waiting for new leader election.")
+
 def wait_for_revival(victim_container, timeout=120):
     """Waits for the monitor to revive the victim container."""
     logging.info(f"Waiting for revival of {victim_container} (timeout={timeout}s)...")
@@ -193,6 +225,41 @@ def main():
             raise Exception(f"Revival of {victim} failed.")
             
         logging.info("Test Passed: Service Revival Verified.")
+
+        # 6. Kill current leader monitor and wait for new election
+        prev_leader = latest_leader_from_logs()
+        if not prev_leader:
+            raise Exception("Could not determine current leader from logs.")
+        logging.info(f"Killing leader monitor: {prev_leader}")
+        run_command(f"docker kill {prev_leader}")
+        result = run_command(f"docker inspect -f '{{{{.State.Status}}}}' {prev_leader}", check=False)
+        if result.returncode == 0 and result.stdout.strip() == "running":
+            logging.error(f"Failed to kill {prev_leader}. It is still running.")
+            raise Exception(f"Failed to kill {prev_leader}")
+        logging.info(f"{prev_leader} killed successfully.")
+
+        new_leader = wait_for_new_leader(prev_leader)
+        logging.info(f"New leader elected after killing {prev_leader}: {new_leader}")
+
+        # 7. Kill another tracked worker and verify revival under new leader
+        victim2 = choose_victim_from_tracking()
+        if victim2 is None or victim2 == victim:
+            victim2 = next((s for s in services if "aggregator" in s and s != victim), None)
+        if not victim2:
+            raise Exception("No second suitable victim found.")
+
+        logging.info(f"Killing second victim under new leader: {victim2}")
+        run_command(f"docker kill {victim2}")
+        result = run_command(f"docker inspect -f '{{{{.State.Status}}}}' {victim2}", check=False)
+        if result.returncode == 0 and result.stdout.strip() == "running":
+            logging.error(f"Failed to kill {victim2}. It is still running.")
+            raise Exception(f"Failed to kill {victim2}")
+        logging.info(f"{victim2} killed successfully.")
+
+        if not wait_for_revival(victim2):
+            raise Exception(f"Revival of {victim2} failed after leader failover.")
+
+        logging.info("Test Passed: Leader failover and second service revival verified.")
         
     except Exception as e:
         logging.error(f"Test Failed: {e}")

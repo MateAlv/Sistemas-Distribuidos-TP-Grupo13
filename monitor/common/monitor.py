@@ -296,21 +296,26 @@ class MonitorNode:
                         logging.info(f"action: heartbeat_from_leader | leader:{sender_id}")
 
                     if is_sender_leader:
-                        # Adopt leader if none, if same, or if higher ID; ignore lower-ID "leaders"
-                        if (self.leader_id is None) or (sender_id == self.leader_id) or (sender_id > self.leader_id):
+                        # Adopt leader if none or higher, but only log when it changes
+                        if (self.leader_id is None) or (sender_id > self.leader_id):
+                            prev_leader = self.leader_id
                             self.leader_id = sender_id
                             self.last_leader_heartbeat = time.time()
+                            self.election_in_progress = False
                             self.is_leader = (self.node_id == sender_id)
                             if self.is_leader:
                                 logging.info("I am the new LEADER! (via heartbeat)")
                             else:
-                                logging.info(f"Recognizing leader via heartbeat: {sender_id}")
+                                logging.info(f"Recognizing leader via heartbeat: {sender_id} (prev:{prev_leader})")
+                        elif sender_id == self.leader_id:
+                            # Same leader, just refresh heartbeat; do not spam logs
+                            self.last_leader_heartbeat = time.time()
                         else:
                             logging.info(f"Ignoring lower-ID leader heartbeat from {sender_id} while tracking {self.leader_id}")
 
-                    # If we were in election and see a higher-ID monitor heartbeat, stop the election
-                    if self.election_in_progress and sender_id > self.node_id:
-                        logging.info(f"Cancelling election; higher-ID monitor heartbeat from {sender_id}")
+                    # Only cancel an election if the heartbeat comes from a node asserting leadership
+                    if self.election_in_progress and is_sender_leader and sender_id > self.node_id:
+                        logging.info(f"Cancelling election; leader heartbeat from higher-ID monitor {sender_id}")
                         self.election_in_progress = False
 
             elif msg_type == MSG_ELECTION:
@@ -321,9 +326,10 @@ class MonitorNode:
                     logging.info(f"Received ELECTION from {sender_id}. Yielding (higher ID).")
 
             elif msg_type == MSG_COORDINATOR:
-                # Accept higher-ID coordinator; ignore lower-ID announcements once tracking a leader
-                if (self.leader_id is None) or (sender_id >= self.leader_id):
+                # Bully: accept only if coordinator has higher ID than me AND higher than any tracked leader
+                if (sender_id > self.node_id) and ((self.leader_id is None) or (sender_id > self.leader_id)):
                     self.leader_id = sender_id
+                    self.last_leader_heartbeat = time.time()
                     self.election_in_progress = False
                     self.is_leader = (self.node_id == sender_id)
                     if self.is_leader:
@@ -332,7 +338,7 @@ class MonitorNode:
                         logging.info(f"New Leader elected: {sender_id}")
                         logging.info(f"Accepting {sender_id} as Coordinator.")
                 else:
-                    logging.info(f"Ignoring lower-ID coordinator announcement from {sender_id} while tracking {self.leader_id}")
+                    logging.info(f"Ignoring coordinator from {sender_id} (my_id:{self.node_id}, current_leader:{self.leader_id})")
             elif msg_type in (MSG_WORKER_END, MSG_WORKER_STATS):
                 self._handle_barrier_message(data)
 
@@ -521,6 +527,8 @@ class MonitorNode:
         if self.election_in_progress: return
         logging.info("Starting election process...")
         self.election_in_progress = True
+        # Forget any previous leader while we elect
+        self.leader_id = None
         self.election_start_time = time.time()
         self._broadcast(MSG_ELECTION)
 
