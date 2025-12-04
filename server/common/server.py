@@ -335,8 +335,7 @@ class Server:
             logging.error("OSError decoding message from client | client_id:%s | error:%r", client_id, e)
             force_end_message = MessageForceEnd(client_id).encode()
             with self._force_end_lock:
-                if client_id is not None:
-                    self.force_end_exchange.send(force_end_message)
+                self.force_end_exchange.send(force_end_message)
             
         except Exception as e:
             logging.error("action: client_handler_error | peer:%s | client_id:%s | error:%r", peer, client_id, e)
