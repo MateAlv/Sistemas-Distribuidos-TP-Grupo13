@@ -59,6 +59,23 @@ def _services_from_compose():
     return [s.strip() for s in result.stdout.splitlines() if s.strip()]
 
 
+def _derive_pattern(args):
+    if args.kill_pattern:
+        return args.kill_pattern
+    # Derive shard from container name: filter_year_service[-N]
+    shard_id = 1
+    m = re.match(r".*-(\d+)$", args.kill_container)
+    if m:
+        try:
+            shard_id = int(m.group(1))
+        except ValueError:
+            shard_id = 1
+    # For year filter only; otherwise fallback to generic pattern
+    if "filter_year" in args.kill_container:
+        return f"action: middleware_sent_msg | queue:to_filter_year_shard_{shard_id}"
+    return "action: middleware_sent_msg"
+
+
 def main():
     parser = argparse.ArgumentParser(description="Fault tolerance kill test")
     parser.add_argument(
@@ -68,8 +85,8 @@ def main():
     )
     parser.add_argument(
         "--kill-pattern",
-        default="action: filter | type:year",
-        help="Log pattern to count before killing (chunk-level match)",
+        default=None,
+        help="Log pattern to count before killing (server -> filter messages). If not set, derived from kill-container shard.",
     )
     parser.add_argument(
         "--kill-threshold",
@@ -77,15 +94,22 @@ def main():
         default=2,
         help="Number of pattern matches before killing container",
     )
+    parser.add_argument(
+        "--arm-delay",
+        type=int,
+        default=10,
+        help="Seconds to wait after clients start before arming the killer",
+    )
     args = parser.parse_args()
     stop_event = threading.Event()
     compose_proc = None
     watcher_thread = None
     try:
-        # Cleanup
+        # Cleanup (results + persistence)
         run_command("make clean-results", check=False)
         run_command("make down", check=False)
         run_command("docker rm -f rabbitmq", check=False)
+        run_command("docker run --rm -v $(pwd)/data/persistence:/persistence alpine sh -c 'rm -rf /persistence/*'", check=False)
         # Reset logs
         open(LOG_FILE, "w").close()
 
@@ -99,6 +123,12 @@ def main():
         # Start non-client services
         logging.info(f"Starting non-client services: {non_clients}")
         run_command(f"docker compose up -d --build {' '.join(non_clients)}")
+
+        # Stream logs in background to logs.txt right away (capture early startup)
+        logging.info("Tailing compose logs (live) to logs.txt...")
+        compose_proc = subprocess.Popen(
+            "docker compose logs -f", shell=True, stdout=open(LOG_FILE, "a"), stderr=subprocess.STDOUT
+        )
 
         # Wait for a leader log before arming the killer to avoid pre-mature kills
         def latest_leader_from_logs():
@@ -134,22 +164,24 @@ def main():
             logging.info(f"Starting client services: {clients}")
             run_command(f"docker compose up -d {' '.join(clients)}")
 
-        # Stream logs in background to logs.txt
-        logging.info("Tailing compose logs...")
-        compose_proc = subprocess.Popen(
-            "docker compose logs -f", shell=True, stdout=open(LOG_FILE, "a"), stderr=subprocess.STDOUT
-        )
+        # Optional delay before arming the killer to avoid immediate startup kill
+        if args.arm_delay > 0:
+            logging.info(f"Waiting {args.arm_delay}s before arming killer...")
+            time.sleep(args.arm_delay)
 
         # Start watcher to kill after threshold chunk logs
+        kill_pattern = _derive_pattern(args)
         watcher_thread = threading.Thread(
             target=tail_and_kill,
-            args=(args.kill_pattern, args.kill_threshold, args.kill_container, stop_event),
+            args=(kill_pattern, args.kill_threshold, args.kill_container, stop_event),
             daemon=True,
         )
         watcher_thread.start()
 
-        # Wait for completion with log size guard
-        while compose_proc.poll() is None:
+        # Wait with timeout and log size guard
+        start_time = time.time()
+        TEST_TIMEOUT = int(os.environ.get("TOLERANCE_TEST_TIMEOUT", "180"))
+        while compose_proc.poll() is None and (time.time() - start_time) < TEST_TIMEOUT:
             try:
                 lines = sum(1 for _ in open(LOG_FILE, "r", encoding="utf-8", errors="ignore"))
                 if lines > 100000:
@@ -160,7 +192,7 @@ def main():
                 pass
             time.sleep(2)
 
-        logging.info("Test completed. Check logs for pipeline result.")
+        logging.info("Test completed or timed out. Check logs for pipeline result.")
 
     except Exception as e:
         logging.error(f"Test Failed: {e}")
@@ -170,7 +202,7 @@ def main():
         if compose_proc and compose_proc.poll() is None:
             compose_proc.terminate()
         # Dump full logs for inspection
-        logging.info("Dumping full logs to full_logs.txt...")
+        logging.info("Dumping full logs to full_logs.txt and logs.txt...")
         run_command("docker compose logs > full_logs.txt 2>&1", check=False)
 
 

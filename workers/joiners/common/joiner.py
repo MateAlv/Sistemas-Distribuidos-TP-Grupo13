@@ -12,6 +12,7 @@ import uuid
 from collections import deque
 import json
 from utils.tolerance.persistence_service import PersistenceService
+from utils.tolerance.crash_helper import crash_after_two_chunks, crash_after_end_processed
 from utils.protocol import (
     COORDINATION_EXCHANGE,
     MSG_WORKER_END,
@@ -285,6 +286,7 @@ class Joiner:
     def _handle_data_chunk(self, data: bytes):
         self._check_crash_point("CRASH_BEFORE_PROCESS")
         chunk = ProcessBatchReader.from_bytes(data)
+        crash_after_two_chunks("joiner")
         
         with self.lock:
             # Idempotency
@@ -356,6 +358,7 @@ class Joiner:
             self.working_state_main.mark_client_completed(client_id)
             self.working_state_main.add_pending_end_message(client_id)
             logging.debug(f"action: processing_complete | type:{self.joiner_type} | client_id:{client_id}")
+            crash_after_end_processed("joiner")
         except Exception as inner_e:
             logging.error(f"action: error_in_join_processing | type:{self.joiner_type} | client_id:{client_id} | error:{inner_e} | error_type:{type(inner_e).__name__}")
             raise inner_e
