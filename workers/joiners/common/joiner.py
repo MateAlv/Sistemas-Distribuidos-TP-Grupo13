@@ -133,7 +133,7 @@ class Joiner:
         results = deque()
         
         def callback(msg):
-            chunk = ProcessBatchReader.from_bytes(data)
+            chunk = ProcessBatchReader.from_bytes(msg)
             self.persistence_join.commit_processing_chunk(chunk)
             results.append(msg)
         def stop():
