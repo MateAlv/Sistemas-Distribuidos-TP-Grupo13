@@ -75,6 +75,15 @@ class Filter:
             "topic",
             routing_keys=[f"coordination.barrier.{self.stage}.shard.{self.shard_id}"],
         )
+
+        self.force_end_exchange = MessageMiddlewareExchange(
+            "rabbitmq",
+            "FORCE_END_EXCHANGE",
+            "server",
+            "fanout",
+            routing_keys=[""],
+        )
+        
         self.stats_timer = None
         self.consume_timer = None
         

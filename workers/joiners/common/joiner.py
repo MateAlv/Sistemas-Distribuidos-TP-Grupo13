@@ -84,6 +84,14 @@ class Joiner:
             "topic",
             routing_keys=[f"coordination.barrier.{self.stage}.{DEFAULT_SHARD}"],
         )
+        
+        self.force_end_exchange = MessageMiddlewareExchange(
+            "rabbitmq",
+            "FORCE_END_EXCHANGE",
+            "server",
+            "fanout",
+            routing_keys=[""],
+        )
 
         self.define_queues()
 
