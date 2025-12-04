@@ -441,6 +441,8 @@ def define_joiner(meta: dict, compose: dict, nodo: str, worker_id: int, nodes: d
             f"AGGREGATOR_TPV={nodes.get('AGGREGATOR_TPV', 1)}",
             # Para joiner TPV, alinear expected_inputs con shards de agg_tpv
             f"EXPECTED_INPUTS={nodes.get('AGGREGATOR_TPV', 1) if nodo == 'JOINER_STORES_TPV' else 1}",
+            # Test-only crash hook (resolved at docker compose runtime)
+            "JOINER_EXIT_ON_FIRST_DATA=${JOINER_EXIT_ON_FIRST_DATA:-}",
         ],
         "volumes": [
             "./data/persistence:/data/persistence",
