@@ -129,6 +129,20 @@ def wait_for_new_leader(prev_leader, timeout=60):
         time.sleep(2)
     raise Exception("Timeout waiting for new leader election.")
 
+def wait_for_leader_log(timeout=60):
+    """
+    Wait until a leader has logged 'I am the new LEADER!', returning its id.
+    """
+    logging.info(f"Waiting for leader log... timeout={timeout}s")
+    start = time.time()
+    while time.time() - start < timeout:
+        leader = latest_leader_from_logs()
+        if leader:
+            logging.info(f"Leader detected in logs: {leader}")
+            return leader
+        time.sleep(2)
+    raise Exception("Timeout waiting for leader log.")
+
 def wait_for_revival(victim_container, timeout=120):
     """Waits for the monitor to revive the victim container."""
     logging.info(f"Waiting for revival of {victim_container} (timeout={timeout}s)...")
@@ -208,6 +222,9 @@ def main():
         # 4b. Allow heartbeats to propagate so leader tracks nodes
         logging.info("Waiting for heartbeats to populate tracking (10s)...")
         time.sleep(10)
+
+        # Ensure a leader has actually logged before proceeding
+        current_leader = wait_for_leader_log()
             
         # 5. Scenario: Service Revival
         victim = choose_victim_from_tracking()

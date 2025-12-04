@@ -106,6 +106,10 @@ test-monitor:
 	python3 monitor/tests/test_monitor_fault_tolerance.py
 .PHONY: test-monitor
 
+test-tolerance:
+	python3 monitor/tests/test_tolerance_fault.py
+.PHONY: test-tolerance
+
 test-small:
 	# Clean up previous run
 	-docker compose -f ${DOCKER} down -v --remove-orphans
