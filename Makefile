@@ -74,9 +74,10 @@ test:
 	@echo "Running tests... Logs redirected to logs.txt"
 	@bash -c ' \
 		> logs.txt; \
-		export JOINER_EXIT_ON_FIRST_DATA=1; \
 		# Launch stack detached (mirror test-monitor) \
 		docker compose -f ${DOCKER} up --build -d; \
+		# Schedule joiner kill after 30s \
+		( sleep 20; JOINERS=$$(docker compose -f ${DOCKER} ps --services | grep joiner || true); if [ -n "$$JOINERS" ]; then echo "Killing joiners after 30s: $$JOINERS" | tee -a logs.txt; docker compose -f ${DOCKER} kill $$JOINERS; fi ) & \
 		# Stream logs (follows restarts) into the single log file with service prefixes \
 		docker compose -f ${DOCKER} logs -f >> logs.txt 2>&1 & \
 		LOG_PID=$$!; \

@@ -66,6 +66,7 @@ class Joiner:
         # Test-only crash on first data chunk if env set
         self.exit_on_first_data = os.getenv("JOINER_EXIT_ON_FIRST_DATA")
         self.exit_on_first_data_triggered = False
+        self.exit_marker = None
         if self.exit_on_first_data:
             logging.info("JOINER_EXIT_ON_FIRST_DATA set (%s); will exit on first data chunk", self.exit_on_first_data)
         else:
@@ -81,10 +82,23 @@ class Joiner:
         # Main persistence (Maximizer data)
         persistence_dir = os.getenv("PERSISTENCE_DIR", "/data/persistence")
         base_dir = f"{persistence_dir}/joiner_{self.joiner_type}_{self.id}" if hasattr(self, "id") else f"{persistence_dir}/joiner_{self.joiner_type}"
+        # Exit marker to ensure test crash happens only once per persisted state
+        self.exit_marker = os.path.join(base_dir, "exit_once.marker")
+        if self.exit_on_first_data and os.path.exists(self.exit_marker):
+            self.exit_on_first_data_triggered = True
+            logging.info("JOINER_EXIT_ON_FIRST_DATA marker found; skipping exit-on-first-data for this process")
+
         self.persistence_main = PersistenceService(directory=os.path.join(base_dir, "main"))
         
         # Join persistence (Server data)
         self.persistence_join = PersistenceService(directory=os.path.join(base_dir, "join"))
+
+        # Exit marker to avoid repeated exits across restarts
+        self.exit_marker = os.path.join(base_dir, "exit_once.marker")
+        if self.exit_on_first_data and os.path.exists(self.exit_marker):
+            self.exit_on_first_data_triggered = True
+            logging.info("JOINER_EXIT_ON_FIRST_DATA marker found; skipping exit-on-first-data for this process")
+
         # Coordination publisher
         # Coordination publisher and consumer with shard-aware routing (joiners are non-sharded: use global)
         self.middleware_coordination = MessageMiddlewareExchange(
@@ -422,6 +436,13 @@ class Joiner:
                 chunk.client_id(),
                 chunk.message_id(),
             )
+            try:
+                if self.exit_marker:
+                    os.makedirs(os.path.dirname(self.exit_marker), exist_ok=True)
+                    with open(self.exit_marker, "w", encoding="utf-8") as f:
+                        f.write("exited")
+            except Exception as e:
+                logging.error("Could not write exit marker: %s", e)
             os._exit(137)
         
         with self.lock:
