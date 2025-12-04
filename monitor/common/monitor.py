@@ -202,9 +202,7 @@ class MonitorNode:
     def start(self):
         logging.info(f"Starting MonitorNode {self.node_id}")
         logging.info(f"Barrier expected counts: {self.stage_expected}")
-        # Pequeño delay inicial para permitir que todos arranquen y luego forzar elección
-        time.sleep(5)
-        self._start_election()
+        # No forced election on boot; rely on heartbeats + checker loop
         self.sender_thread.start()
         self.listener_thread.start()
         self.checker_thread.start()
@@ -236,6 +234,7 @@ class MonitorNode:
                         routing_key=routing_key,
                         body=json.dumps(msg)
                     )
+                    logging.info(f"action: send_heartbeat | node:{self.node_id} | is_leader:{self.is_leader} | leader_id:{self.leader_id}")
                     time.sleep(HEARTBEAT_INTERVAL)
             except Exception as e:
                 logging.error(f"Sender loop error: {e}")
@@ -291,14 +290,28 @@ class MonitorNode:
                 
                 if component == 'monitor':
                     is_sender_leader = data.get('is_leader')
-                    if is_sender_leader:
-                        self.leader_id = sender_id
+                    # Always refresh heartbeat if it is from the leader we are tracking
+                    if self.leader_id and sender_id == self.leader_id:
                         self.last_leader_heartbeat = time.time()
-                        if sender_id < self.node_id:
-                            logging.warning(f"Detected Leader {sender_id} with lower ID. Challenging...")
-                            self._start_election()
-                        if self.election_in_progress and sender_id > self.node_id:
-                            self.election_in_progress = False
+                        logging.info(f"action: heartbeat_from_leader | leader:{sender_id}")
+
+                    if is_sender_leader:
+                        # Adopt leader if none, if same, or if higher ID; ignore lower-ID "leaders"
+                        if (self.leader_id is None) or (sender_id == self.leader_id) or (sender_id > self.leader_id):
+                            self.leader_id = sender_id
+                            self.last_leader_heartbeat = time.time()
+                            self.is_leader = (self.node_id == sender_id)
+                            if self.is_leader:
+                                logging.info("I am the new LEADER! (via heartbeat)")
+                            else:
+                                logging.info(f"Recognizing leader via heartbeat: {sender_id}")
+                        else:
+                            logging.info(f"Ignoring lower-ID leader heartbeat from {sender_id} while tracking {self.leader_id}")
+
+                    # If we were in election and see a higher-ID monitor heartbeat, stop the election
+                    if self.election_in_progress and sender_id > self.node_id:
+                        logging.info(f"Cancelling election; higher-ID monitor heartbeat from {sender_id}")
+                        self.election_in_progress = False
 
             elif msg_type == MSG_ELECTION:
                 if sender_id < self.node_id:
@@ -308,17 +321,18 @@ class MonitorNode:
                     logging.info(f"Received ELECTION from {sender_id}. Yielding (higher ID).")
 
             elif msg_type == MSG_COORDINATOR:
-                self.leader_id = sender_id
-                self.election_in_progress = False
-                if sender_id < self.node_id:
-                    self._start_election()
-                else:
+                # Accept higher-ID coordinator; ignore lower-ID announcements once tracking a leader
+                if (self.leader_id is None) or (sender_id >= self.leader_id):
+                    self.leader_id = sender_id
+                    self.election_in_progress = False
                     self.is_leader = (self.node_id == sender_id)
                     if self.is_leader:
-                        logging.info("I am the new LEADER!")
+                        logging.info("I am the new LEADER! (via coordinator)")
                     else:
                         logging.info(f"New Leader elected: {sender_id}")
                         logging.info(f"Accepting {sender_id} as Coordinator.")
+                else:
+                    logging.info(f"Ignoring lower-ID coordinator announcement from {sender_id} while tracking {self.leader_id}")
             elif msg_type in (MSG_WORKER_END, MSG_WORKER_STATS):
                 self._handle_barrier_message(data)
 
@@ -352,7 +366,7 @@ class MonitorNode:
                         del self.nodes_last_seen[node_id]
             else:
                 if time.time() - self.last_leader_heartbeat > HEARTBEAT_TIMEOUT:
-                    logging.warning("Leader died! Starting election...")
+                    logging.warning(f"Leader heartbeat timeout (>{HEARTBEAT_TIMEOUT}s). Starting election... | last_leader:{self.leader_id}")
                     self._start_election()
 
     def _forward_loop(self):

@@ -141,6 +141,10 @@ def define_rabbitmq(compose: dict):
             "timeout": "5s",
             "retries": 10,
         },
+        "environment": [
+            # Silence connection/channel chatter
+            "RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS=-rabbit log_levels [{connection,warning},{channel,warning},{default,warning}]"
+        ],
         "volumes": [
             "./rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro"
         ],
