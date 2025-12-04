@@ -13,7 +13,7 @@ from utils.results.result_batch_reader import ResultBatchReader
 from utils.results.result_chunk import ResultChunk, ResultChunkHeader
 from utils.file_utils.file_chunk import FileChunk
 from utils.file_utils.table_type import TableType, ResultTableType
-from utils.eof_protocol.end_messages import MessageEnd, MessageQueryEnd
+from utils.eof_protocol.end_messages import MessageEnd, MessageQueryEnd, MessageForceEnd
 from utils.protocol import (
     COORDINATION_EXCHANGE,
     MSG_WORKER_END,
@@ -95,6 +95,14 @@ class Server:
         self.filter_year_shards = int(os.getenv("FILTER_YEAR_SHARDS", "1"))
         self.filter_hour_shards = int(os.getenv("FILTER_HOUR_SHARDS", "1"))
         self.filter_amount_shards = int(os.getenv("FILTER_AMOUNT_SHARDS", "1"))
+        self.force_end_exchange = MessageMiddlewareExchange(
+                "rabbitmq",
+                "FORCE_END_EXCHANGE",
+                "server",
+                "fanout",
+                routing_keys=[""],
+            )
+        self._force_end_lock = threading.Lock()
 
         self._threads = []
 
@@ -283,7 +291,12 @@ class Server:
                 else:
                     logging.warning("action: unknown_header | peer:%s | header:%s", peer, header)
                     break
-
+        except OSError as e:
+            logging.error("OSError decoding message from client | client_id:%s | error:%r", client_id, e)
+            force_end_message = MessageForceEnd(client_id).encode()
+            with self._force_end_lock:
+                self.force_end_exchange.send(force_end_message)
+            
         except Exception as e:
             logging.error("action: client_handler_error | peer:%s | client_id:%s | error:%r", peer, client_id, e)
         finally:

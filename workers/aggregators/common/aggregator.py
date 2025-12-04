@@ -17,7 +17,7 @@ from utils.processing.process_table import (
 from utils.processing.process_chunk import ProcessChunk
 from utils.processing.process_batch_reader import ProcessBatchReader
 from utils.file_utils.file_table import DateTime
-from utils.eof_protocol.end_messages import MessageEnd
+from utils.eof_protocol.end_messages import MessageEnd, MessageForceEnd
 from utils.protocol import (
     COORDINATION_EXCHANGE,
     MSG_WORKER_END,
@@ -40,6 +40,7 @@ from workers.common.sharding import (
     ShardingConfigError,
     build_id_lookup,
     load_shards_from_env,
+    shard_by_id,
 )
 from .aggregator_stats_messages import (
     AggregatorStatsMessage,
@@ -172,6 +173,14 @@ class Aggregator:
             routing_keys=[f"coordination.barrier.{self.stage}.{self.shard_id or DEFAULT_SHARD}"],
         )
 
+        self.force_end_exchange = MessageMiddlewareExchange(
+            "rabbitmq",
+            "FORCE_END_EXCHANGE",
+            "server",
+            "fanout",
+            routing_keys=[""],
+        )
+
 
     def shutdown(self, signum=None, frame=None):
         logging.info(
@@ -184,6 +193,8 @@ class Aggregator:
                     timer.cancel()
             except (OSError, RuntimeError, AttributeError):
                 pass
+        
+        self.force_end_exchange.close()
 
         self._running = False
 
@@ -303,6 +314,11 @@ class Aggregator:
         data_chunks = deque()
         coord_results = deque()
 
+        def force_end_callback(msg):
+            logging.info(f"action: force_end_received | type:{self.aggregator_type} | agg_id:{self.aggregator_id}")
+            client_id = MessageForceEnd.decode(msg).client_id()
+            self.working_state.force_delete_client_stats_data(client_id)
+
         def data_callback(msg):
             data_results.append(msg)
 
@@ -368,6 +384,13 @@ class Aggregator:
             except Exception as e:
                 logging.error(
                     f"action: data_consume_error | type:{self.aggregator_type} | agg_id:{self.aggregator_id} | error:{e}"
+                )
+            
+            try:
+                self.force_end_exchange.start_consuming(force_end_callback)
+            except Exception as e:
+                logging.error(
+                    f"action: force_end_consume_error | type:{self.aggregator_type} | agg_id:{self.aggregator_id} | error:{e}"
                 )
 
             try:
