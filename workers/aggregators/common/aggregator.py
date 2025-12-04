@@ -439,7 +439,10 @@ class Aggregator:
 
     def _handle_end_message(self, raw_msg: bytes):
         try:
-            end_message = MessageEnd.decode(raw_msg)
+            if isinstance(raw_msg, MessageEnd):
+                end_message = raw_msg
+            else:
+                end_message = MessageEnd.decode(raw_msg if isinstance(raw_msg, (bytes, bytearray)) else raw_msg.encode() if isinstance(raw_msg, str) else raw_msg)
         except Exception as e:
             logging.error(f"action: error_processing_end_message | type:{self.aggregator_type} | error:{e}")
             return
@@ -470,6 +473,11 @@ class Aggregator:
         # Force flush/clear buffer on END
         try:
             self.persistence.commit_working_state(self.working_state.to_bytes(), uuid.uuid4())
+            try:
+                self.persistence.chunk_buffer.clear()
+                self.persistence.chunks_since_last_commit = 0
+            except Exception:
+                pass
         except Exception as e:
             logging.error(f"action: end_flush_error | error:{e}")
 
@@ -487,6 +495,17 @@ class Aggregator:
         client_id = chunk.client_id()
         table_type = chunk.table_type()
         
+        # Validate table type early to avoid corrupting state
+        if not self._is_valid_table_type(table_type):
+            logging.info(
+                f"action: invalid_table_type_ignored | agg_type:{self.aggregator_type} | table_type:{table_type}"
+            )
+            try:
+                self.persistence.clear_processing_commit()
+            except Exception:
+                pass
+            return
+
         # Check idempotency
         if self.working_state.is_processed(chunk.message_id()):
             logging.info(f"action: duplicate_chunk_ignored | message_id:{chunk.message_id()}")
@@ -565,6 +584,10 @@ class Aggregator:
                 )
                 if self.aggregator_type != "TPV":
                     self.middleware_data_exchange.send(data_msg.encode())
+                    try:
+                        self.persistence.commit_send_ack(client_id, chunk.message_id())
+                    except Exception:
+                        logging.error("action: commit_send_ack_error | client_id:%s", client_id)
                 else:
                     logging.debug("DEBUGGING_QUERY_3 | skip_fanout_tpv_peers")
                 if self.aggregator_type == "TPV":
@@ -574,7 +597,7 @@ class Aggregator:
             except Exception as e:
                 logging.error(f"action: error_sending_data_message | error:{e}")
 
-        self.working_state.mark_processed(chunk.message_id())
+        self.working_state.mark_processed(chunk.message_id(), client_id)
 
     def _handle_data_chunk(self, raw_msg: bytes):
         """
@@ -898,7 +921,8 @@ class Aggregator:
         data = self.working_state.global_accumulator.get(client_id, {}).get("products")
         if not data:
             return
-        if self.working_state.results_already_sent(client_id, TableType.TRANSACTION_ITEMS):
+        # Allow resend if END not sent yet (crash after publish)
+        if self.working_state.results_already_sent(client_id, TableType.TRANSACTION_ITEMS) and self.working_state.end_already_sent(client_id, TableType.TRANSACTION_ITEMS):
             logging.info(f"action: skip_results_already_sent | cli_id:{client_id} | table:TRANSACTION_ITEMS")
             return
 
@@ -934,7 +958,7 @@ class Aggregator:
         data = self.working_state.global_accumulator.get(client_id, {}).get("purchases")
         if not data:
             return
-        if self.working_state.results_already_sent(client_id, TableType.PURCHASES_PER_USER_STORE):
+        if self.working_state.results_already_sent(client_id, TableType.PURCHASES_PER_USER_STORE) and self.working_state.end_already_sent(client_id, TableType.PURCHASES_PER_USER_STORE):
             logging.info(f"action: skip_results_already_sent | cli_id:{client_id} | table:PURCHASES_PER_USER_STORE")
             return
 
@@ -975,7 +999,7 @@ class Aggregator:
         data = self.working_state.global_accumulator.get(client_id, {}).get("tpv")
         if not data:
             return
-        if self.working_state.results_already_sent(client_id, TableType.TPV):
+        if self.working_state.results_already_sent(client_id, TableType.TPV) and self.working_state.end_already_sent(client_id, TableType.TPV):
             logging.info(f"action: skip_results_already_sent | cli_id:{client_id} | table:TPV")
             return
 

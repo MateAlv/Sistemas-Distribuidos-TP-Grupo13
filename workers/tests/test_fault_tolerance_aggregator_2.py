@@ -899,7 +899,8 @@ class TestAggregatorExtendedFaultTolerance(unittest.TestCase):
         agg = Aggregator(self.config["agg_type"], self.config["agg_id"])
         agg.middleware_queue_sender["to_absolute_max"] = MagicMock()
         # Seed state
-        agg.working_state.global_accumulator[1]["products"] = {(1, 2024, 1): {"quantity": 1, "subtotal": 2.0}}
+        prod_acc = agg.working_state.get_product_accumulator(1)
+        prod_acc[(1, 2024, 1)] = {"quantity": 1, "subtotal": 2.0}
         agg._publish_final_products(1)
         first_call = agg.middleware_queue_sender["to_absolute_max"].send.call_args[0][0][:28]
         agg._publish_final_products(1)

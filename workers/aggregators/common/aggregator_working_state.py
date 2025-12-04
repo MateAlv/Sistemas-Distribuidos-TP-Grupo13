@@ -129,9 +129,10 @@ class AggregatorWorkingState(WorkingState):
     def is_processed(self, message_id):
         return message_id in self.processed_ids
 
-    def mark_processed(self, message_id):
+    def mark_processed(self, message_id, client_id=None):
         self.processed_ids.add(message_id)
-        # Without client info, we can't map precisely; handled in aggregator with client_id
+        if client_id is not None:
+            self.processed_ids_per_client.setdefault(client_id, set()).add(message_id)
 
     def get_product_accumulator(self, client_id):
         self._ensure_global_entry(client_id)
