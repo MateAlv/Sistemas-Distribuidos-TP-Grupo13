@@ -17,3 +17,4 @@ persistence_processing_commit
 persistence_state
 persistence_send_commit
 previous_implementations/
+full_logs.txt

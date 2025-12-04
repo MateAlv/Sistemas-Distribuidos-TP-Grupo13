@@ -125,7 +125,7 @@ class Filter:
             table_type = last_processing_chunk.table_type()
             message_id = last_processing_chunk.message_id()
 
-            filtered_rows = self.process_chunk(last_processing_chunk)
+            filtered_rows = self.process_chunk(last_processing_chunk, force=True)
             # Se actualiza el working state solo si el chunk NO fue contado previamente
             if not self.persistence_service.process_has_been_counted(last_processing_chunk.message_id()):
                 if filtered_rows:
@@ -134,6 +134,27 @@ class Filter:
                     self.working_state.increase_not_sent_chunks(client_id, table_type, self.id, 1)
             # Se commitea el working state
             self.persistence_service.commit_working_state(self.working_state.to_bytes(), message_id)
+
+            # Send filtered rows (crucial for recovery if crash happened before send)
+            self.send_filtered_rows(filtered_rows, last_processing_chunk, client_id, table_type, message_id)
+
+            # Check if we need to send END/Stats (logic copied from _handle_process_message)
+            # This is needed if we crashed after processing the last chunk but before sending END
+            if self.working_state.end_is_received(client_id, table_type):
+                total_expected = self.working_state.get_total_chunks_to_receive(client_id, table_type)
+                
+                # Send OWN stats (not the sum of all filters)
+                own_received = self.working_state.get_own_chunks_received(client_id, table_type, self.id)
+                own_not_sent = self.working_state.get_own_chunks_not_sent(client_id, table_type, self.id)
+
+                if self.working_state.should_send_stats(client_id, table_type, own_received, own_not_sent):
+                    stats_msg = FilterStatsMessage(self.id, client_id, table_type, total_expected, own_received, own_not_sent)
+                    self.middleware_end_exchange.send(stats_msg.encode())
+                    self.working_state.mark_stats_sent(client_id, table_type, own_received, own_not_sent)
+
+                if self.working_state.can_send_end_message(client_id, table_type, total_expected, self.id):
+                    total_not_sent = self.working_state.get_total_not_sent_chunks(client_id, table_type)
+                    self._send_end_message(client_id, table_type, total_expected, total_not_sent)
 
     def run(self):
         logging.info(f"Filtro iniciado. Tipo: {self.filter_type}, ID: {self.id}")
@@ -350,12 +371,11 @@ class Filter:
                     logging.error(f"action: queue_not_found | queue:{queue_name} | cli_id:{client_id}")
 
             logging.info(f"action: rows_sent | type:{self.filter_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()} | rows_out:{len(filtered_rows)}")
-            # Se commitea el envío del chunk procesado
-            self.persistence_service.commit_send_ack(client_id, message_id)
         else:
             logging.info(f"action: no_rows_to_send | type:{self.filter_type} | cli_id:{chunk.client_id()} | file_type:{chunk.table_type()}")
-            return False
 
+        # Se commitea el envío del chunk procesado (incluso si no hubo filas, para marcarlo como completado)
+        self.persistence_service.commit_send_ack(client_id, message_id)
         return True
 
 
@@ -523,6 +543,10 @@ class Filter:
                  
                  for i in range(1, target_shards + 1):
                      shard_total = self.shard_chunks_sent.get((next_stage, client_id, table_type, i), 0)
+                     if self.filter_type == "hour" and table_type == TableType.TRANSACTIONS:
+                        logging.info(
+                            f"DEBUGGING_QUERY_3 | hour_end_shard_totals | cli_id:{client_id} | shard:{i} | sent_chunks:{shard_total}"
+                        )
                      try:
                         logging.info(
                             f"action: sending_expected_for_next_stage | stage:{next_stage} | shard:{i} | cli_id:{client_id} | expected_chunks:{shard_total} | sender_filter:{self.id}"
@@ -572,7 +596,7 @@ class Filter:
         logging.error(f"Filtro desconocido: {self.filter_type}")
         return False
 
-    def process_chunk(self, chunk: ProcessChunk):
+    def process_chunk(self, chunk: ProcessChunk, force=False):
         """
         Applies the filter to the chunk and returns filtered rows.
         Does NOT send the rows - that's handled by the caller after state commits.
@@ -580,7 +604,7 @@ class Filter:
         client_id = chunk.client_id()
         message_id = chunk.message_id()
 
-        if self.working_state.is_processed(message_id):
+        if not force and self.working_state.is_processed(message_id):
             logging.info(f"action: duplicate_chunk_ignored | message_id:{message_id}")
             return
 

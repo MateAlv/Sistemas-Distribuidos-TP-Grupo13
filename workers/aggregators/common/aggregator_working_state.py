@@ -19,6 +19,11 @@ class AggregatorWorkingState(WorkingState):
         self.last_stats_sent_time = {}
         self.global_accumulator = {}
         self.processed_ids = set()
+        # Publish/idempotency flags
+        self.results_sent = set()  # (client_id, table_type)
+        self.end_sent = set()      # (client_id, table_type)
+        # Track processed ids per client for pruning
+        self.processed_ids_per_client = {}
 
     def _ensure_dict_entry(self, dictionary, client_id, table_type, default=0):
         if client_id not in dictionary:
@@ -124,8 +129,10 @@ class AggregatorWorkingState(WorkingState):
     def is_processed(self, message_id):
         return message_id in self.processed_ids
 
-    def mark_processed(self, message_id):
+    def mark_processed(self, message_id, client_id=None):
         self.processed_ids.add(message_id)
+        if client_id is not None:
+            self.processed_ids_per_client.setdefault(client_id, set()).add(message_id)
 
     def get_product_accumulator(self, client_id):
         self._ensure_global_entry(client_id)
@@ -175,6 +182,28 @@ class AggregatorWorkingState(WorkingState):
         ):
             if not self.global_accumulator[client_id]:
                 del self.global_accumulator[client_id]
+
+        # Clear publish flags
+        self.results_sent = {k for k in self.results_sent if k[0] != client_id or k[1] != table_type}
+        self.end_sent = {k for k in self.end_sent if k[0] != client_id or k[1] != table_type}
+        # Prune processed ids for this client if tracked
+        if client_id in self.processed_ids_per_client:
+            to_remove = self.processed_ids_per_client[client_id]
+            self.processed_ids -= to_remove
+            del self.processed_ids_per_client[client_id]
+
+    # Publish flags helpers
+    def mark_results_sent(self, client_id, table_type):
+        self.results_sent.add((client_id, table_type))
+
+    def results_already_sent(self, client_id, table_type):
+        return (client_id, table_type) in self.results_sent
+
+    def mark_end_sent(self, client_id, table_type):
+        self.end_sent.add((client_id, table_type))
+
+    def end_already_sent(self, client_id, table_type):
+        return (client_id, table_type) in self.end_sent
 
     def get_active_clients_and_tables(self):
         active = []

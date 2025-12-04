@@ -32,6 +32,8 @@ from utils.processing.process_chunk import ProcessChunk, ProcessChunkHeader
 from utils.processing.process_table import TransactionItemsProcessRow, DateTime
 from utils.file_utils.table_type import TableType
 from utils.eof_protocol.end_messages import MessageEnd
+from utils.common.processing_types import MonthYear
+from utils.processing.process_batch_reader import ProcessBatchReader
 
 
 class TestMaximizerFaultToleranceComprehensive(unittest.TestCase):
@@ -175,6 +177,61 @@ class TestMaximizerFaultToleranceComprehensive(unittest.TestCase):
         
         # VERIFICATION: Result identical to baseline
         self.assertEqual(len(maximizer_worker2.working_state.processed_ids), 4)
+
+    @patch('workers.maximizers.common.maximizer.MessageMiddlewareQueue')
+    @patch('workers.maximizers.common.maximizer.MessageMiddlewareExchange')
+    def test_processing_commit_cleared_after_success(self, mock_exchange, mock_queue):
+        """
+        Ensure processing commit is cleared after handling a chunk, so recovery won't loop forever.
+        """
+        chunk = self._create_test_chunk(message_id="msg_processing_commit")
+
+        maximizer_worker = Maximizer(
+            self.config["maximizer_type"],
+            self.config["maximizer_range"],
+            self.config["expected_inputs"]
+        )
+
+        # Process the chunk end-to-end
+        maximizer_worker._handle_data_chunk(chunk.serialize())
+
+        # After successful handling, the processing commit should not linger
+        recovered = maximizer_worker.persistence.recover_last_processing_chunk()
+        self.assertIsNone(recovered, "Processing commit should be cleared after successful handling")
+        self.assertIn(chunk.message_id(), maximizer_worker.working_state.processed_ids)
+
+    @patch('workers.maximizers.common.maximizer.MessageMiddlewareQueue')
+    @patch('workers.maximizers.common.maximizer.MessageMiddlewareExchange')
+    def test_absolute_max_results_use_deterministic_msg_id(self, mock_exchange, mock_queue):
+        """
+        Publishing results twice for the same client should use a stable message_id (idempotent resend).
+        """
+        client_id = 1
+        maximizer_worker = Maximizer(
+            self.config["maximizer_type"],
+            "absolute",  # force absolute mode
+            self.config["expected_inputs"]
+        )
+
+        # Seed state with deterministic data
+        month = MonthYear(month=1, year=2024)
+        maximizer_worker.working_state.sellings_max[client_id][(123, month)] = 10
+        maximizer_worker.working_state.profit_max[client_id][(123, month)] = 99.0
+
+        sent_payloads = []
+        maximizer_worker.data_sender.send = sent_payloads.append
+
+        maximizer_worker.publish_absolute_max_results(client_id)
+        maximizer_worker.publish_absolute_max_results(client_id)
+
+        self.assertGreaterEqual(len(sent_payloads), 2, "Two publishes should have occurred")
+
+        msg_ids = []
+        for payload in sent_payloads[:2]:
+            chunk = ProcessBatchReader.from_bytes(payload)
+            msg_ids.append(chunk.message_id())
+
+        self.assertEqual(msg_ids[0], msg_ids[1], "Message IDs must be deterministic for retries")
 
     @patch('workers.maximizers.common.maximizer.MessageMiddlewareQueue')
     @patch('workers.maximizers.common.maximizer.MessageMiddlewareExchange')
