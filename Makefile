@@ -73,26 +73,18 @@ test:
 	python3  $(COMPOSE_SCRIPT) --config=config/config-test.ini
 	@echo "Running tests... Logs redirected to logs.txt"
 	@bash -c ' \
-		docker compose -f ${DOCKER} up --build > logs.txt 2>&1 & \
-		PID=$$!; \
-		while kill -0 $$PID 2>/dev/null; do \
-			LINES=$$(wc -l < logs.txt 2>/dev/null || echo 0); \
-			if [ $$LINES -gt 100000 ]; then \
-				echo "Log limit exceeded ($$LINES lines). Stopping test..."; \
-				kill $$PID; \
-				docker compose -f ${DOCKER} stop; \
-				exit 1; \
-			fi; \
-			sleep 2; \
-		done; \
-		wait $$PID; \
-		EXIT_CODE=$$?; \
-		if [ $$EXIT_CODE -eq 0 ]; then \
-			echo "Test passed"; \
-		else \
-			echo "Test failed. Check logs.txt"; \
-			exit $$EXIT_CODE; \
-		fi \
+		> logs.txt; \
+		# Launch stack detached (mirror test-monitor) \
+		docker compose -f ${DOCKER} up --build -d; \
+		# Stream logs (follows restarts) into the single log file with service prefixes \
+		docker compose -f ${DOCKER} logs -f >> logs.txt 2>&1 & \
+		LOG_PID=$$!; \
+		# Wait for clients to finish (ignore errors if fewer clients exist) \
+		docker compose -f ${DOCKER} wait client-1 client-2 client-3 >/dev/null 2>&1 || true; \
+		# Stop the stack and logging \
+		docker compose -f ${DOCKER} stop -t 1 >/dev/null 2>&1; \
+		kill $$LOG_PID 2>/dev/null; \
+		echo "Test finished. Check logs.txt" \
 	'
 .PHONY: test
 

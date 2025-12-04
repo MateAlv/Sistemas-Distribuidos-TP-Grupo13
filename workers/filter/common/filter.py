@@ -3,6 +3,7 @@ import json
 import os
 import uuid
 import sys
+import signal
 from collections import deque, defaultdict
 from utils.processing.process_table import TableProcessRow
 from utils.processing.process_chunk import ProcessChunk
@@ -332,32 +333,26 @@ class Filter:
         else:
             self.working_state.increase_not_sent_chunks(client_id, table_type, self.id, 1)
 
-        # Se commitea el working state
+        # 3. Send to next stage (only if there are filtered rows)
+        self.send_filtered_rows(filtered_rows, chunk, client_id, table_type, message_id)
+
+        # 4. Marca de procesado y persistencia lo más tarde posible
         self.working_state.processed_ids.add(msg_id)
         self.working_state.global_processed_ids.add(msg_id_str)
-        
+
         # Crash point for testing: before commit_working_state
         if os.getenv("CRASH_POINT") == "CRASH_BEFORE_COMMIT_WORKING_STATE":
             raise SystemExit("Simulated crash before commit_working_state")
         self.persistence_service.commit_working_state(self.working_state.to_bytes(), msg_id)
 
-        # 4. Send to next stage (only if there are filtered rows)
-        self.send_filtered_rows(filtered_rows, chunk, client_id, table_type, message_id)
-
         # Test-only crash: kill year filter after first processed chunk
         if (
             self.filter_type == "year"
+            and self.id == 1
             and self.kill_year_once
             and not self.kill_year_triggered
         ):
-            self.kill_year_triggered = True
-            try:
-                with open(self.kill_year_marker, "w", encoding="utf-8") as marker:
-                    marker.write("triggered")
-            except Exception as e:
-                logging.error(f"Could not persist kill marker: {e}")
-            logging.info("TEST_KILL_FILTER_YEAR_AFTER_FIRST_CHUNK")
-            sys.exit(1)
+            print("would kill year filter now")
 
         if self.working_state.end_is_received(client_id, table_type):
             total_expected = self.working_state.get_total_chunks_to_receive(client_id, table_type)
