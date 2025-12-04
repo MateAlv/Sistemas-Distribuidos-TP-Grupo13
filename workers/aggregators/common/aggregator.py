@@ -519,19 +519,24 @@ class Aggregator:
             f"| file_type:{table_type} | total_chunks_expected:{total_expected}"
         )
 
+        # IMPORTANT: Do NOT process buffer here!
+        # Chunks may still arrive AFTER this END message due to network delays.
+        # Buffer will be processed when BARRIER arrives (in _send_end_message).
+        
         # Mark END received and persist (FT improvement)
         self.working_state.mark_end_message_received(client_id, table_type)
         self.working_state.set_chunks_to_receive(client_id, table_type, total_expected)
         self._save_state(uuid.uuid4())
 
         # Send stats to Monitor
+        # Note: Stats may be incomplete if chunks still arriving, but that's OK
+        # Monitor will wait for all aggregators to report before triggering barrier
         self._send_stats_to_monitor(client_id, table_type)
         # Announce END to Monitor - Monitor will coordinate barrier and trigger publish
         self._send_end_to_monitor(client_id, table_type, total_expected)
 
-        # REMOVED: Direct publish/send - Monitor coordinates via barrier forward
-        # The barrier forward handler (_process_coord_message) will call _send_end_message
-        # which then calls publish_final_results and sends END downstream
+        # REMOVED: Buffer processing moved to _send_end_message (barrier handler)
+        # This allows late-arriving chunks to be processed before publication
 
     def _apply_and_update_state(self, chunk: ProcessChunk):
         """
@@ -634,15 +639,22 @@ class Aggregator:
                     f"DEBUG: aggregator_data_sent | type:{self.aggregator_type} | agg_id:{self.aggregator_id} "
                     f"| client_id:{client_id} | table_type:{table_type} | payload_size:{len(payload)}"
                 )
+                
+                # CRITICAL: TPV does NOT use fanout - only sends final results after barrier
+                # PURCHASES uses fanout for peer-to-peer aggregation
+                # PRODUCTS does not use fanout
                 if self.aggregator_type == "PURCHASES":
+                    self.middleware_data_exchange.send(data_msg.encode())
                     # Only commit send_ack when actually sending to peers
                     self.persistence.commit_send_ack(client_id, chunk.message_id())
                 elif self.aggregator_type == "PRODUCTS":
-                    # PRODUCTS: no fanout
+                    # PRODUCTS: no fanout, only sends final results
                     logging.debug("action: skip_fanout_products")
-                if self.aggregator_type == "TPV":
+                elif self.aggregator_type == "TPV":
+                    # TPV: no fanout, only accumulates locally and sends final results after barrier
+                    logging.debug("DEBUGGING_QUERY_3 | skip_fanout_tpv_peers")
                     logging.info(
-                        f"DEBUGGING_QUERY_3 | agg_tpv_payload_sent | cli_id:{client_id} | rows:{len(aggregated_chunk.rows)} | accumulated_keys:{len(self.working_state.get_tpv_accumulator(client_id))}"
+                        f"DEBUGGING_QUERY_3 | agg_tpv_payload_accumulated | cli_id:{client_id} | rows:{len(aggregated_chunk.rows)} | accumulated_keys:{len(self.working_state.get_tpv_accumulator(client_id))}"
                     )
             except Exception as e:
                 logging.error(f"action: error_sending_data_message | error:{e}")
@@ -757,16 +769,26 @@ class Aggregator:
             f"action: publish_final_results_trigger | type:{self.aggregator_type}"
         ) # Removed: self._can_send_end_message check
         
-        # Force flush on END - ensure buffered chunks are persisted
-        if self.persistence.chunk_buffer.get_chunk_count() > 0:
-            logging.info(f"action: flushing_buffer_on_end | client_id:{client_id} | buffered:{self.persistence.chunk_buffer.get_chunk_count()}")
-            self._save_state(uuid.uuid4())
-            # Clear buffer after flush (buffer was persisted via _save_state)
-            try:
-                self.persistence.chunk_buffer.clear()
-                self.persistence.chunks_since_last_commit = 0
-            except Exception as e:
-                logging.error(f"Error clearing buffer after END flush: {e}")
+        # CRITICAL: Process buffered chunks BEFORE publishing
+        # This catches ALL chunks including those that arrived after END message
+        # Chunks can arrive out-of-order due to network delays
+        buffered_chunks = self.persistence.recover_buffered_chunks()
+        if buffered_chunks:
+            logging.info(f"action: processing_buffered_chunks_on_barrier | client_id:{client_id} | count:{len(buffered_chunks)}")
+            for chunk in buffered_chunks:
+                try:
+                    self._apply_and_update_state(chunk)
+                except Exception as e:
+                    logging.error(f"Error processing buffered chunk on barrier: {e}")
+            # Save state after processing buffer
+            if buffered_chunks:
+                self._save_state(buffered_chunks[-1].message_id())
+                # Clear buffer after processing
+                try:
+                    self.persistence._clear_chunk_buffer()
+                    self.persistence.chunks_since_last_commit = 0
+                except Exception as e:
+                    logging.error(f"Error clearing buffer after barrier processing: {e}")
 
         self.publish_final_results(client_id, table_type)
 
