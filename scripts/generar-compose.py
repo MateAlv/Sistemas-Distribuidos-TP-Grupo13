@@ -542,7 +542,14 @@ def define_monitor(meta: dict, compose: dict, count: int, worker_services: list)
             }
         }
 
-def define_chaos_monkey(meta: dict, compose: dict):
+def define_chaos_monkey(meta: dict, compose: dict, client_amount: int = 0):
+    depends_on = {
+        "server": {"condition": "service_started"},
+    }
+    # Delay chaos until clients are up
+    for i in range(1, client_amount + 1):
+        depends_on[f"client-{i}"] = {"condition": "service_started"}
+
     compose["services"]["chaos_monkey"] = {
         "build": {
             "context": ".",
@@ -559,9 +566,7 @@ def define_chaos_monkey(meta: dict, compose: dict):
             "/var/run/docker.sock:/var/run/docker.sock",
         ],
         "networks": ["testing_net"],
-        "depends_on": {
-            "server": {"condition": "service_started"},
-        }
+        "depends_on": depends_on,
     }
 
 def generate_compose(meta: dict, nodes: dict, services: dict = None):
@@ -658,7 +663,7 @@ def generate_compose(meta: dict, nodes: dict, services: dict = None):
     services["monitor"] = monitor_count
 
     if meta.get("chaos_enabled", "false").lower() == "true":
-        define_chaos_monkey(meta, compose)
+        define_chaos_monkey(meta, compose, client_amount)
         services["chaos_monkey"] = 1
         
     define_network(compose)

@@ -15,12 +15,17 @@ class ChaosManager:
                 ["docker", "ps", "--format", "{{.Names}}"],
                 capture_output=True,
                 text=True,
-                check=True
+                check=True,
             )
             containers = result.stdout.strip().split('\n')
             return [c for c in containers if c]
         except subprocess.CalledProcessError as e:
-            logging.error(f"Failed to list containers: {e}")
+            logging.error(
+                "Failed to list containers: %s | stdout:%r | stderr:%r",
+                e,
+                getattr(e, "stdout", ""),
+                getattr(e, "stderr", ""),
+            )
             return []
 
     def get_valid_targets(self):
