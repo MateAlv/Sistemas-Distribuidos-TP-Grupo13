@@ -44,21 +44,62 @@ commit_working_state(self, estado.to_bytes, x.message_id())
 ### `PersistenceService`
 Servicio principal de persistencia que gestiona los commits de estado, procesamiento y envío.
 
-#### Funciones principales:
-- **`commit_working_state(state_data, last_processed_id)`**: Persiste el estado del worker (contador, datos agregados, etc.)
-- **`commit_processing_chunk(chunk)`**: Registra que un chunk fue recibido para procesar
-- **`commit_send_ack(client_id, message_id)`**: Registra que un mensaje fue enviado
-- **`recover_working_state()`**: Recupera el estado del worker desde disco
-- **`recover_last_processing_chunk()`**: Recupera el último chunk que estaba siendo procesado
-- **`send_has_been_acknowledged(client_id, message_id)`**: Verifica si un mensaje ya fue enviado
-- **`process_has_been_counted(message_id)`**: Verifica si un mensaje ya fue contado en el estado
-- **`clear_processing_commit()`**: Limpia el commit de procesamiento después de manejarlo exitosamente
+#### Archivos de Persistencia
+Cada worker mantiene 4 archivos en su directorio de persistencia (ej: `/data/persistence/aggregator_PRODUCTS_1/`):
 
-#### Funciones de Buffering de Chunks:
-- **`append_chunk_to_buffer(chunk)`**: Agrega un chunk al buffer temporal
-- **`recover_buffered_chunks()`**: Recupera todos los chunks del buffer
+1. **`persistence_state`**: Estado completo del worker (WorkingState serializado)
+   - Contiene: contadores, datos acumulados, flags de END, sets de idempotencia
+   - Formato: `[16 bytes: last_processed_id UUID][estado serializado con pickle]`
+
+2. **`persistence_send_commit`**: Registro de mensajes enviados (ACKs)
+   - Contiene: lista de (message_id, client_id) enviados
+   - Formato: secuencia de `[16 bytes: UUID][4 bytes: client_id]`
+   - Se usa para idempotencia de envíos
+
+3. **`persistence_processing_commit`**: Último chunk en procesamiento
+   - Contiene: chunk completo serializado
+   - Se limpia después de procesar exitosamente
+   - Permite recovery del último chunk interrumpido
+
+4. **`persistence_chunk_buffer`**: Buffer temporal de chunks (solo Aggregator)
+   - Contiene: múltiples chunks en espera de commit de estado
+   - Formato: `[4 bytes: length][chunk][4 bytes: length][chunk]...`
+   - Se limpia al hacer commit de estado
+
+#### Operaciones Atómicas
+Todas las escrituras usan operaciones atómicas para garantizar consistencia ante crashes:
+
+**`atomic_file_upsert(file_path, data)`**:
+- Escribe datos a archivo usando **temp file + rename atómico**
+- Proceso: 
+  1. Crea archivo temporal en mismo directorio
+  2. Escribe datos + `fsync()` para forzar flush a disco
+  3. `os.replace()` renombra atómicamente (operación atómica del filesystem)
+- Garantía: el archivo siempre tiene contenido válido (todo o nada)
+
+**`atomic_file_append(file_path, data)`**:
+- Agrega datos al final de archivo de forma atómica
+- Proceso:
+  1. Lee contenido actual
+  2. Concatena nuevo contenido
+  3. Usa `atomic_file_upsert()` para escribir todo
+- Usado para: commits de envío (se van acumulando)
+
+#### Funciones principales:
+- **`commit_working_state(state_data, last_processed_id)`**: Persiste el estado del worker (contador, datos agregados, etc.) en `persistence_state`
+- **`commit_processing_chunk(chunk)`**: Registra que un chunk fue recibido para procesar en `persistence_processing_commit`
+- **`commit_send_ack(client_id, message_id)`**: Registra que un mensaje fue enviado, agrega a `persistence_send_commit`
+- **`recover_working_state()`**: Recupera el estado del worker desde `persistence_state`
+- **`recover_last_processing_chunk()`**: Recupera el último chunk desde `persistence_processing_commit` si no fue enviado
+- **`send_has_been_acknowledged(client_id, message_id)`**: Verifica si un mensaje ya fue enviado (consulta `persistence_send_commit`)
+- **`process_has_been_counted(message_id)`**: Verifica si un mensaje ya fue contado en el estado
+- **`clear_processing_commit()`**: Limpia `persistence_processing_commit` después de procesar exitosamente
+
+#### Funciones de Buffering de Chunks (Aggregator):
+- **`append_chunk_to_buffer(chunk)`**: Agrega un chunk a `persistence_chunk_buffer`
+- **`recover_buffered_chunks()`**: Recupera todos los chunks desde `persistence_chunk_buffer`
 - **`should_commit_state()`**: Verifica si debe commitear estado basado en cantidad de chunks
-- **`_clear_chunk_buffer()`**: Limpia el buffer de chunks (llamado tras commit de estado)
+- **`_clear_chunk_buffer()`**: Limpia `persistence_chunk_buffer` (llamado tras commit de estado)
 
 *Configuración*: `commit_interval` determina cada cuántos chunks se persiste el estado (default: 10)
 
@@ -66,9 +107,9 @@ Servicio principal de persistencia que gestiona los commits de estado, procesami
 Gestiona un archivo buffer para chunks usando formato length-prefixed.
 
 #### Funciones:
-- **`append_chunk(chunk)`**: Agrega un chunk al buffer de forma atómica
+- **`append_chunk(chunk)`**: Agrega un chunk al buffer de forma atómica usando `fsync()`
 - **`read_all_chunks()`**: Lee todos los chunks del buffer en orden
-- **`clear()`**: Limpia el archivo buffer
+- **`clear()`**: Limpia el archivo buffer de forma atómica
 - **`get_chunk_count()`**: Obtiene el número de chunks en buffer
 - **`get_buffer_size()`**: Obtiene el tamaño del buffer en bytes
 
@@ -85,8 +126,8 @@ Funciones auxiliares para simular crashes en testing.
 Clase base para serializar/deserializar estado de workers.
 
 #### Funciones:
-- **`to_bytes()`**: Serializa el estado a bytes usando pickle
-- **`from_bytes(bytes)`**: Deserializa el estado desde bytes
+- **`to_bytes()`**: Serializa el estado a bytes usando pickle (excluye locks)
+- **`from_bytes(bytes)`**: Deserializa el estado desde bytes y reconstruye el objeto
 
 ---
 
@@ -141,493 +182,282 @@ while True:
 
 ## Recovery & Persistence - Aggregator
 
-### Estado a Persistir
-- `global_accumulator`: Datos agregados por client_id y tipo de tabla
-- `chunks_to_receive`: Total de chunks esperados por END message
-- `chunks_received_per_client`: Contador de chunks recibidos por aggregator
+### WorkingState: `AggregatorWorkingState`
+Gestiona el estado de agregación y tracking de chunks para cada cliente.
+
+**Componentes principales:**
+- `global_accumulator[client_id]`: Datos agregados (productos/compras/TPV)
+- `chunks_to_receive[client_id][table_type]`: Total esperado de chunks
+- `chunks_received_per_client`: Contador de chunks recibidos
 - `chunks_processed`: Chunks procesados totales
-- `accumulated_chunks`: Chunks acumulados
-- `processed_ids`: Set de message_ids procesados (idempotencia)
-- `end_messages_received`: Flags de END recibidos
+- `processed_ids`: Set para idempotencia (evita procesar duplicados)
+- `end_messages_received[client_id][table_type]`: Flags de END recibidos
 
-### Patrón de Commit
+**Propósito**: Acumular datos agregados y gestionar el protocolo END con buffering de chunks.
 
-#### 1. Receive Callback (con Buffering)
-```python
-def chunk_callback(msg):
-    # [CRASH POINT] SE ROMPE ANTES DEL COMMIT
+### Patrón de Procesamiento
+
+#### Recepción de Mensajes (con Buffering)
+```
+Al recibir mensaje:
+    Si es END:
+        → Marcar END recibido en estado
+        → commit_working_state(estado)            # PersistenceService
+    Si no:
+        → append_chunk_to_buffer(chunk)           # PersistenceService
     
-    if msg.startswith(b"END;"):
-        # END: persistir inmediatamente (sin buffering)
-        end_message = MessageEnd.decode(msg)
-        working_state.mark_end_message_received(client_id, table_type)
-        working_state.set_chunks_to_receive(client_id, table_type, total_expected)
-        _save_state(uuid.uuid4())
-    else:
-        # Datos: agregar a buffer
-        chunk = ProcessBatchReader.from_bytes(msg)
-        persistence.append_chunk_to_buffer(chunk)
-    
-    # Agregar a cola de procesamiento
-    data_chunks.append(msg)
-    
-    # [CRASH POINT] SE ROMPE ANTES DEL ACK
-    # ACK automático por RabbitMQ al retornar del callback
-    # [CRASH POINT] SE ROMPE DESPUÉS DEL ACK
+    Agregar a cola de procesamiento
+    RabbitMQ hace ACK automático
 ```
 
-#### 2. Processing Loop
-```python
-def _handle_data_chunk(raw_msg):
-    # [CRASH POINT] CRASH_BEFORE_PROCESS
-    chunk = ProcessBatchReader.from_bytes(raw_msg)
+**Concepto clave**: Los chunks se acumulan en buffer temporal. Solo los END se persisten inmediatamente para no perder información crítica del protocolo.
+
+#### Procesamiento con Commits Periódicos
+```
+Para cada mensaje en cola:
+    Si ya_procesado(id):
+        → Saltar (idempotencia)
     
-    # 1 & 2. apply(x) + actualizar_estado(x)
-    _apply_and_update_state(chunk)
+    apply(mensaje)  → Agregar a acumulador
+    estado.marcar_procesado(id)
     
-    # [CRASH POINT] CRASH_AFTER_PROCESS_BEFORE_COMMIT
-    
-    # 3. Commit periódico basado en cantidad de chunks
-    if persistence.should_commit_state():
-        _save_state(chunk.message_id())
-        # Buffer se limpia automáticamente en commit_working_state
-    
-    # 4. Si END recibido, enviar stats al Monitor
-    if working_state.is_end_message_received(client_id, table_type):
-        _send_stats_to_monitor(client_id, table_type)
+    Si alcanzó_intervalo_commit:
+        → commit_working_state(estado, id)       # PersistenceService
+        → Limpiar buffer automáticamente
 ```
 
-#### 3. Apply & Update State
-```python
-def _apply_and_update_state(chunk):
-    # 1. Validar table_type (prevenir corrupción de estado)
-    if not _is_valid_table_type(table_type):
-        persistence.clear_processing_commit()
-        return
+**Concepto clave**: Commits periódicos reducen I/O sin sacrificar mucho progreso. El buffer se limpia automáticamente al commitear estado, liberando memoria.
+
+#### Recovery
+```
+Al iniciar:
+    estado ← recover_working_state()             # PersistenceService
     
-    # 2. Check idempotencia
-    if working_state.is_processed(chunk.message_id()):
-        persistence.clear_processing_commit()
-        return
+    chunks_pendientes ← recover_buffered_chunks()  # PersistenceService
+    Para cada chunk en chunks_pendientes:
+        apply(chunk)
+        estado.actualizar(chunk)
+    commit_working_state(estado)                  # PersistenceService
     
-    # 3. Actualizar estado: incrementar chunks recibidos
-    working_state.increment_chunks_received(client_id, table_type, aggregator_id, 1)
-    
-    # 4. apply(x) - Agregar datos
-    if aggregator_type == "PRODUCTS":
-        aggregated_rows = apply_products(chunk)
-        accumulate_products(client_id, aggregated_rows)
-    # ... similar para PURCHASES y TPV
-    
-    # 5. actualizar_estado(x) - Marcar como procesado
-    working_state.increment_chunks_processed(client_id, table_type, aggregator_id, 1)
-    working_state.mark_processed(chunk.message_id())
+    Para cada (cliente, tabla) con END_recibido:
+        publicar_resultados(cliente, tabla)
+        enviar_END(cliente, tabla)
 ```
 
-#### 4. Recovery Logic
-```python
-def handle_processing_recovery():
-    # 1. Estado ya recuperado en _recover_state() durante __init__
+**Concepto clave**: Recovery procesa chunks buffereados que no llegaron a commitearse antes del crash. Luego verifica si hay END pendientes para reenviar resultados (idempotencia garantizada por IDs determinísticos).
+
+#### Envío de Resultados Finales
+```
+Al recibir barrier_forward:
+    # Procesar chunks tardíos (out-of-order)
+    chunks_restantes ← recover_buffered_chunks()  # PersistenceService
+    Para cada chunk:
+        apply(chunk)
+    commit_working_state(estado)                  # PersistenceService
+    limpiar_buffer()
     
-    # 2. Recuperar chunks buffereados
-    buffered_chunks = persistence.recover_buffered_chunks()
-    
-    if buffered_chunks:
-        # 3. Procesar chunks + actualizar estado
-        for chunk in buffered_chunks:
-            _apply_and_update_state(chunk)
-        
-        # 4. Commit working state
-        if buffered_chunks:
-            last_chunk = buffered_chunks[-1]
-            _save_state(last_chunk.message_id())
-    
-    # 5. Reenviar END/Results pendientes (idempotencia por IDs determinísticos)
-    for client_id in working_state.chunks_to_receive.keys():
-        for table_type in working_state.chunks_to_receive[client_id].keys():
-            if working_state.is_end_message_received(client_id, table_type):
-                publish_final_results(client_id, table_type)
-                _send_end_message(client_id, table_type)
+    publicar_resultados_finales()
+    enviar_END_message()
+    eliminar_datos_cliente()
 ```
 
-#### 5. Barrier Forward & END
-```python
-def _send_end_message(client_id, table_type):
-    # CRÍTICO: Procesar chunks buffereados ANTES de publicar
-    # Permite capturar chunks que llegaron después de END (out-of-order)
-    buffered_chunks = persistence.recover_buffered_chunks()
-    if buffered_chunks:
-        for chunk in buffered_chunks:
-            _apply_and_update_state(chunk)
-        _save_state(buffered_chunks[-1].message_id())
-        persistence._clear_chunk_buffer()
-    
-    # Publicar resultados finales
-    publish_final_results(client_id, table_type)
-    
-    # Enviar END con ID determinístico (idempotencia)
-    my_processed = working_state.get_processed_for_aggregator(client_id, table_type, aggregator_id)
-    end_msg = MessageEnd(client_id, send_table_type, my_processed, str(aggregator_id))
-    queue.send(end_msg.encode())
-    
-    # Limpiar datos del cliente
-    delete_client_data(client_id, table_type)
-```
+**Concepto clave**: El buffer captura chunks que llegaron después del END (por delays de red). Se procesan todos antes de publicar para garantizar completitud.
 
 ---
 
 ## Recovery & Persistence - Joiner
 
-### Estado a Persistir (Dos Working States)
-**Main State** (datos del Maximizer):
-- `client_data`: Chunks recibidos del maximizer por client_id
-- `client_chunks`: Lista de chunks por client_id
-- `client_end_messages_received`: Set de clientes con END recibido
-- `finished_senders`: Tracking de senders que finalizaron (multi-input)
-- `expected_chunks_per_client`: Total esperado por cada sender
-- `processed_ids`: Set de message_ids procesados (idempotencia)
-- `client_completed`: Set de clientes ya procesados completamente
-- `pending_end_messages`: Cola de END messages pendientes de envío
-- `client_results`: Resultados del join por client_id
+### WorkingState: `JoinerMainWorkingState` + `JoinerJoinWorkingState`
+El Joiner usa **dos estados separados** debido a sus dos fuentes de datos.
 
-**Join State** (datos del Server - tabla para join):
-- `join_data_by_client`: Datos de join (ej: item_id -> item_name) por client_id
-- `ready_to_join`: Set de clientes listos para join
-- `processed_ids`: Set de message_ids procesados (idempotencia)
+#### Main State (datos del Maximizer)
+**Componentes:**
+- `client_data[client_id]`: Datos recibidos del maximizer
+- `client_chunks[client_id]`: Lista de chunks por cliente
+- `finished_senders[client_id]`: Set de senders que enviaron END
+- `expected_chunks_per_client`: Total esperado de cada sender
+- `processed_ids`: Idempotencia
+- `client_completed`: Clientes totalmente procesados
+- `pending_end_messages`: END messages pendientes de envío
+- `client_results[client_id]`: Resultados del join
 
-### Patrón de Commit
+**Propósito**: Tracking de múltiples senders (aggregators) y gestión de resultados del join.
 
-#### 1. Receive Callbacks
-```python
-# Main Data (Maximizer)
-def callback(msg):
-    if not msg.startswith(b"END;"):
-        chunk = ProcessBatchReader.from_bytes(msg)
-        persistence_main.commit_processing_chunk(chunk)
-    results.append(msg)
+#### Join State (datos del Server - tabla auxiliar)
+**Componentes:**
+- `join_data_by_client[client_id]`: Mapeo para join (ej: item_id → item_name)
+- `ready_to_join`: Set de clientes con datos de join listos
+- `processed_ids`: Idempotencia
 
-# Join Data (Server)
-def callback(msg):
-    if not msg.startswith(b"END;"):
-        chunk = ProcessBatchReader.from_bytes(msg)
-        persistence_join.commit_processing_chunk(chunk)
-    results.append(msg)
+**Propósito**: Almacenar tabla auxiliar necesaria para el join (productos, stores, users).
+
+**Concepto clave**: Dos fuentes de datos independientes requieren dos estados separados para gestionar su persistencia y recovery de forma aislada.
+
+### Patrón de Procesamiento
+
+#### Recepción y Tracking Multi-Sender
+```
+Al recibir datos del maximizer:
+    Si no ya_procesado(id):
+        main_state.guardar(datos)
+        main_state.marcar_procesado(id)
+        commit_working_state(main_state)          # PersistenceService (main)
+    
+    Si tiene_todos_datos Y recibió_END:
+        → Ejecutar join
+
+Al recibir END de un sender:
+    Si sender_ya_reportó(sender_id):
+        → Saltar (idempotencia)
+    
+    main_state.marcar_sender_terminado(sender_id)
+    commit_working_state(main_state)              # PersistenceService (main)
+    
+    Si todos_senders_terminaron:
+        main_state.marcar_end_global()
+        commit_working_state(main_state)          # PersistenceService (main)
+        → Ejecutar join si tiene datos auxiliares
 ```
 
-#### 2. Processing Main Data
-```python
-def _handle_data_chunk(data):
-    # [CRASH POINT] CRASH_BEFORE_PROCESS
-    chunk = ProcessBatchReader.from_bytes(data)
+**Concepto clave**: Multi-sender tracking permite recibir END de múltiples fuentes (shards) de forma independiente. Solo cuando todos terminan se procede al join.
+
+#### Aplicación del Join
+```
+join(cliente):
+    Si cliente_ya_completado:
+        → Saltar (idempotencia)
     
-    with lock:
-        # Idempotencia
-        if working_state_main.is_processed(chunk.message_id()):
-            return
-        
-        # Guardar datos
-        save_data(chunk)
-        
-        # Marcar como procesado
-        working_state_main.add_processed_id(chunk.message_id())
-        
-        # Persistir estado ANTES de verificar readiness
-        _save_state_main(chunk.message_id())
-        
-        # [CRASH POINT] CRASH_AFTER_PROCESS_BEFORE_JOIN_CHECK
+    Para cada chunk del cliente:
+        resultados ← aplicar_join(chunk, datos_auxiliares)
+        main_state.agregar_resultados(resultados)
+    commit_working_state(main_state)              # PersistenceService (main)
     
-    # Verificar si está listo para join
-    if is_ready_to_join_for_client(client_id) and working_state_main.is_end_message_received(client_id):
-        _process_client_if_ready(client_id)
+    publicar_resultados()
+    
+    main_state.marcar_completado(cliente)
+    main_state.agregar_end_pendiente(cliente)
+    commit_working_state(main_state)              # PersistenceService (main)
 ```
 
-#### 3. Processing Join Data
-```python
-def _handle_join_chunk_bytes(data):
-    chunk = ProcessBatchReader.from_bytes(data)
+**Concepto clave**: El join completo se persiste antes de publicar. Si crashea durante publicación, recovery reenvía desde END pendientes.
+
+#### Recovery
+```
+Al iniciar:
+    main_state ← recover_working_state(main)      # PersistenceService (main)
+    join_state ← recover_working_state(join)      # PersistenceService (join)
     
-    with lock:
-        # Idempotencia
-        if working_state_join.is_processed(chunk.message_id()):
-            return
-        
-        # Guardar datos de join
-        save_data_join(chunk)
-        
-        # Marcar como procesado
-        working_state_join.add_processed_id(chunk.message_id())
-        
-        # Persistir estado
-        _save_state_join(chunk.message_id())
+    chunk_main ← recover_last_processing_chunk(main)    # PersistenceService (main)
+    chunk_join ← recover_last_processing_chunk(join)    # PersistenceService (join)
+    Reprocesar chunks si existen
+    
+    Para cada cliente en end_pendientes:
+        enviar_END(cliente)
+    limpiar_pendientes()
+    
+    Para cada cliente con END_global:
+        Si no completado Y tiene_datos_auxiliares:
+            → Ejecutar join
 ```
 
-#### 4. Multi-Sender END Tracking
-```python
-def handle_end_message(end_message):
-    client_id = end_message.client_id()
-    sender_id = end_message.sender_id()
-    count = end_message.total_chunks()
-    
-    with lock:
-        # Verificar si sender ya terminó (idempotencia)
-        if working_state_main.is_sender_finished(client_id, sender_id):
-            return
-        
-        # Marcar sender como terminado
-        working_state_main.mark_sender_finished(client_id, sender_id)
-        working_state_main.add_expected_chunks(client_id, count)
-        
-        # Persistir tras marcar sender
-        _save_state_main(uuid.uuid4())
-        # [CRASH POINT] CRASH_AFTER_END_RECEIVED
-        
-        finished_count = working_state_main.get_finished_senders_count(client_id)
-        
-        # ¿Todos los inputs terminaron?
-        if finished_count >= expected_inputs:
-            working_state_main.mark_end_message_received(client_id)
-            _save_state_main(uuid.uuid4())
-            _process_client_if_ready(client_id)
-```
-
-#### 5. Process Client (Apply Join)
-```python
-def _process_client_if_ready(client_id):
-    # Evitar reprocesar
-    if working_state_main.is_client_completed(client_id):
-        return
-    
-    if not (working_state_main.is_end_message_received(client_id) and is_ready_to_join_for_client(client_id)):
-        return
-    
-    # 1. Apply join
-    apply_for_client(client_id)
-    # [CRASH POINT] CRASH_AFTER_APPLY_BEFORE_PUBLISH
-    
-    # 2. Publish results
-    publish_results(client_id)
-    # [CRASH POINT] CRASH_AFTER_PUBLISH_BEFORE_CLEANUP
-    
-    # 3. Cleanup
-    clean_client_data(client_id)
-    
-    # 4. Marcar completado y agregar END pendiente
-    working_state_main.mark_client_completed(client_id)
-    working_state_main.add_pending_end_message(client_id)
-    
-    # Persistir
-    _save_state_main(uuid.uuid4())
-```
-
-#### 6. Recovery Logic
-```python
-def handle_processing_recovery():
-    # 1. Recuperar estados (main y join)
-    _recover_state()
-    
-    # 2. Recuperar y reprocesar chunks interrumpidos
-    last_chunk_main = persistence_main.recover_last_processing_chunk()
-    if last_chunk_main:
-        _handle_data_chunk(last_chunk_main.serialize())
-    
-    last_chunk_join = persistence_join.recover_last_processing_chunk()
-    if last_chunk_join:
-        _handle_join_chunk_bytes(last_chunk_join.serialize())
-    
-    # 3. Reenviar END messages pendientes
-    pending_end_messages = working_state_main.get_pending_end_messages()
-    if pending_end_messages:
-        for client_id in pending_end_messages:
-            send_end_query_msg(client_id)
-            _send_coordination_messages(client_id)
-        
-        working_state_main.clear_pending_end_messages()
-        persistence_main.commit_working_state(working_state_main.to_bytes(), uuid.uuid4())
-    
-    # 4. Verificar clientes listos después de recovery
-    with lock:
-        for client_id in working_state_main.client_end_messages_received:
-            if not working_state_main.is_client_completed(client_id):
-                if is_ready_to_join_for_client(client_id):
-                    _process_client_if_ready(client_id)
-```
+**Concepto clave**: Recovery verifica tres escenarios: chunks interrumpidos, END pendientes de envío, y joins incompletos. Cada uno se maneja de forma independiente.
 
 ---
 
 ## Recovery & Persistence - Maximizer
 
-### Estado a Persistir
-- `sellings_max`: Máximos de ventas por (item_id, month_year)
-- `profit_max`: Máximos de ganancias por (item_id, month_year)
-- `top3_by_store`: Top 3 clientes por store_id
-- `tpv_results`: TPV acumulado por (store_id, year_half)
-- `finished_senders`: Tracking de senders que finalizaron (multi-input)
-- `expected_chunks_per_client`: Total esperado por cada sender
-- `processed_ids`: Set de message_ids procesados (idempotencia)
-- `client_end_processed`: Set de clientes ya procesados completamente
-- `results_sent`: Tracking de resultados ya enviados (idempotencia)
-- `end_sent`: Tracking de END messages ya enviados (idempotencia)
+### WorkingState: `MaximizerWorkingState`
+Gestiona el cálculo de máximos/top3/TPV y tracking de múltiples senders (aggregators).
 
-### Patrón de Commit
+**Componentes principales:**
+- `sellings_max[client_id][(item_id, month_year)]`: Máximo de ventas
+- `profit_max[client_id][(item_id, month_year)]`: Máximo de ganancias
+- `top3_by_store[client_id][store_id]`: Top 3 clientes por tienda
+- `tpv_results[client_id][(store_id, year_half)]`: TPV acumulado
+- `finished_senders[client_id]`: Set de senders que enviaron END
+- `expected_chunks_per_client`: Total esperado por sender
+- `processed_ids`: Idempotencia
+- `client_end_processed`: Clientes completados
+- `results_sent`: Tracking de resultados enviados (idempotencia)
+- `end_sent`: Tracking de END messages enviados (idempotencia)
 
-#### 1. Receive Callback
-```python
-def callback(msg):
-    if msg.startswith(b"END;"):
-        _handle_end_message(msg)
-    else:
-        _handle_data_chunk(msg)
+**Propósito**: Calcular agregaciones globales de múltiples shards.
+
+### Patrón de Procesamiento
+
+#### Procesamiento con Persistencia Inmediata
+```
+Al recibir chunk:
+    Si ya_procesado(id):
+        → Saltar (idempotencia)
+    
+    commit_processing_chunk(chunk)                # PersistenceService
+    
+    aplicar_maximización(chunk)  # Actualizar máximos
+    estado.marcar_procesado(id)
+    commit_working_state(estado)                  # PersistenceService
+    
+    clear_processing_commit()                     # PersistenceService
 ```
 
-#### 2. Processing Data Chunks
-```python
-def _handle_data_chunk(data):
-    # [CRASH POINT] CRASH_BEFORE_PROCESS
-    chunk = ProcessBatchReader.from_bytes(data)
+**Concepto clave**: Los maximizers persisten estado inmediatamente después de cada chunk (sin buffering) porque el costo de reprocesar chunks es bajo comparado con su valor agregado.
+
+#### Multi-Sender END y Finalización
+```
+Al recibir END de sender:
+    Si sender_ya_reportó(sender_id):
+        → Saltar (idempotencia)
     
-    # Idempotencia
-    if working_state.is_processed(chunk.message_id()):
-        persistence.clear_processing_commit()
-        return
+    estado.marcar_sender_terminado(sender_id)
+    commit_working_state(estado)                  # PersistenceService
     
-    # Commit para recovery
-    persistence.commit_processing_chunk(chunk)
+    Si todos_senders_terminaron:
+        → Finalizar cliente
+
+Finalizar cliente:
+    Si cliente_ya_finalizado:
+        → Saltar (idempotencia de finalización)
     
-    # Validar table_type
-    if not _is_valid_table_type(table_type):
-        persistence.clear_processing_commit()
-        return
+    publicar_resultados()
+    enviar_END_con_idempotencia()
     
-    # Apply (actualizar máximos/top3/tpv)
-    apply(client_id, chunk)
-    
-    # Marcar como procesado + persistir inmediatamente
-    working_state.mark_processed(chunk.message_id())
-    _save_state(chunk.message_id())
-    
-    # [CRASH POINT] CRASH_AFTER_PROCESS_BEFORE_COMMIT
-    
-    # Limpiar commit de procesamiento
-    persistence.clear_processing_commit()
+    Si resultados_publicados Y end_enviado:
+        estado.marcar_finalizado(cliente)
+        commit_working_state(estado)              # PersistenceService
+        eliminar_datos_cliente()
 ```
 
-#### 3. Multi-Sender END Tracking
-```python
-def _handle_end_message(raw_message):
-    end_message = MessageEnd.decode(raw_message)
-    client_id = end_message.client_id()
-    sender_id = end_message.sender_id()
-    count = end_message.total_chunks()
+**Concepto clave**: La finalización requiere verificar que AMBOS (resultados + END) fueron enviados antes de marcar como completado. Esto previene reenvíos parciales en recovery.
+
+#### Envío Idempotente de END
+```
+enviar_END(cliente):
+    label ← generar_label_único()
     
-    with lock:
-        # Idempotencia de sender
-        if working_state.is_sender_finished(client_id, sender_id):
-            return
-        
-        # Marcar sender terminado
-        working_state.mark_sender_finished(client_id, sender_id)
-        working_state.add_expected_chunks(client_id, count)
-        
-        finished_count = working_state.get_finished_senders_count(client_id)
-        
-        # ¿Todos los inputs terminaron?
-        if finished_count >= expected_inputs:
-            # Para TPV absolute: verificar shards esperados
-            if maximizer_type == "TPV" and finished_count >= expected_shards:
-                process_client_end(client_id, table_type)
-            else:
-                process_client_end(client_id, table_type)
+    Si estado.end_enviado(cliente, label):
+        → Saltar (ya enviado)
     
-    # Persistir END tracking
-    _save_state(uuid.uuid4())
+    enviar_mensaje(END)
+    enviar_coordinación(END, STATS)
+    
+    estado.marcar_end_enviado(cliente, label)
+    commit_working_state(estado)                  # PersistenceService
 ```
 
-#### 4. Process Client End
-```python
-def process_client_end(client_id, table_type):
-    # Evitar reprocesar
-    if working_state.is_client_end_processed(client_id):
-        return
+**Concepto clave**: Labels únicos por tipo de END permiten idempotencia. El estado se persiste solo después del envío exitoso.
+
+#### Recovery con Reanudación
+```
+Al iniciar:
+    estado ← recover_working_state()              # PersistenceService
     
-    # Validar table_type
-    expected_table = _expected_table_type()
-    if table_type != expected_table:
-        return
+    chunk ← recover_last_processing_chunk()       # PersistenceService
+    Si chunk:
+        procesar(chunk)  # Reanudar procesamiento
     
-    chunks_sent = 0
-    sender_id = shard_slug if shard_slug else maximizer_range
-    
-    # Publicar resultados según tipo
-    if maximizer_type == "MAX":
-        chunks_sent = publish_absolute_max_results(client_id)
-        _send_end_message(client_id, TableType.TRANSACTION_ITEMS, "joiner", chunks_sent, sender_id)
-    elif maximizer_type == "TOP3":
-        chunks_sent = publish_absolute_top3_results(client_id)
-        _send_end_message(client_id, TableType.PURCHASES_PER_USER_STORE, "joiner", chunks_sent, sender_id)
-    elif maximizer_type == "TPV":
-        chunks_sent = publish_tpv_results(client_id)
-        _send_end_message(client_id, TableType.TPV, "joiner", chunks_sent, sender_id)
-    
-    # Marcar como completado solo si resultados y END fueron enviados
-    label_end = f"end-{stage}"
-    if working_state.results_already_sent(client_id, _results_label()) and working_state.end_already_sent(client_id, label_end):
-        working_state.mark_client_end_processed(client_id)
-        _save_state(uuid.uuid4())
-        delete_client_data(client_id)
+    Para cada cliente en estado:
+        Si no finalizado Y todos_senders_terminaron:
+            → Reanudar finalización
 ```
 
-#### 5. Send END with Idempotency
-```python
-def _send_end_message(client_id, table_type, target, count, sender_id):
-    label = f"end-{stage}"
-    
-    # Idempotencia: verificar si ya se envió
-    if working_state.end_already_sent(client_id, label):
-        return
-    
-    # [CRASH POINT] CRASH_BEFORE_SEND_END
-    end_msg = MessageEnd(client_id, table_type, count, sender_id)
-    data_sender.send(end_msg.encode())
-    # [CRASH POINT] CRASH_AFTER_SEND_END
-    
-    # Publicar coordinación END y STATS
-    payload = {
-        "type": MSG_WORKER_END,
-        "id": sender_id,
-        "client_id": client_id,
-        "stage": stage,
-        "expected": count,
-        "chunks": count,
-    }
-    middleware_coordination.send(json.dumps(payload).encode("utf-8"), routing_key=rk)
-    
-    # Marcar como enviado
-    working_state.mark_end_sent(client_id, label)
-    _save_state(uuid.uuid4())
-```
-
-#### 6. Recovery Logic
-```python
-def run():
-    # Recuperar último chunk interrumpido
-    last_chunk = persistence.recover_last_processing_chunk()
-    if last_chunk:
-        _handle_data_chunk(last_chunk.serialize())
-    
-    # _resume_pending_finalization() ya se ejecutó en __init__
-    
-    # Continuar con loop normal
-    while __running:
-        # Consumir mensajes...
-        pass
-
-def _resume_pending_finalization():
-    """Llamado después de _recover_state() en __init__"""
-    # Si hay clientes con END recibido pero no finalizados, reanudar
-    for client_id in working_state.get_all_client_ids():
-        if not working_state.is_client_end_processed(client_id):
-            finished_count = working_state.get_finished_senders_count(client_id)
-            if finished_count >= expected_inputs:
-                # Reanudar proceso de finalización
-                process_client_end(client_id, _expected_table_type())
-```
+**Concepto clave**: Recovery es simple: reprocesar último chunk interrumpido y reanudar finalizaciones pendientes. El estado persistido tiene toda la información necesaria.
